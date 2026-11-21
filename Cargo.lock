@@ -87,6 +87,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clio-core"
+version = "0.1.0"
+dependencies = [
+ "clio-spec",
+ "proptest",
+ "thiserror",
+]
+
+[[package]]
 name = "clio-spec"
 version = "0.1.0"
 dependencies = [

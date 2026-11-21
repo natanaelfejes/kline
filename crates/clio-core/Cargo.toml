@@ -1,0 +1,19 @@
+[package]
+name = "clio-core"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+description = "Sans-IO K-line protocol engine (5-baud/fast init, ISO8/KWP2000 framing) and safety policy. no_std + alloc."
+
+[features]
+default = ["std"]
+std = ["thiserror/std"]
+# EcuDef/KLine -> LinkConfig mapping. Pulls clio-spec (std only).
+spec = ["std", "dep:clio-spec"]
+
+[dependencies]
+thiserror = { version = "2.0.21", default-features = false }
+clio-spec = { path = "../clio-spec", optional = true }
+
+[dev-dependencies]
+proptest = "1.12.0"
