@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="windows-1252"?>
+<!-- Hand-written test fixture for the vehicle addressing parser. -->
+<Functions xmlns="DiagnosticAddressingSchema.xml">
+	<Tool Address="241">
+		<XId>2000</XId>
+	</Tool>
+	<ProtocolList>
+		<Protocol Code="1" InitMode="0" MultiPoint="0" Name="ISO8"><Search/></Protocol>
+		<Protocol Code="5" InitMode="2" MultiPoint="1" Name="KWP2000 FastInit MultiPoint"></Protocol>
+	</ProtocolList>
+	<Function Address="122" Name="ECM">
+		<Name xml:lang="en">Engine Control Module</Name>
+		<Name xml:lang="fr">Injection électronique</Name>
+		<XId>2016</XId>
+		<RId>2024</RId>
+		<ProtocolList>
+			<Protocol Code="1" InitMode="0" MultiPoint="0" Name="ISO8"><Search/></Protocol>
+		</ProtocolList>
+	</Function>
+	<Function Address="38" Name="UCH">
+		<Name xml:lang="en">BCM</Name>
+		<ISO8>174</ISO8>
+	</Function>
+</Functions>

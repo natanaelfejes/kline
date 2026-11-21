@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="windows-1252"?>
+<!-- Hand-written test fixture: windows-1252 encoded (0xE9 = e acute, 0xB0 = degree sign). -->
+<xml xmlns:ddt="http://www-diag.renault.com/2002/ECU">
+<ddt:Target Name="Démo 1252" xmlns="http://www-diag.renault.com/2002/ECU">
+<Function Name="Unité" Address="38"/>
+<K BaudRate="10417">
+<ISO8>
+<L/>
+<KW1 Value="194"/>
+<KW2 Value="133" Timeout="500"/>
+<FirstRequest Delay="20"/>
+</ISO8>
+</K>
+<Datas>
+<Data Name="température"><Bits><Scaled Unit="°C" Step=" .625" Offset="-40" Format="#0.00"/></Bits></Data>
+</Datas>
+<Requests Endian="Big">
+<Request Name="Lecture état">
+<Sent><SentBytes>3351</SentBytes></Sent>
+<Received MinBytes="3"><DataItem Name="température" Ref="1" FirstByte="3"/></Received>
+</Request>
+</Requests>
+</ddt:Target>
+</xml>
