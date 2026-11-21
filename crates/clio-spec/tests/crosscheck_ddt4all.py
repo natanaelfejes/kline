@@ -193,7 +193,7 @@ def main():
         sys.exit("need --ddt4all-src or DDT4ALL_SRC")
 
     subprocess.run(["cargo", "build", "-q", "-p", "clio-spec", "--example", "dump"], check=True)
-    dump = os.path.join("target", "debug", "examples", "dump")
+    dump = os.path.join(os.environ.get("CARGO_TARGET_DIR", "target"), "debug", "examples", "dump")
     EcuFile, tmp = load_ddt4all(a.ddt4all_src)
     failures = 0
     compared = 0

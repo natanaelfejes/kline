@@ -9,7 +9,12 @@ use common::ddt_ecu;
 use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
 
-const FILES: &[&str] = &["Safir_1.xml", "Safir_2.xml", "BMT_X65_ph1_p.xml"];
+const FILES: &[&str] = &[
+    "Safir_1.xml",
+    "Safir_2.xml",
+    "BMT_X65_ph1_p.xml",
+    "SIRIUS32___EMS3132___Soft_RE1_maj.xml",
+];
 
 fn round_trips(d: &DataDef, raw: u64) -> Result<(), TestCaseError> {
     let raw = Raw::Int(raw);

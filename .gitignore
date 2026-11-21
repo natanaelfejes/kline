@@ -1,4 +1,4 @@
 target/
-ddt-xml/
+ddt-xml
 spec-out/
 *.jsonl
