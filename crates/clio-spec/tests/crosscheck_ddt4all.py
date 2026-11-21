@@ -16,7 +16,14 @@ What it does:
      display strings (recorded as comments in that test).
   4. FIXTURE: decodes the frame of tests/fixture.rs on our hand-written fixture.
   5. RANDOM: for every request with received items, decodes N seeded random frames (full length
-     and truncated) with both decoders and compares every item's display string exactly.
+     and truncated) with both decoders and compares, for every item:
+       - the display string, exactly;
+       - the raw bytes: ddt4all's getHexValue against our `raw` (int or hex bytes);
+       - the numeric value of scaled items: our `value` against ddt4all's unrounded result. ddt4all
+         only returns the display string, so the script recomputes its formula
+         `(float(v) * float(step) + float(offset)) / float(divideby)` from its own getHexValue and
+         parsed fields (signed via its hex8/hex16_tosigned); if that fails it falls back to
+         float(display). Compared with ==, no tolerance.
   6. Prints ddt4all's little-endian setValue result for a 16-bit item (documented divergence).
 
 Exit status 0 only if every comparison matched.
@@ -111,6 +118,70 @@ def theirs(ecu, request, frame):
         return ecu.requests[request].get_values_from_stream(frame.hex().upper())
 
 
+def ref_raw_and_number(ecu, request, name, frame):
+    """(raw hex or None, unrounded number or None) as ddt4all computes them."""
+    from ddt4all.core.ecu.utils import hex8_tosigned, hex16_tosigned
+    d = ecu.data[name]
+    di = ecu.requests[request].dataitems[name]
+    hexval = d.getHexValue(frame.hex().upper(), di, ecu.endianness)
+    if hexval is None or d.bytesascii or not d.scaled:
+        return hexval, None
+    try:
+        v = int("0x" + hexval, 16)
+        if d.signed and d.bytescount == 1:
+            v = hex8_tosigned(v)
+        elif d.signed and d.bytescount == 2:
+            v = hex16_tosigned(v)
+        if float(d.divideby) == 0:
+            return hexval, None
+        return hexval, (float(v) * float(d.step) + float(d.offset)) / float(d.divideby)
+    except Exception:  # fall back to the rounded display string
+        disp = d.getDisplayValue(frame.hex().upper(), di, ecu.endianness)
+        return hexval, None if disp is None else float(disp)
+
+
+class Stats:
+    def __init__(self):
+        self.n = {"display": 0, "raw": 0, "number": 0}
+        self.bad = {"display": 0, "raw": 0, "number": 0}
+
+    def check(self, kind, ok, msg):
+        self.n[kind] += 1
+        if not ok:
+            self.bad[kind] += 1
+            if sum(self.bad.values()) < 30:
+                print(f"  BAD {kind} {msg}")
+        return ok
+
+    def failures(self):
+        return sum(self.bad.values())
+
+
+def compare_items(stats, ecu, request, frame, ref_display, our_items, label):
+    """Compare display, raw and numeric value of every item ddt4all decoded."""
+    mine = {i["name"]: i for i in our_items}
+    for name, disp in ref_display.items():
+        item = mine.get(name, {})
+        where = f"{label} {request!r} {name!r} frame={frame.hex()}"
+        stats.check("display", item.get("display") == disp,
+                    f"{where} ddt4all={disp!r} ours={item.get('display')!r}")
+        ref_hex, ref_num = ref_raw_and_number(ecu, request, name, frame)
+        raw = item.get("raw")
+        if ref_hex is None or raw is None:
+            ok = ref_hex is None and raw is None
+        elif isinstance(raw, int):
+            ok = raw == int(ref_hex, 16)
+        else:
+            ok = raw.upper() == ref_hex.upper()
+        stats.check("raw", ok, f"{where} ddt4all={ref_hex!r} ours={raw!r}")
+        if ecu.data[name].scaled and not ecu.data[name].bytesascii:
+            v = item.get("value")
+            got = v["value"] if v and v.get("kind") == "number" else None
+            stats.check("number", got == ref_num, f"{where} ddt4all={ref_num!r} ours={got!r}")
+    if set(mine) != set(ref_display):
+        stats.check("display", False, f"item set {label} {request!r}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ddt4all-src", default=os.environ.get("DDT4ALL_SRC"), required=False)
@@ -126,6 +197,8 @@ def main():
     EcuFile, tmp = load_ddt4all(a.ddt4all_src)
     failures = 0
     compared = 0
+    stats = Stats()  # GOLDEN + FIXTURE
+    random_stats = Stats()
     try:
         ecus = {}
         for f in FILES:
@@ -167,13 +240,13 @@ def main():
             if f not in ecus:
                 continue
             ref = theirs(ecus[f], req, frame)
-            got = {i["name"]: i["display"] for i in ours(dump, os.path.join(a.xml_dir, f), req,
-                                                         [frame])[0]["items"]}
+            items = ours(dump, os.path.join(a.xml_dir, f), req, [frame])[0]["items"]
+            got = {i["name"]: i["display"] for i in items}
             print(f"  {f} {req!r} frame={frame.hex().upper()}")
             for name in ref:
                 ok = ref[name] == got.get(name)
-                failures += not ok
                 print(f"    {'OK ' if ok else 'BAD'} {name!r}: ddt4all={ref[name]!r} ours={got.get(name)!r}")
+            compare_items(stats, ecus[f], req, frame, ref, items, f)
 
         print("\nFIXTURE (tests/fixtures/minimal_ecu.xml, frame of tests/fixture.rs)")
         fx = os.path.join("crates", "clio-spec", "tests", "fixtures", "minimal_ecu.xml")
@@ -181,11 +254,12 @@ def main():
         frame = bytes([0x61, 0x01, 0xB6, 0x34, 0x12, 0x12, 0x34, 0xF6, 0xFE, 0xFF, 0x02,
                        0xAB, 0xCD, ord("E"), ord("7"), ord("J"), 0xFF, 0x01])
         ref = theirs(fecu, "Read Block", frame)
-        got = {i["name"]: i["display"] for i in ours(dump, fx, "Read Block", [frame])[0]["items"]}
+        items = ours(dump, fx, "Read Block", [frame])[0]["items"]
+        got = {i["name"]: i["display"] for i in items}
         for name in ref:
             ok = ref[name] == got.get(name)
-            failures += not ok
             print(f"    {'OK ' if ok else 'BAD'} {name!r}: ddt4all={ref[name]!r} ours={got.get(name)!r}")
+        compare_items(stats, fecu, "Read Block", frame, ref, items, "fixture")
         ecus["fixture"] = fecu
         paths = {"fixture": fx}
 
@@ -204,18 +278,9 @@ def main():
                 got = ours(dump, path, rname, frames)
                 for frame, g in zip(frames, got):
                     ref = theirs(ecu, rname, frame)
-                    mine = {i["name"]: i["display"] for i in g["items"]}
-                    for name, v in ref.items():
-                        compared += 1
-                        file_items += 1
-                        if mine.get(name) != v:
-                            failures += 1
-                            if failures < 30:
-                                print(f"  BAD {f} {rname!r} {name!r} frame={frame.hex()} "
-                                      f"ddt4all={v!r} ours={mine.get(name)!r}")
-                    if set(mine) != set(ref):
-                        failures += 1
-                        print(f"  BAD item set {f} {rname!r}")
+                    compared += len(ref)
+                    file_items += len(ref)
+                    compare_items(random_stats, ecu, rname, frame, ref, g["items"], f)
             print(f"  {f}: {file_items} item decodes compared")
 
         print("\nLITTLE-ENDIAN setValue (ddt4all), 16-bit value 0x1234 at FirstByte 1:")
@@ -229,7 +294,11 @@ def main():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-    print(f"\n{compared} random item decodes compared, {failures} mismatches")
+    failures += stats.failures() + random_stats.failures()
+    for label, st in (("golden+fixture", stats), ("random", random_stats)):
+        print(f"{label}: " + ", ".join(f"{k} {st.n[k]} compared / {st.bad[k]} mismatches"
+                                       for k in st.n))
+    print(f"\n{compared} random item decodes compared, {failures} mismatches in total")
     sys.exit(1 if failures else 0)
 
 
