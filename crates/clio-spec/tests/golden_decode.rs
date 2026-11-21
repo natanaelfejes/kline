@@ -24,7 +24,7 @@
 
 mod common;
 
-use clio_spec::Raw;
+use clio_spec::{Raw, SpecError};
 use common::{ddt_ecu, display_of, number_of, raw_of};
 
 fn close(a: f64, b: f64) -> bool {
@@ -52,7 +52,7 @@ fn safir2_p2_ctrl_entrees() {
     f[20] = 160; // byte 21: tension batterie
     f[21] = 1; // byte 22: vitesse du vehicule (a List: valid flag)
     f[24] = 10; // byte 25: depression altimetrique
-    let items = req.decode(&ecu, &f).unwrap();
+    let items = req.decode_checked(&ecu, &f).unwrap();
     assert_eq!(items.len(), 39);
 
     // coolant: 200 * 0.625 - 40 = 85.0 C, Format #0.00
@@ -151,7 +151,7 @@ fn safir2_p3_ctrl_sorties() {
     f[24] = 0xE8;
     f[25] = 120; // byte 26: avance
     f[26] = 128; // byte 27: facteur richesse
-    let items = req.decode(&ecu, &f).unwrap();
+    let items = req.decode_checked(&ecu, &f).unwrap();
     assert_eq!(items.len(), 19);
     // injection time: 1000 * 4 / 1000 = 4.0 ms (16 bit x 4 us)
     assert!(close(number_of(&items, "temps injection réel"), 4.0));
@@ -181,8 +181,13 @@ fn safir2_p3_ctrl_sorties() {
         Some("128")
     );
 
-    // A truncated frame yields None for the items beyond it, like ddt4all.
-    let short = req.decode(&ecu, &f[..23]).unwrap();
+    // A truncated frame is rejected by the checked decode (MinBytes 29)...
+    assert!(matches!(
+        req.decode_checked(&ecu, &f[..23]),
+        Err(SpecError::TooShort { min: 29, len: 23 })
+    ));
+    // ...and the unchecked one yields None for the items beyond it, like ddt4all.
+    let short = req.decode_unchecked(&ecu, &f[..23]).unwrap();
     assert_eq!(display_of(&short, "temps injection réel"), None);
     assert_eq!(raw_of(&short, "temps injection réel"), None);
     assert_eq!(display_of(&short, rco).as_deref(), Some("-0.06"));
@@ -198,7 +203,7 @@ fn bmt_etats_tir() {
     // byte 3 = 1000_0101: DCODCOND (@0, MSB) = 1, TIR RF OK (@5) = 1, TIR RF VAL (@6) = 0,
     // TIR RF RECU (@7, LSB) = 1. byte 4 = 0000_0010: LO (@6) = 1. byte 5: CODAPV (2 bits @6) = 3.
     let f = [0x61, 0xA3, 0x85, 0x02, 0x03, 0x00];
-    let items = req.decode(&ecu, &f).unwrap();
+    let items = req.decode_checked(&ecu, &f).unwrap();
     assert_eq!(items.len(), 13);
     for (name, want) in [
         ("DCODCOND", "1"),
@@ -216,4 +221,50 @@ fn bmt_etats_tir() {
         assert_eq!(display_of(&items, name).as_deref(), Some(want), "{name}");
     }
     assert_eq!(raw_of(&items, "CODAPV"), Some(Raw::Int(3)));
+}
+
+#[test]
+fn checked_decode_rejects_invalid_responses() {
+    let Some(ecu) = ddt_ecu("BMT_X65_ph1_p.xml") else {
+        return;
+    };
+    let req = ecu.request("ETATS TIR").unwrap(); // 21 A3, MinBytes 6
+    let ok = [0x61, 0xA3, 0x85, 0x02, 0x03, 0x00];
+    // ISO 14230 NRC 0x12 subFunctionNotSupported-invalidFormat.
+    assert!(matches!(
+        req.decode_checked(&ecu, &[0x7F, 0x21, 0x12]),
+        Err(SpecError::NegativeResponse {
+            sid: 0x21,
+            nrc: 0x12
+        })
+    ));
+    // The answer to a different local identifier (21 A4).
+    let mut other = ok;
+    other[1] = 0xA4;
+    assert!(matches!(
+        req.decode_checked(&ecu, &other),
+        Err(SpecError::ReplyMismatch {
+            position: 2,
+            expected: 0xA3,
+            got: 0xA4
+        })
+    ));
+    // The answer to a different service.
+    let mut other = ok;
+    other[0] = 0x73;
+    assert!(matches!(
+        req.decode_checked(&ecu, &other),
+        Err(SpecError::UnexpectedSid {
+            expected: 0x61,
+            got: 0x73
+        })
+    ));
+    assert!(matches!(
+        req.decode_checked(&ecu, &ok[..5]),
+        Err(SpecError::TooShort { min: 6, len: 5 })
+    ));
+    // Format="00" item: the raw integer is available for the caller to format.
+    let items = req.decode_checked(&ecu, &ok).unwrap();
+    let codapv = items.iter().find(|i| i.name == "CODAPV").unwrap();
+    assert_eq!(codapv.raw_int(), Some(3));
 }

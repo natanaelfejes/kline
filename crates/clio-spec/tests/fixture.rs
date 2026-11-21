@@ -5,7 +5,9 @@
 
 mod common;
 
-use clio_spec::{Addressing, DataItem, EcuDef, Endian, HexBytes, KProtocol, Raw, SpecError, Value};
+use clio_spec::{
+    Addressing, DataItem, EcuDef, Endian, HexBytes, KProtocol, ParseWarning, Raw, SpecError, Value,
+};
 use common::{display_of, fixture, number_of, raw_of};
 
 fn ecu() -> EcuDef {
@@ -122,7 +124,7 @@ fn read_block_decodes() {
     let items = e
         .request("Read Block")
         .unwrap()
-        .decode(&e, &READ_BLOCK_FRAME)
+        .decode_checked(&e, &READ_BLOCK_FRAME)
         .unwrap();
     let d = |n| display_of(&items, n);
     // Big endian: BitOffset counts from the MSB.
@@ -177,7 +179,7 @@ fn short_frame_gives_none_per_item() {
     let items = e
         .request("Read Block")
         .unwrap()
-        .decode(&e, &READ_BLOCK_FRAME[..5])
+        .decode_unchecked(&e, &READ_BLOCK_FRAME[..5])
         .unwrap();
     assert_eq!(display_of(&items, "word le").as_deref(), Some("2320")); // bytes 4-5 present
     assert_eq!(display_of(&items, "word be"), None);
@@ -325,7 +327,7 @@ fn json_export() {
     let items = e
         .request("Read Block")
         .unwrap()
-        .decode(&e, &READ_BLOCK_FRAME)
+        .decode_checked(&e, &READ_BLOCK_FRAME)
         .unwrap();
     let j = serde_json::to_value(&items).unwrap();
     assert_eq!(j[4]["raw"], 0x1234);
@@ -343,7 +345,7 @@ fn windows_1252_fixture() {
     assert_eq!(k.protocol(), KProtocol::Iso8);
     assert_eq!(k.key_words(), Some((194, 133)));
     let r = e.request("Lecture état").unwrap();
-    let items = r.decode(&e, &[0x73, 0x51, 200]).unwrap();
+    let items = r.decode_checked(&e, &[0x73, 0x51, 200]).unwrap();
     assert_eq!(items[0].display.as_deref(), Some("85.00"));
     assert_eq!(items[0].unit.as_deref(), Some("°C"));
     // Exact binary ties round half to even, like Python '%.2f':
@@ -411,4 +413,203 @@ fn rejects_malformed_input() {
     let e = EcuDef::from_xml_bytes(minimal).unwrap();
     assert!(e.k.is_none() && e.requests.is_empty() && e.datas.is_empty());
     assert_eq!(e.endian, Endian::Big);
+}
+
+fn target(body: &str) -> Vec<u8> {
+    format!(r#"<Target xmlns="http://www-diag.renault.com/2002/ECU" Name="t">{body}</Target>"#)
+        .into_bytes()
+}
+
+#[test]
+fn checked_decode_rejects_bad_responses() {
+    let e = ecu();
+    let rb = e.request("Read Block").unwrap(); // 21 01, MinBytes 18, first item at byte 3
+    let check = |resp: &[u8]| rb.decode_checked(&e, resp);
+    assert_eq!(check(&READ_BLOCK_FRAME).unwrap().len(), 13);
+    assert!(matches!(
+        check(&[0x7F, 0x21, 0x12]),
+        Err(SpecError::NegativeResponse {
+            sid: 0x21,
+            nrc: 0x12
+        })
+    ));
+    assert!(matches!(
+        check(&[0x7F, 0x21]),
+        Err(SpecError::TooShort { min: 3, len: 2 })
+    ));
+    assert!(matches!(
+        check(&[]),
+        Err(SpecError::TooShort { min: 18, len: 0 })
+    ));
+    let mut wrong_sid = READ_BLOCK_FRAME;
+    wrong_sid[0] = 0x62;
+    assert!(matches!(
+        check(&wrong_sid),
+        Err(SpecError::UnexpectedSid {
+            expected: 0x61,
+            got: 0x62
+        })
+    ));
+    assert!(matches!(
+        check(&READ_BLOCK_FRAME[..17]),
+        Err(SpecError::TooShort { min: 18, len: 17 })
+    ));
+    let mut wrong_echo = READ_BLOCK_FRAME;
+    wrong_echo[1] = 0x05;
+    assert!(matches!(
+        check(&wrong_echo),
+        Err(SpecError::ReplyMismatch {
+            position: 2,
+            expected: 0x01,
+            got: 0x05
+        })
+    ));
+    // Against the frame actually sent, the echo of 21 05 is right.
+    assert_eq!(
+        rb.decode_checked_against(&e, &[0x21, 0x05], &wrong_echo)
+            .unwrap()
+            .len(),
+        13
+    );
+    // Requests without received items: SID and MinBytes only.
+    let sm = e.request("Set Mode").unwrap();
+    assert!(sm.decode_checked(&e, &[0x7B, 0x02]).unwrap().is_empty());
+    assert!(matches!(
+        sm.decode_checked(&e, &[0x7B]),
+        Err(SpecError::TooShort { min: 2, len: 1 })
+    ));
+    // A SID without a positive response.
+    let ff = EcuDef::from_xml_bytes(&target(
+        "<Requests><Request Name=\"r\"><Sent><SentBytes>FF00</SentBytes></Sent></Request></Requests>",
+    ))
+    .unwrap();
+    assert!(matches!(
+        ff.requests[0].decode_checked(&ff, &[0x3F]),
+        Err(SpecError::NoPositiveSid { .. })
+    ));
+}
+
+#[test]
+fn missing_first_byte_is_an_error() {
+    let xml = target(
+        r#"<Datas><Data Name="d"><Bits count="8"/></Data></Datas><Requests><Request Name="r"><Sent><SentBytes>2101</SentBytes></Sent><Received MinBytes="3"><DataItem Name="d" BitOffset="0"/></Received></Request></Requests>"#,
+    );
+    assert!(matches!(
+        EcuDef::from_xml_bytes(&xml),
+        Err(SpecError::MissingFirstByte { item }) if item == "d"
+    ));
+}
+
+#[test]
+fn misspelled_attribute_warns() {
+    let xml = target(
+        r#"<Datas><Data Name="speed"><Bits count="8"><Scaled Stepp="2" Unit="km/h"/></Bits></Data></Datas>"#,
+    );
+    let (e, report) = EcuDef::from_xml_bytes_with_report(&xml).unwrap();
+    // The misspelled Step falls back to the default...
+    assert_eq!(e.data("speed").unwrap().scaled.as_ref().unwrap().step, 1.0);
+    // ...and the report says so.
+    assert_eq!(
+        report.warnings,
+        [ParseWarning::UnknownAttribute {
+            path: r#"Target[@Name="t"]/Datas/Data[@Name="speed"]/Bits/Scaled"#.into(),
+            name: "Stepp".into()
+        }]
+    );
+    // An unknown element is reported once, not its subtree.
+    let xml = target(r#"<Datas><Data Name="x"><Bitz count="8"><Scaled/></Bitz></Data></Datas>"#);
+    let (_, report) = EcuDef::from_xml_bytes_with_report(&xml).unwrap();
+    assert_eq!(
+        report.warnings,
+        [ParseWarning::UnknownElement {
+            path: r#"Target[@Name="t"]/Datas/Data[@Name="x"]/Bitz"#.into()
+        }]
+    );
+    // Our hand-written fixture uses nothing the parser ignores.
+    let (_, report) = EcuDef::from_xml_bytes_with_report(&fixture("minimal_ecu.xml")).unwrap();
+    assert_eq!(report.warnings, []);
+}
+
+#[test]
+fn encode_exact_rejects_off_grid() {
+    let e = ecu();
+    let sp = e.data("setpoint").unwrap(); // 16 bit, Step 2
+    assert_eq!(
+        sp.encode_exact(&Value::Number(1502.0)).unwrap(),
+        Raw::Int(751)
+    );
+    match sp.encode_exact(&Value::Number(1503.0)) {
+        Err(SpecError::OffGrid {
+            data,
+            value,
+            nearest,
+        }) => assert_eq!(
+            (data.as_str(), value, nearest),
+            ("setpoint", 1503.0, 1504.0)
+        ),
+        other => panic!("expected OffGrid, got {other:?}"),
+    }
+    // encode keeps rounding.
+    assert_eq!(sp.encode(&Value::Number(1503.0)).unwrap(), Raw::Int(752));
+    // Non-number values are passed through to encode.
+    let mode = e.data("mode").unwrap();
+    assert_eq!(
+        mode.encode_exact(&Value::Text("one".into())).unwrap(),
+        Raw::Int(1)
+    );
+    // Fractional steps: 0.5 grid with offset -10.
+    let wle = e.data("word le").unwrap();
+    assert_eq!(
+        wle.encode_exact(&Value::Number(2320.0)).unwrap(),
+        Raw::Int(0x1234)
+    );
+    assert!(matches!(
+        wle.encode_exact(&Value::Number(2320.25)),
+        Err(SpecError::OffGrid { .. })
+    ));
+}
+
+#[test]
+fn little_endian_insert_is_true_inverse_not_ddt4all_set_value() {
+    let e = ecu();
+    let word = e.data("word le").unwrap(); // 16 bit
+    let le = DataItem {
+        name: "word le".into(),
+        first_byte: 1,
+        bit_offset: 0,
+        reference: false,
+        endian: Some(Endian::Little),
+    };
+    let mut frame = [0u8; 2];
+    word.insert(&Raw::Int(0x1234), &mut frame, &le, Endian::Big)
+        .unwrap();
+    // ddt4all setValue writes 12 34 here (and reads it back as 0x3412).
+    assert_eq!(frame, [0x34, 0x12]);
+    assert_eq!(
+        word.extract(&frame, &le, Endian::Big).unwrap(),
+        [0x12, 0x34]
+    );
+    // Big endian stays in wire order.
+    let be = DataItem {
+        endian: Some(Endian::Big),
+        ..le
+    };
+    let mut frame = [0u8; 2];
+    word.insert(&Raw::Int(0x1234), &mut frame, &be, Endian::Big)
+        .unwrap();
+    assert_eq!(frame, [0x12, 0x34]);
+}
+
+#[test]
+fn raw_int_accessor() {
+    let e = ecu();
+    let items = e
+        .request("Read Block")
+        .unwrap()
+        .decode_checked(&e, &READ_BLOCK_FRAME)
+        .unwrap();
+    let get = |n: &str| items.iter().find(|i| i.name == n).unwrap();
+    assert_eq!(get("word be").raw_int(), Some(0x1234));
+    assert_eq!(get("flag msb").raw_int(), Some(1));
+    assert_eq!(get("ident").raw_int(), None); // ASCII stays bytes
 }

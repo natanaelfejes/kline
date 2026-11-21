@@ -55,7 +55,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     for hex in responses {
         let frame = HexBytes::from_hex(&hex)?;
-        let items = req.decode(&ecu, &frame.0)?;
+        // Unchecked on purpose: the ddt4all crosscheck feeds random frames.
+        let items = req.decode_unchecked(&ecu, &frame.0)?;
         let out = serde_json::json!({
             "request": req.name,
             "response": frame,

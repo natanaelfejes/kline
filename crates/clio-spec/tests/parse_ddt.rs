@@ -204,3 +204,54 @@ fn x65_addressing() {
     assert_eq!(eps.names[1].text, "Direction assistée"); // windows-1252 0xE9
     assert_eq!(eps.names[1].lang.as_deref(), Some("fr"));
 }
+
+/// Every element and attribute of the six files that the parser does not read, by local name
+/// (`Element@attribute` for attributes). Changing the parser or the files changes this list.
+/// The ignored elements are DDT2000's screen layout (`Categories`), fault catalogue
+/// (`Devices`, `Failures`), `Language` and `DateOfficialisation`; the attributes are
+/// publication metadata.
+/// Cross-checked against an ElementTree listing of all element/attribute names in the files.
+const UNKNOWN_SNAPSHOT: &[&str] = &[
+    "Categories",
+    "DateOfficialisation",
+    "Devices",
+    "Failures",
+    "Language",
+    "Target@email",
+    "Target@href",
+    "Target@upload",
+];
+
+#[test]
+fn unknown_names_snapshot() {
+    use clio_spec::{EcuDef, ParseWarning};
+    use std::collections::BTreeSet;
+    let mut seen = BTreeSet::new();
+    let mut files = 0;
+    for &(file, ..) in COUNTS {
+        let Some(bytes) = ddt_file(file) else {
+            continue;
+        };
+        files += 1;
+        let (_, report) = EcuDef::from_xml_bytes_with_report(&bytes).unwrap();
+        for w in report.warnings {
+            let last = |p: &str| {
+                let seg = p.rsplit('/').next().unwrap();
+                seg.split('[').next().unwrap().to_string()
+            };
+            seen.insert(match w {
+                ParseWarning::UnknownElement { path } => last(&path),
+                ParseWarning::UnknownAttribute { path, name } => format!("{}@{name}", last(&path)),
+            });
+        }
+    }
+    if files < COUNTS.len() {
+        eprintln!(
+            "SKIPPED: unknown_names_snapshot needs all {} files",
+            COUNTS.len()
+        );
+        return;
+    }
+    let seen: Vec<&str> = seen.iter().map(String::as_str).collect();
+    assert_eq!(seen, UNKNOWN_SNAPSHOT);
+}

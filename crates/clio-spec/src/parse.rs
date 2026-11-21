@@ -13,15 +13,26 @@ use crate::xml::{
 impl EcuDef {
     /// Parse a DDT2000 ECU definition from the raw file bytes (any encoding the XML
     /// declaration names).
+    /// Elements and attributes the parser does not read are ignored; use
+    /// [`from_xml_bytes_with_report`](Self::from_xml_bytes_with_report) to list them.
     pub fn from_xml_bytes(bytes: &[u8]) -> Result<EcuDef, SpecError> {
-        let text = decode_bytes(bytes)?;
-        let opts = roxmltree::ParsingOptions {
-            allow_dtd: false,
-            ..Default::default()
-        };
-        let doc = Document::parse_with_options(&text, opts)?;
-        parse_doc(&doc)
+        parse_bytes(bytes, |_| ()).map(|(ecu, ())| ecu)
     }
+}
+
+/// Decode, parse the XML, build the model and run `extra` on the same document.
+pub(crate) fn parse_bytes<T>(
+    bytes: &[u8],
+    extra: impl FnOnce(&Document) -> T,
+) -> Result<(EcuDef, T), SpecError> {
+    let text = decode_bytes(bytes)?;
+    let opts = roxmltree::ParsingOptions {
+        allow_dtd: false,
+        ..Default::default()
+    };
+    let doc = Document::parse_with_options(&text, opts)?;
+    let ecu = parse_doc(&doc)?;
+    Ok((ecu, extra(&doc)))
 }
 
 fn find_target<'a, 'i>(doc: &'a Document<'i>) -> Result<Node<'a, 'i>, SpecError> {
@@ -201,7 +212,13 @@ fn parse_can(can: Node) -> Result<Can, SpecError> {
 fn parse_data_item(n: Node) -> Result<DataItem, SpecError> {
     Ok(DataItem {
         name: n.attribute("Name").unwrap_or_default().to_string(),
-        first_byte: attr_parse::<u32>(n, "FirstByte")?.unwrap_or(0),
+        // Present on all 2165 DataItems of our six files; a missing one is a broken file.
+        first_byte: attr_parse::<u32>(n, "FirstByte")?.ok_or_else(|| {
+            SpecError::MissingFirstByte {
+                item: n.attribute("Name").unwrap_or_default().to_string(),
+            }
+        })?,
+        // Absent on 1065 of 2165 DataItems: 0, as in ddt4all.
         bit_offset: attr_parse::<u32>(n, "BitOffset")?.unwrap_or(0),
         reference: n.attribute("Ref") == Some("1"),
         endian: attr(n, "Endian").map(|e| parse_endian(n, e)).transpose()?,
@@ -326,6 +343,8 @@ fn parse_data(d: Node) -> Result<DataDef, SpecError> {
         def.signed = attr(bits, "signed").is_some();
         def.binary = descendant(bits, "Binary").is_some();
         if let Some(sc) = descendant(bits, "Scaled") {
+            // Defaults as in ddt4all. Absent in our six files on 829 (Step), 906 (Offset) and
+            // 919 (DivideBy) of 945 <Scaled> elements, so they are the normal case.
             def.scaled = Some(Scaled {
                 step: attr_f64(sc, "Step")?.unwrap_or(1.0),
                 offset: attr_f64(sc, "Offset")?.unwrap_or(0.0),

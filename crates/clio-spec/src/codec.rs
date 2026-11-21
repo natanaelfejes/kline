@@ -41,6 +41,19 @@ pub struct DecodedItem {
     pub unit: Option<String>,
 }
 
+impl DecodedItem {
+    /// The raw integer of a numeric item (`None` for ASCII or wider than 8 bytes, or when the
+    /// frame was too short). The display ignores `Format="bin"` / `Format="00"`
+    /// (docs/spec-semantics.md), so a caller that wants binary or zero-padded output formats
+    /// this value itself.
+    pub fn raw_int(&self) -> Option<u64> {
+        match self.raw {
+            Some(Raw::Int(v)) => Some(v),
+            _ => None,
+        }
+    }
+}
+
 pub(crate) fn parse_hex(s: &str) -> Result<Vec<u8>, SpecError> {
     let t = s.trim_matches(|c: char| c.is_ascii_whitespace());
     if t.len() % 2 != 0 || !t.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -451,6 +464,32 @@ impl DataDef {
         }
     }
 
+    /// Like [`encode`](Self::encode), but a `Number` for scaled data must lie on the
+    /// `Step`/`DivideBy` grid: `(x * DivideBy - Offset) / Step` may differ from an integer by
+    /// at most [`GRID_TOLERANCE`](Self::GRID_TOLERANCE) steps (float noise), otherwise
+    /// [`SpecError::OffGrid`]. `encode` would round such a value to the nearest step
+    /// (1503 rpm with Step 2 becomes 1504).
+    pub fn encode_exact(&self, value: &Value) -> Result<Raw, SpecError> {
+        if let (Value::Number(x), Some(sc)) = (value, &self.scaled) {
+            if x.is_finite() && sc.step != 0.0 && sc.divide_by != 0.0 {
+                let r = (x * sc.divide_by - sc.offset) / sc.step;
+                if (r - r.round()).abs() > Self::GRID_TOLERANCE {
+                    return Err(SpecError::OffGrid {
+                        data: self.name.clone(),
+                        value: *x,
+                        nearest: (r.round() * sc.step + sc.offset) / sc.divide_by,
+                    });
+                }
+            }
+        }
+        self.encode(value)
+    }
+
+    /// Largest distance from the grid, in steps, that [`encode_exact`](Self::encode_exact)
+    /// accepts. Every decoded value of the car's definitions re-encodes with it
+    /// (tests/roundtrip_prop.rs).
+    pub const GRID_TOLERANCE: f64 = 1e-6;
+
     /// Write a raw value into a frame at `item`'s position (inverse of
     /// [`extract`](Self::extract)). Bits outside the item are left untouched.
     pub fn insert(
@@ -506,10 +545,22 @@ impl DataDef {
 }
 
 impl Request {
-    /// Decode every received data item of this request from a response frame (starting with
-    /// the positive response SID, e.g. `0x73` for `0x33`). Items the frame is too short for
-    /// come back with `raw`/`value` = `None`.
-    pub fn decode(&self, ecu: &EcuDef, response: &[u8]) -> Result<Vec<DecodedItem>, SpecError> {
+    /// Decode every received data item from a response frame **without validating it**.
+    ///
+    /// The frame starts with the positive response SID (e.g. `0x73` for `0x33`). Nothing is
+    /// checked: a negative response, a wrong SID or a frame shorter than `MinBytes` is decoded
+    /// as if it were valid, and items the frame is too short for come back with
+    /// `raw`/`value` = `None` (this is exactly ddt4all's `get_values_from_stream`).
+    ///
+    /// Use it only where the frame is known to be a positive response to this request, or to
+    /// inspect arbitrary bytes on purpose: differential tests against ddt4all, replaying
+    /// logged frames for analysis, decoding a canned `ReplyBytes`. Live ECU traffic goes through
+    /// [`decode_checked`](Self::decode_checked).
+    pub fn decode_unchecked(
+        &self,
+        ecu: &EcuDef,
+        response: &[u8],
+    ) -> Result<Vec<DecodedItem>, SpecError> {
         self.received_items
             .iter()
             .map(|item| {
@@ -519,6 +570,88 @@ impl Request {
                 Ok(data.decode(response, item, ecu.endian))
             })
             .collect()
+    }
+
+    /// Validate `response` as the reply to this request sent with its default `SentBytes`,
+    /// then decode it. See [`decode_checked_against`](Self::decode_checked_against).
+    pub fn decode_checked(
+        &self,
+        ecu: &EcuDef,
+        response: &[u8],
+    ) -> Result<Vec<DecodedItem>, SpecError> {
+        self.decode_checked_against(ecu, &self.sent_bytes.0, response)
+    }
+
+    /// Validate `response` as the reply to the frame `sent` (e.g. from [`build`](Self::build)),
+    /// then decode it. Checks, in this order:
+    ///
+    /// 1. empty response: [`SpecError::TooShort`];
+    /// 2. `7F <sid> <nrc>`: [`SpecError::NegativeResponse`] (shorter than 3 bytes: `TooShort`);
+    /// 3. first byte must be `sent[0] + 0x40`: [`SpecError::UnexpectedSid`]
+    ///    ([`SpecError::NoPositiveSid`] if `sent` is empty or its SID is 0xC0 or above);
+    /// 4. length must be at least `Received@MinBytes`: [`SpecError::TooShort`];
+    /// 5. the bytes after the SID and before the first received data item must echo `sent`
+    ///    (e.g. the local identifier `A3` of `21 A3` in `61 A3 ...`): [`SpecError::ReplyMismatch`].
+    ///    Only positions that exist in `sent` are compared. Requests without received items
+    ///    skip this step.
+    ///
+    /// `<ReplyBytes>` is **not** used: ddt4all uses it only as the canned answer of its
+    /// simulation mode, and in our files it holds zeros where the ECU echoes a parameter
+    /// (see docs/spec-semantics.md).
+    pub fn decode_checked_against(
+        &self,
+        ecu: &EcuDef,
+        sent: &[u8],
+        response: &[u8],
+    ) -> Result<Vec<DecodedItem>, SpecError> {
+        let len = response.len();
+        let Some(&first) = response.first() else {
+            return Err(SpecError::TooShort {
+                min: (self.min_bytes as usize).max(1),
+                len,
+            });
+        };
+        if first == 0x7F {
+            return match response {
+                [_, sid, nrc, ..] => Err(SpecError::NegativeResponse {
+                    sid: *sid,
+                    nrc: *nrc,
+                }),
+                _ => Err(SpecError::TooShort { min: 3, len }),
+            };
+        }
+        let expected = sent
+            .first()
+            .and_then(|sid| sid.checked_add(0x40))
+            .ok_or_else(|| SpecError::NoPositiveSid {
+                request: self.name.clone(),
+            })?;
+        if first != expected {
+            return Err(SpecError::UnexpectedSid {
+                expected,
+                got: first,
+            });
+        }
+        let min = self.min_bytes as usize;
+        if len < min {
+            return Err(SpecError::TooShort { min, len });
+        }
+        if let Some(first_item) = self.received_items.iter().map(|i| i.first_byte).min() {
+            // 1-based positions 2 ..= echo_end
+            let echo_end = sent.len().min(first_item as usize - 1);
+            if len < echo_end {
+                return Err(SpecError::TooShort { min: echo_end, len });
+            }
+            let echo = response.iter().zip(sent).enumerate().take(echo_end);
+            if let Some((i, (&got, &expected))) = echo.skip(1).find(|(_, (g, e))| g != e) {
+                return Err(SpecError::ReplyMismatch {
+                    position: i + 1,
+                    expected,
+                    got,
+                });
+            }
+        }
+        self.decode_unchecked(ecu, response)
     }
 
     /// Build the request frame: `SentBytes` with the given sent data items overwritten.

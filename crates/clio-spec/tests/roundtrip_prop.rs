@@ -1,5 +1,6 @@
 //! Property: for every scaled or list data of the three definitions used on the car,
-//! `encode(interpret(raw)) == raw` over the whole raw range.
+//! `encode(interpret(raw)) == raw` and `encode_exact(interpret(raw)) == raw` over the whole raw
+//! range.
 
 mod common;
 
@@ -21,7 +22,12 @@ fn round_trips(d: &DataDef, raw: u64) -> Result<(), TestCaseError> {
     let back = d
         .encode(&value)
         .map_err(|e| TestCaseError::fail(format!("{}: encode {value:?}: {e}", d.name)))?;
-    prop_assert_eq!(back, raw, "{} via {:?}", d.name, value);
+    prop_assert_eq!(&back, &raw, "{} via {:?}", d.name, value);
+    // Decoded values lie on the Step grid, so the strict encoder accepts them too.
+    let exact = d
+        .encode_exact(&value)
+        .map_err(|e| TestCaseError::fail(format!("{}: encode_exact {value:?}: {e}", d.name)))?;
+    prop_assert_eq!(exact, raw, "{} via {:?} (exact)", d.name, value);
     Ok(())
 }
 
