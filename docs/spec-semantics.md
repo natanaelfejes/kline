@@ -6,10 +6,15 @@ We match its **decoding** exactly. Where we deviate (mostly encoding and error h
 ddt4all and the XML disagree or are ambiguous, this document says so.
 
 Verification: `crates/clio-spec/tests/crosscheck_ddt4all.py` runs ddt4all and our `dump` example on
-the same bytes. On 2026-11-21 it compared 458,652 item decodes (seeded random frames, full and
-truncated, for every request of all six ECU files plus our fixture) with 0 mismatches in the
-display string, and matched request/data counts, KW1/KW2, address, endianness and FastInit flag
-for all six files.
+the same bytes (seeded random frames, full and truncated, for every request of all six ECU files
+plus our fixture). Per item it compares the display string, the raw bytes (ddt4all `getHexValue`
+against our `raw`) and, for scaled items, the unrounded number (ours against ddt4all's formula
+recomputed from its own `getHexValue` and parsed fields, compared with `==`). Run on 2026-11-21
+against ddt4all `e109cd2`: 458,652 random item decodes, 0 display, 0 raw and 0 numeric mismatches
+(208,680 numeric comparisons); golden + fixture frames: 84 items, 0 mismatches. It also matched
+request/data counts, KW1/KW2, address, endianness and FastInit flag for all six files. Against a
+deliberately perturbed build (value x (1 + 1e-15), raw | 0x100) the display strings still all
+matched while the raw and numeric comparisons failed, so those two checks add coverage.
 
 ## Reading the file
 
@@ -37,6 +42,29 @@ for all six files.
   Empty attributes count as absent (ddt4all's `if attr:`). A decimal comma is accepted only in
   `Bytes@count` (ddt4all does the same).
 - **Hex.** `SentBytes`/`ReplyBytes` must be an even number of hex digits. ddt4all does not check.
+- **Required vs defaulted.** A `<DataItem>` without `FirstByte` is an error
+  (`SpecError::MissingFirstByte`; ddt4all would default to 0 and never decode it). All 2165
+  DataItems of our six files have one. The remaining defaults are kept because the attributes are
+  legitimately absent in real files (counts over the six files):
+
+  | Attribute | Default | Absent in |
+  |---|---|---|
+  | `DataItem@BitOffset` | 0 | 1065 of 2165 |
+  | `Bits@count` | 8 | 680 of 2040 `<Bits>` |
+  | `Scaled@Step` | 1 | 829 of 945 `<Scaled>` |
+  | `Scaled@Offset` | 0 | 906 of 945 |
+  | `Scaled@DivideBy` | 1 | 919 of 945 |
+  | `Received@MinBytes` | 0 | 0 of 149 (all present) |
+
+- **Unread names.** `EcuDef::from_xml_bytes_with_report` also returns a `ParseReport` listing every
+  element and attribute the parser does not read, with its path
+  (`Target[@Name="t"]/Datas/Data[@Name="speed"]/Bits/Scaled`). This catches misspellings such as
+  `Stepp="2"`, which would otherwise fall back to the default silently. An unknown element is
+  reported once and its subtree skipped. Children of `Projects` and `DenyAccess` are free-form.
+  In our six files the unread names are exactly the elements `Categories` (screen layout),
+  `Devices`, `Failures`, `Language`, `DateOfficialisation` and the attributes `Target@upload`,
+  `Target@href`, `Target@email` (snapshot test `parse_ddt::unknown_names_snapshot`).
+  `<Binary>` and `<ShiftBytesCount>` are read but occur in none of the files.
 
 ## `<K>` and `<CAN>`
 
@@ -47,8 +75,17 @@ either directly under `K` (Safir) or under `KWP` (BMT, SIRIUS); `KWP@Multipoint`
 FastInit before ISO8.
 
 - ddt4all reads only the key words, FastInit and the address. It ignores every timing value.
-  We store the raw numbers. **The unit is assumed to be ms** (TesterPresent 3000 = 3 s matches
-  ddt4all's hard-coded 3 s tester present). This is not verified against DDT2000.
+- **Timings are raw `Option<u32>`, assumed to be milliseconds.** clio-spec stores the XML numbers
+  unchanged (`InterByte@Delay`, `ReplyToRequest@Delay`, `RequestToReply@Timeout`,
+  `TesterPresent@Delay`, `OnError@Delay`, `KW2@Timeout`, `FirstRequest@Delay`, `KW2_@Delay`)
+  and does **not** resolve them into a timing set: clio-core owns its timing struct and decides
+  defaults and units. The ms assumption fits TesterPresent 3000 = ddt4all's hard-coded 3 s tester
+  present, but is not verified against DDT2000.
+- **Where 5-baud (ISO8) data can live.** `K.iso8` (`<K><ISO8>`, Safir: plain ISO 9141) and
+  `K.kwp.iso8` (`<K><KWP><ISO8>`, BMT, SIRIUS: KWP2000 slow init); each may carry `L`, KW1/KW2,
+  `KW2@Timeout` and `FirstRequest@Delay`. A fast-init file has `K.kwp.fast_init` (`<KWP><FastInit>`,
+  S2000) with only KW1/KW2 and no timing. `KLine::protocol()` and `KLine::key_words()` pick
+  between them; a consumer that needs the ISO8 timings must read the `Iso8` of the selected path.
 - A `KWP` with neither `FastInit` nor `ISO8` crashes ddt4all. We report `KProtocol::Unknown`.
 - `CAN`: `BaudRate`, `SendId/CANId@Value`, `ReceiveId/CANId@Value`. None of our files has one.
 
@@ -67,10 +104,45 @@ FastInit before ISO8.
 ## Locating an item in a frame (`DataDef::extract`)
 
 - The frame is the **response including its positive response SID** (`73 51 ...` for `33 51`).
-  `FirstByte` is 1-based. 0 or missing means the item can never be decoded.
+  `FirstByte` is 1-based (missing is a parse error; `FirstByte="0"` can never be decoded).
 - span = `ceil((bits + BitOffset) / 8)` bytes from `FirstByte`. If the frame is shorter, the item
-  decodes to `None` (ddt4all also returns `None`). **`Received@MinBytes` is not enforced** by the
-  decoder (ddt4all ignores it as well). Callers that need it must check it themselves.
+  decodes to `None` (ddt4all also returns `None`).
+
+## Validating a response (`Request::decode_checked`)
+
+`Request::decode_unchecked` decodes any bytes (ddt4all `get_values_from_stream`); it is for the
+ddt4all crosscheck, replaying logs and canned frames. `decode_checked` (request sent with its
+default `SentBytes`) and `decode_checked_against(ecu, sent, response)` (any built frame) first
+check, in order, and return a typed error:
+
+1. empty: `TooShort { min: max(MinBytes, 1) }`;
+2. `7F sid nrc`: `NegativeResponse { sid, nrc }` (`TooShort { min: 3 }` if cut off);
+3. byte 1 must be `sent[0] + 0x40`: `UnexpectedSid { expected, got }` (`NoPositiveSid` when the
+   request has no SentBytes or its SID is 0xC0 or above, e.g. Safir `FF00`);
+4. length >= `Received@MinBytes`: `TooShort { min, len }`;
+5. echo: response bytes 2 .. (first received `FirstByte` - 1), limited to the length of `sent`,
+   must equal `sent`: `ReplyMismatch { position, expected, got }`. In our files this is always
+   exactly byte 2 (the local identifier of `21 xx`, the Safir block number of `33 5x`, the
+   routine / IO identifier of `31 xx` / `30 xx`) or nothing (first item at byte 2). Requests
+   without received items skip it.
+
+What ddt4all does (`core/ecu/ecu_request.py` `send_request`, `e109cd2`), and how we differ:
+
+- **Negative response:** only `elmstream.startswith('7F')`, NRC from characters 6..8 of the
+  spaced hex string, then the request returns `None`. Same detection, but ours is typed and does
+  not depend on string formatting.
+- **Positive SID and echo:** ddt4all checks neither in `send_request` (its ELM layer can filter
+  by a `positive` prefix, which ecu_request never passes). **Deviation:** we reject both.
+- **MinBytes:** read and stored, never used for decoding (only the request editor uses it as a
+  default length; the macro docs call it the response length including the positive SID).
+  **Deviation:** we enforce it. In our files MinBytes is at least the last item's end except in
+  SIRIUS `Trame 14` (MinBytes 22, items reach 24), SIRIUS `Trame 30` (14 vs 17) and Safir 1/2
+  `ET2` (5 vs 7); there a response of exactly MinBytes passes and the items beyond it decode
+  to `None`.
+- **ReplyBytes:** used only as the canned answer in simulation mode. **We do not compare against
+  it.** It occurs 4 times (SIRIUS `Output Control`, `.Status`, `.Stop`; S2000 `Output Control`),
+  always `700000` while the request is `30 D0 ...` with a sent data item at byte 2, so it holds
+  zeros where the ECU echoes the parameter. Checking against it would reject the expected echo.
 - Endianness: `DataItem@Endian` if present, else the `Requests@Endian` of the file. ddt4all keeps
   a single global value (the last `<Requests>` with the attribute wins). We do the same. Unknown
   values are an **error** for us. ddt4all would silently treat them as big endian.
@@ -93,7 +165,9 @@ FastInit before ISO8.
 1. `ascii`: the bytes are decoded as UTF-8 and **invalid bytes are dropped** (Python
    `errors='ignore'`). Ambiguity: DDT2000 is a Windows program, so a 0xE9 byte was probably
    meant as windows-1252 `é`. ddt4all (and we) drop it.
-2. `signed`: applied **only when bytes_count is 1 or 2**. The result is
+2. `signed` (`Bits@signed` with any non-empty value: `signed="0"` also means signed; all 15
+   occurrences in our files are `signed="1"`; see the traps below): applied **only when
+   bytes_count is 1 or 2**. The result is
    `-(v & 0x80) | (v & 0x7f)` (or the 0x8000 form). The sign bit is always bit 7/15, whatever
    bits_count is, and higher bits are dropped. Other widths stay unsigned; ddt4all only prints a
    warning for them.
@@ -116,7 +190,18 @@ FastInit before ISO8.
      these are the fault flag bytes, so the raw integer in `DecodedItem::raw` is what callers should
      use.
 
-## Encoding (`DataDef::encode`, `DataDef::insert`, `Request::build`)
+## Traps for callers
+
+- **`Bits@signed` is a presence flag.** Any non-empty value makes the data signed, `"0"`
+  included (ddt4all `if signed:` on the string). Empty counts as absent.
+- **The sign bit is bit 7 or bit 15 of the extracted value, never the top bit of the field.**
+  A signed 4-bit field is shown unsigned (0..15), a signed 12-bit field uses bit 15, which is
+  always 0, so it is never negative. Widths over 2 bytes are never sign-extended.
+- **`Format="bin"` and `Format="00"` display decimal.** Only formats containing `.` are applied.
+  A CLI that wants binary or zero padding formats `DecodedItem::raw_int()` (the raw integer,
+  `None` for ASCII / items over 8 bytes / missing) itself, using `DataDef::bits_count` as width.
+
+## Encoding (`DataDef::encode`, `encode_exact`, `DataDef::insert`, `Request::build`)
 
 Encoding is not used for anything this project sends yet. It is not covered by the crosscheck.
 
@@ -125,6 +210,12 @@ Encoding is not used for anything this project sends yet. It is not covered by t
   the round-trip property test fails at once (Safir_1 `pression collecteur absolue mesuree`:
   raw 3 decodes to 114.1 and truncates back to 2). For an off-grid input, the two can pick
   different raw values (1503 rpm / Step 2 gives 752 for us and 751 for ddt4all).
+- `encode_exact` refuses off-grid numbers instead of rounding: if
+  `(x * DivideBy - Offset) / Step` is more than `DataDef::GRID_TOLERANCE` (1e-6) steps away from
+  an integer it returns `SpecError::OffGrid { value, nearest }` (1503 rpm with Step 2: error,
+  nearest 1504). The tolerance absorbs f64 noise only: with 0 tolerance the round-trip property
+  test fails on real data, with 1e-6 every decoded value of Safir 1/2 and BMT re-encodes.
+  Other value kinds behave like `encode`.
 - Negative values give two's complement. They are allowed only for signed data whose sign width
   (8/16) equals bits_count. Anything that does not fit, or would decode to a different value,
   is an `Encode` error. ddt4all writes garbage in these cases (Python `bin()` of a negative or
@@ -137,7 +228,8 @@ Encoding is not used for anything this project sends yet. It is not covered by t
   - **Disagreement:** ddt4all's `setValue` for little endian does **not** invert its own
     `getHexValue` for multi-byte items. It writes the value in big-endian byte order. Verified by
     running ddt4all: value `0x1234`, 16 bits, `Endian="Little"`, FirstByte 1 is written as
-    `12 34`, and ddt4all reads that back as `3412`. We write `34 12`, which reads back as `1234`.
+    `12 34`, and ddt4all reads that back as `3412`. We write `34 12`, which reads back as `1234`
+    (pinned by `fixture::little_endian_insert_is_true_inverse_not_ddt4all_set_value`).
     This affects only S2000 sent items (`RFFD Lecture contexte panne`, `SRBLI start test sav`),
     which this project does not use.
 
