@@ -43,8 +43,9 @@ matched while the raw and numeric comparisons failed, so those two checks add co
   `Bytes@count` (ddt4all does the same).
 - **Hex.** `SentBytes`/`ReplyBytes` must be an even number of hex digits. ddt4all does not check.
 - **Required vs defaulted.** A `<DataItem>` without `FirstByte` is an error
-  (`SpecError::MissingFirstByte`; ddt4all would default to 0 and never decode it). All 2165
-  DataItems of our six files have one. The remaining defaults are kept because the attributes are
+  (`SpecError::MissingFirstByte`; ddt4all would default to 0 and never decode it), and so is
+  `FirstByte="0"` (`InvalidValue`; positions are 1-based). All 2165 DataItems of our six files
+  have one, none is 0. The remaining defaults are kept because the attributes are
   legitimately absent in real files (counts over the six files):
 
   | Attribute | Default | Absent in |
@@ -60,7 +61,9 @@ matched while the raw and numeric comparisons failed, so those two checks add co
   element and attribute the parser does not read, with its path
   (`Target[@Name="t"]/Datas/Data[@Name="speed"]/Bits/Scaled`). This catches misspellings such as
   `Stepp="2"`, which would otherwise fall back to the default silently. An unknown element is
-  reported once and its subtree skipped. Children of `Projects` and `DenyAccess` are free-form.
+  reported once; below it only what the parser still finds at depth is checked: the parser
+  searches `Request` and `Data` contents (and `Requests`/`Data` in the whole document) at any
+  depth, so a nested element it reads is not reported as unread and its attributes are checked. Children of `Projects` and `DenyAccess` are free-form.
   In our six files the unread names are exactly the elements `Categories` (screen layout),
   `Devices`, `Failures`, `Language`, `DateOfficialisation` and the attributes `Target@upload`,
   `Target@href`, `Target@email` (snapshot test `parse_ddt::unknown_names_snapshot`).
@@ -116,7 +119,8 @@ default `SentBytes`) and `decode_checked_against(ecu, sent, response)` (any buil
 check, in order, and return a typed error:
 
 1. empty: `TooShort { min: max(MinBytes, 1) }`;
-2. `7F sid nrc`: `NegativeResponse { sid, nrc }` (`TooShort { min: 3 }` if cut off);
+2. `7F sid nrc`: `NegativeResponse { sid, nrc }` when `sid` is the sent SID, otherwise
+   `NegativeResponseForOtherSid { expected, got, nrc }` (`TooShort { min: 3 }` if cut off);
 3. byte 1 must be `sent[0] + 0x40`: `UnexpectedSid { expected, got }` (`NoPositiveSid` when the
    request has no SentBytes or its SID is 0xC0 or above, e.g. Safir `FF00`);
 4. length >= `Received@MinBytes`: `TooShort { min, len }`;

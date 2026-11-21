@@ -51,6 +51,11 @@ pub enum SpecError {
     /// The ECU answered with a negative response (`7F <sid> <nrc>`).
     #[error("negative response to service {sid:#04X}: NRC {nrc:#04X}")]
     NegativeResponse { sid: u8, nrc: u8 },
+    /// The ECU answered `7F <got> <nrc>` for a different service than the one sent.
+    #[error(
+        "negative response for service {got:#04X} (NRC {nrc:#04X}), but service {expected:#04X} was sent"
+    )]
+    NegativeResponseForOtherSid { expected: u8, got: u8, nrc: u8 },
     /// The first response byte is not the positive response SID (request SID + 0x40).
     #[error("unexpected response SID {got:#04X}, expected {expected:#04X}")]
     UnexpectedSid { expected: u8, got: u8 },

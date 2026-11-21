@@ -586,7 +586,8 @@ impl Request {
     /// then decode it. Checks, in this order:
     ///
     /// 1. empty response: [`SpecError::TooShort`];
-    /// 2. `7F <sid> <nrc>`: [`SpecError::NegativeResponse`] (shorter than 3 bytes: `TooShort`);
+    /// 2. `7F <sid> <nrc>`: [`SpecError::NegativeResponse`] if `sid` is `sent[0]` (or `sent` is
+    ///    empty), else [`SpecError::NegativeResponseForOtherSid`] (shorter than 3 bytes: `TooShort`);
     /// 3. first byte must be `sent[0] + 0x40`: [`SpecError::UnexpectedSid`]
     ///    ([`SpecError::NoPositiveSid`] if `sent` is empty or its SID is 0xC0 or above);
     /// 4. length must be at least `Received@MinBytes`: [`SpecError::TooShort`];
@@ -613,10 +614,19 @@ impl Request {
         };
         if first == 0x7F {
             return match response {
-                [_, sid, nrc, ..] => Err(SpecError::NegativeResponse {
-                    sid: *sid,
-                    nrc: *nrc,
-                }),
+                [_, sid, nrc, ..] => match sent.first() {
+                    Some(&expected) if expected != *sid => {
+                        Err(SpecError::NegativeResponseForOtherSid {
+                            expected,
+                            got: *sid,
+                            nrc: *nrc,
+                        })
+                    }
+                    _ => Err(SpecError::NegativeResponse {
+                        sid: *sid,
+                        nrc: *nrc,
+                    }),
+                },
                 _ => Err(SpecError::TooShort { min: 3, len }),
             };
         }
@@ -637,6 +647,14 @@ impl Request {
             return Err(SpecError::TooShort { min, len });
         }
         if let Some(first_item) = self.received_items.iter().map(|i| i.first_byte).min() {
+            // Parsed definitions never have 0 (positions are 1-based); a hand-built one might.
+            if first_item == 0 {
+                return Err(SpecError::InvalidValue {
+                    element: "DataItem".into(),
+                    what: "FirstByte".into(),
+                    value: "0".into(),
+                });
+            }
             // 1-based positions 2 ..= echo_end
             let echo_end = sent.len().min(first_item as usize - 1);
             if len < echo_end {

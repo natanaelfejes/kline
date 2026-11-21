@@ -213,11 +213,16 @@ fn parse_data_item(n: Node) -> Result<DataItem, SpecError> {
     Ok(DataItem {
         name: n.attribute("Name").unwrap_or_default().to_string(),
         // Present on all 2165 DataItems of our six files; a missing one is a broken file.
-        first_byte: attr_parse::<u32>(n, "FirstByte")?.ok_or_else(|| {
-            SpecError::MissingFirstByte {
-                item: n.attribute("Name").unwrap_or_default().to_string(),
+        first_byte: match attr_parse::<u32>(n, "FirstByte")? {
+            // Positions are 1-based; none of our files has 0 (ddt4all would never decode it).
+            Some(0) => return Err(invalid_value(n, "attribute FirstByte", "0")),
+            Some(b) => b,
+            None => {
+                return Err(SpecError::MissingFirstByte {
+                    item: n.attribute("Name").unwrap_or_default().to_string(),
+                })
             }
-        })?,
+        },
         // Absent on 1065 of 2165 DataItems: 0, as in ddt4all.
         bit_offset: attr_parse::<u32>(n, "BitOffset")?.unwrap_or(0),
         reference: n.attribute("Ref") == Some("1"),

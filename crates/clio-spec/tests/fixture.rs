@@ -613,3 +613,95 @@ fn raw_int_accessor() {
     assert_eq!(get("flag msb").raw_int(), Some(1));
     assert_eq!(get("ident").raw_int(), None); // ASCII stays bytes
 }
+
+#[test]
+fn first_byte_zero_is_rejected_at_parse_time() {
+    let xml = target(
+        r#"<Datas><Data Name="d"><Bits count="8"/></Data></Datas><Requests><Request Name="r"><Sent><SentBytes>2101</SentBytes></Sent><Received MinBytes="3"><DataItem Name="d" FirstByte="0"/></Received></Request></Requests>"#,
+    );
+    assert!(matches!(
+        EcuDef::from_xml_bytes(&xml),
+        Err(SpecError::InvalidValue { what, value, .. }) if what == "attribute FirstByte" && value == "0"
+    ));
+}
+
+#[test]
+fn decode_checked_does_not_panic_on_hand_built_first_byte_zero() {
+    let mut e = ecu();
+    let mut r = e.request("Read Block").unwrap().clone();
+    r.received_items[0].first_byte = 0;
+    e.requests = vec![r.clone()];
+    let res = r.decode_checked(&e, &READ_BLOCK_FRAME);
+    assert!(
+        matches!(res, Err(SpecError::InvalidValue { .. })),
+        "{res:?}"
+    );
+}
+
+#[test]
+fn negative_response_for_another_sid_is_distinct() {
+    let e = ecu();
+    let rb = e.request("Read Block").unwrap(); // sends 21 01
+    assert!(matches!(
+        rb.decode_checked_against(&e, &[0x21, 0x01], &[0x7F, 0x22, 0x10]),
+        Err(SpecError::NegativeResponseForOtherSid {
+            expected: 0x21,
+            got: 0x22,
+            nrc: 0x10
+        })
+    ));
+    assert!(matches!(
+        rb.decode_checked_against(&e, &[0x21, 0x01], &[0x7F, 0x21, 0x10]),
+        Err(SpecError::NegativeResponse {
+            sid: 0x21,
+            nrc: 0x10
+        })
+    ));
+}
+
+#[test]
+fn report_follows_the_recursive_lookup_of_the_parser() {
+    // The parser finds Sent/Received/DataItem/Bits at any depth below Request/Data.
+    let xml = target(
+        r#"<Datas><Data Name="d"><Wrap><Bits count="16"><Scaled Stepp="2"/></Bits></Wrap></Data></Datas><Requests><Request Name="r"><Group><Sent><SentBytes>2101</SentBytes></Sent></Group><Received MinBytes="3"><Wrapper><DataItem Name="d" FirstByte="3" Bogus="1"/></Wrapper></Received></Request></Requests>"#,
+    );
+    let (e, report) = EcuDef::from_xml_bytes_with_report(&xml).unwrap();
+    // What the parser reads...
+    assert_eq!(e.data("d").unwrap().bits_count, 16);
+    let r = e.request("r").unwrap();
+    assert_eq!(r.sent_bytes.0, [0x21, 0x01]);
+    assert_eq!(r.received_items.len(), 1);
+    // ...is not reported as unread (its misspelled attributes are), only the wrappers are.
+    let t = r#"Target[@Name="t"]"#;
+    let unk = |path: String| ParseWarning::UnknownElement { path };
+    let att = |path: String, name: &str| ParseWarning::UnknownAttribute {
+        path,
+        name: name.into(),
+    };
+    assert_eq!(
+        report.warnings,
+        [
+            unk(format!(r#"{t}/Datas/Data[@Name="d"]/Wrap"#)),
+            att(
+                format!(r#"{t}/Datas/Data[@Name="d"]/Wrap/Bits/Scaled"#),
+                "Stepp"
+            ),
+            unk(format!(r#"{t}/Requests/Request[@Name="r"]/Group"#)),
+            unk(format!(
+                r#"{t}/Requests/Request[@Name="r"]/Received/Wrapper"#
+            )),
+            att(
+                format!(r#"{t}/Requests/Request[@Name="r"]/Received/Wrapper/DataItem[@Name="d"]"#),
+                "Bogus"
+            ),
+        ]
+    );
+    // Not read, reported: a Scaled outside <Bits>, a DataItem directly under <Request>.
+    let xml = target(
+        r#"<Datas><Data Name="d"><Bitz><Scaled Step="2"/></Bitz></Data></Datas><Requests><Request Name="r"><DataItem Name="d" FirstByte="3"/></Request></Requests>"#,
+    );
+    let (e, report) = EcuDef::from_xml_bytes_with_report(&xml).unwrap();
+    assert!(e.data("d").unwrap().scaled.is_none());
+    assert!(e.request("r").unwrap().received_items.is_empty());
+    assert_eq!(report.warnings.len(), 2, "{:?}", report.warnings);
+}
