@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 /// Everything that can go wrong while parsing a definition or coding a value.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, PartialEq, Error)]
 pub enum SpecError {
     /// The XML declaration names an encoding that `encoding_rs` does not know.
     #[error("unknown XML encoding label {0:?}")]
@@ -62,7 +62,7 @@ pub enum SpecError {
     /// The request has no SID with a positive response (empty `SentBytes`, or SID >= 0xC0).
     #[error("request {request:?} has no positive response SID")]
     NoPositiveSid { request: String },
-    /// A response byte that echoes the request (before the first received data item) differs.
+    /// The echoed local identifier (response byte 2) differs from the one requested.
     #[error("response byte {position} is {got:#04X}, request echo expects {expected:#04X}")]
     ReplyMismatch {
         /// 1-based byte position in the response.
@@ -70,7 +70,10 @@ pub enum SpecError {
         expected: u8,
         got: u8,
     },
-    /// The response is shorter than `Received@MinBytes` (or than a negative response / the echo).
+    /// A `7F` response with fewer than the 3 bytes `7F <sid> <nrc>`.
+    #[error("truncated negative response ({len} bytes, 3 expected)")]
+    TruncatedNegativeResponse { len: usize },
+    /// The response is shorter than `Received@MinBytes` (or than the echoed local identifier).
     #[error("response has {len} bytes, at least {min} expected")]
     TooShort { min: usize, len: usize },
     /// A data item does not fit inside the byte buffer it is written to.

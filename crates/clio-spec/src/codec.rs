@@ -470,6 +470,9 @@ impl DataDef {
     /// [`SpecError::OffGrid`]. `encode` would round such a value to the nearest step
     /// (1503 rpm with Step 2 becomes 1504).
     pub fn encode_exact(&self, value: &Value) -> Result<Raw, SpecError> {
+        // Range first, so an out-of-range value is an Encode error and `nearest` of OffGrid is
+        // always encodable.
+        let raw = self.encode(value)?;
         if let (Value::Number(x), Some(sc)) = (value, &self.scaled) {
             if x.is_finite() && sc.step != 0.0 && sc.divide_by != 0.0 {
                 let r = (x * sc.divide_by - sc.offset) / sc.step;
@@ -482,7 +485,7 @@ impl DataDef {
                 }
             }
         }
-        self.encode(value)
+        Ok(raw)
     }
 
     /// Largest distance from the grid, in steps, that [`encode_exact`](Self::encode_exact)
@@ -587,14 +590,21 @@ impl Request {
     ///
     /// 1. empty response: [`SpecError::TooShort`];
     /// 2. `7F <sid> <nrc>`: [`SpecError::NegativeResponse`] if `sid` is `sent[0]` (or `sent` is
-    ///    empty), else [`SpecError::NegativeResponseForOtherSid`] (shorter than 3 bytes: `TooShort`);
+    ///    empty), else [`SpecError::NegativeResponseForOtherSid`]; shorter than 3 bytes:
+    ///    [`SpecError::TruncatedNegativeResponse`];
     /// 3. first byte must be `sent[0] + 0x40`: [`SpecError::UnexpectedSid`]
     ///    ([`SpecError::NoPositiveSid`] if `sent` is empty or its SID is 0xC0 or above);
-    /// 4. length must be at least `Received@MinBytes`: [`SpecError::TooShort`];
-    /// 5. the bytes after the SID and before the first received data item must echo `sent`
-    ///    (e.g. the local identifier `A3` of `21 A3` in `61 A3 ...`): [`SpecError::ReplyMismatch`].
-    ///    Only positions that exist in `sent` are compared. Requests without received items
-    ///    skip this step.
+    /// 4. length must be at least `Received@MinBytes`: [`SpecError::TooShort`]
+    ///    (see [`decode_checked_allow_short`](Self::decode_checked_allow_short) to relax this);
+    /// 5. KWP2000 local-identifier services (`21`, `30`, `31`, `32`, `33`, `3B`) answer
+    ///    `<SID+0x40> <local id> ...`, so response byte 2 must equal `sent[1]`
+    ///    (`21 A9` is answered by `61 A9 ...`): [`SpecError::ReplyMismatch`]. For SID `21`
+    ///    this is always checked (the Sirius 32 definitions even map byte 2 as an item,
+    ///    `LocalIvinOK`, which would otherwise hide a reply to a different request). For the
+    ///    other services it is checked only when no received item maps byte 2 (the S2000 `31`
+    ///    requests do), because there the definition may use that byte for data.
+    ///    Bytes after byte 2 are never compared with `sent`: positions before the first mapped
+    ///    item are not an echo of the request parameters.
     ///
     /// `<ReplyBytes>` is **not** used: ddt4all uses it only as the canned answer of its
     /// simulation mode, and in our files it holds zeros where the ECU echoes a parameter
@@ -605,6 +615,32 @@ impl Request {
         sent: &[u8],
         response: &[u8],
     ) -> Result<Vec<DecodedItem>, SpecError> {
+        self.check_response(sent, response, true)?;
+        self.decode_unchecked(ecu, response)
+    }
+
+    /// Like [`decode_checked_against`](Self::decode_checked_against) with the request's default
+    /// `SentBytes`, but a response shorter than `Received@MinBytes` is not an error: items the
+    /// frame is too short for decode to `raw`/`value` = `None`.
+    ///
+    /// `MinBytes` is one number per request while a definition can span many ECU software
+    /// versions (`AutoIdent`); an older ECU may legitimately answer with a shorter frame. The
+    /// SID, negative-response and echo checks still apply (the echo byte must be present).
+    pub fn decode_checked_allow_short(
+        &self,
+        ecu: &EcuDef,
+        response: &[u8],
+    ) -> Result<Vec<DecodedItem>, SpecError> {
+        self.check_response(&self.sent_bytes.0, response, false)?;
+        self.decode_unchecked(ecu, response)
+    }
+
+    fn check_response(
+        &self,
+        sent: &[u8],
+        response: &[u8],
+        enforce_min_bytes: bool,
+    ) -> Result<(), SpecError> {
         let len = response.len();
         let Some(&first) = response.first() else {
             return Err(SpecError::TooShort {
@@ -627,7 +663,7 @@ impl Request {
                         nrc: *nrc,
                     }),
                 },
-                _ => Err(SpecError::TooShort { min: 3, len }),
+                _ => Err(SpecError::TruncatedNegativeResponse { len }),
             };
         }
         let expected = sent
@@ -643,33 +679,29 @@ impl Request {
             });
         }
         let min = self.min_bytes as usize;
-        if len < min {
+        if enforce_min_bytes && len < min {
             return Err(SpecError::TooShort { min, len });
         }
-        if let Some(first_item) = self.received_items.iter().map(|i| i.first_byte).min() {
-            // Parsed definitions never have 0 (positions are 1-based); a hand-built one might.
-            if first_item == 0 {
-                return Err(SpecError::InvalidValue {
-                    element: "DataItem".into(),
-                    what: "FirstByte".into(),
-                    value: "0".into(),
-                });
-            }
-            // 1-based positions 2 ..= echo_end
-            let echo_end = sent.len().min(first_item as usize - 1);
-            if len < echo_end {
-                return Err(SpecError::TooShort { min: echo_end, len });
-            }
-            let echo = response.iter().zip(sent).enumerate().take(echo_end);
-            if let Some((i, (&got, &expected))) = echo.skip(1).find(|(_, (g, e))| g != e) {
-                return Err(SpecError::ReplyMismatch {
-                    position: i + 1,
-                    expected,
-                    got,
-                });
+        let byte2_mapped = self.received_items.iter().any(|i| i.first_byte == 2);
+        let echoes_local_id = match sent[0] {
+            0x21 => true,
+            0x30..=0x33 | 0x3B => !byte2_mapped,
+            _ => false,
+        };
+        if echoes_local_id && sent.len() >= 2 {
+            match response.get(1) {
+                None => return Err(SpecError::TooShort { min: 2, len }),
+                Some(&got) if got != sent[1] => {
+                    return Err(SpecError::ReplyMismatch {
+                        position: 2,
+                        expected: sent[1],
+                        got,
+                    })
+                }
+                Some(_) => {}
             }
         }
-        self.decode_unchecked(ecu, response)
+        Ok(())
     }
 
     /// Build the request frame: `SentBytes` with the given sent data items overwritten.

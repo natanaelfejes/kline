@@ -120,15 +120,26 @@ check, in order, and return a typed error:
 
 1. empty: `TooShort { min: max(MinBytes, 1) }`;
 2. `7F sid nrc`: `NegativeResponse { sid, nrc }` when `sid` is the sent SID, otherwise
-   `NegativeResponseForOtherSid { expected, got, nrc }` (`TooShort { min: 3 }` if cut off);
+   `NegativeResponseForOtherSid { expected, got, nrc }`; fewer than 3 bytes:
+   `TruncatedNegativeResponse { len }`;
 3. byte 1 must be `sent[0] + 0x40`: `UnexpectedSid { expected, got }` (`NoPositiveSid` when the
    request has no SentBytes or its SID is 0xC0 or above, e.g. Safir `FF00`);
 4. length >= `Received@MinBytes`: `TooShort { min, len }`;
-5. echo: response bytes 2 .. (first received `FirstByte` - 1), limited to the length of `sent`,
-   must equal `sent`: `ReplyMismatch { position, expected, got }`. In our files this is always
-   exactly byte 2 (the local identifier of `21 xx`, the Safir block number of `33 5x`, the
-   routine / IO identifier of `31 xx` / `30 xx`) or nothing (first item at byte 2). Requests
-   without received items skip it.
+5. echo of the local identifier: for the KWP2000 local-identifier services `21`, `30`, `31`,
+   `32`, `33`, `3B` response byte 2 must equal `sent[1]`: `ReplyMismatch { position: 2, .. }`.
+   `FirstByte` counts from the SID byte, so `61 A9 data...` has the identifier at position 2
+   and data from 3. SID `21` is always checked; the others only when no received item maps
+   byte 2 (S2000 `31 A2 00 00 00` maps it). Sirius 32 `21 81` / `21 82` map byte 2 as a
+   one-byte item (`LocalIvinOK`, `Locallmux OK`) and the echo check is what stops a `61 A9 ..`
+   frame from decoding as a VIN. Bytes after byte 2 are **not** compared with `sent`: the
+   position of the first mapped item says where the first item starts, not how many bytes
+   echo the request. Other SIDs (e.g. `23`, `2C`, `12`, `14`, whose items start at byte 2)
+   are not echo-checked.
+
+`decode_checked_allow_short` skips step 4 only: `MinBytes` is one number per request while one
+definition spans many software versions (Sirius 32: DiagVersion 4..21), so a caller that sees
+`TooShort` from an older ECU can fall back to it (items beyond the frame decode to `None`). We
+have no capture from a real ECU that needs it, which is why it is not the default.
 
 What ddt4all does (`core/ecu/ecu_request.py` `send_request`, `e109cd2`), and how we differ:
 
@@ -163,6 +174,9 @@ What ddt4all does (`core/ecu/ecu_request.py` `send_request`, `e109cd2`), and how
   - Ambiguity: for bit counts that are not a multiple of 8, the byte reversal gives odd values
     (12 bits of `34 12` give `0x1204`). We copy ddt4all. Our files use little endian only for
     1-bit, 16-bit and whole-`Bytes` items.
+    `insert` is still the exact inverse of `extract` for every raw that `extract` can return
+    (pinned for 12 bits in `fixture::little_endian_12_bit_insert_round_trips`); a numeric value
+    outside that set (12 bits, value 16) is refused with `Encode`, not written.
 
 ## From raw to value (`DataDef::interpret`)
 

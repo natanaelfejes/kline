@@ -435,7 +435,7 @@ fn checked_decode_rejects_bad_responses() {
     ));
     assert!(matches!(
         check(&[0x7F, 0x21]),
-        Err(SpecError::TooShort { min: 3, len: 2 })
+        Err(SpecError::TruncatedNegativeResponse { len: 2 })
     ));
     assert!(matches!(
         check(&[]),
@@ -631,11 +631,9 @@ fn decode_checked_does_not_panic_on_hand_built_first_byte_zero() {
     let mut r = e.request("Read Block").unwrap().clone();
     r.received_items[0].first_byte = 0;
     e.requests = vec![r.clone()];
-    let res = r.decode_checked(&e, &READ_BLOCK_FRAME);
-    assert!(
-        matches!(res, Err(SpecError::InvalidValue { .. })),
-        "{res:?}"
-    );
+    // No arithmetic on FirstByte any more; the item simply cannot be located.
+    let items = r.decode_checked(&e, &READ_BLOCK_FRAME).unwrap();
+    assert_eq!(items[0].raw, None);
 }
 
 #[test]
@@ -704,4 +702,95 @@ fn report_follows_the_recursive_lookup_of_the_parser() {
     assert!(e.data("d").unwrap().scaled.is_none());
     assert!(e.request("r").unwrap().received_items.is_empty());
     assert_eq!(report.warnings.len(), 2, "{:?}", report.warnings);
+}
+
+#[test]
+fn encode_exact_reports_range_before_grid() {
+    let e = ecu();
+    let wle = e.data("word le").unwrap(); // 16 bit, Step .5, Offset -10: max 32757.5
+                                          // Out of range AND off grid: an Encode error, not an OffGrid whose `nearest` cannot encode.
+    let res = wle.encode_exact(&Value::Number(40000.25));
+    assert!(matches!(res, Err(SpecError::Encode { .. })), "{res:?}");
+    // In range and off grid: `nearest` is itself encodable.
+    let Err(SpecError::OffGrid { nearest, .. }) = wle.encode_exact(&Value::Number(2320.25)) else {
+        panic!("expected OffGrid");
+    };
+    assert!(wle.encode_exact(&Value::Number(nearest)).is_ok());
+}
+
+#[test]
+fn allow_short_relaxes_only_min_bytes() {
+    let e = ecu();
+    let rb = e.request("Read Block").unwrap(); // MinBytes 18
+    let short = &READ_BLOCK_FRAME[..10];
+    assert!(matches!(
+        rb.decode_checked(&e, short),
+        Err(SpecError::TooShort { min: 18, len: 10 })
+    ));
+    let items = rb.decode_checked_allow_short(&e, short).unwrap();
+    assert_eq!(items.len(), 13);
+    assert!(items.iter().any(|i| i.raw.is_none()), "tail items are None");
+    assert!(items.iter().any(|i| i.raw.is_some()), "head items decode");
+    // SID, NRC and echo checks stay on.
+    assert!(matches!(
+        rb.decode_checked_allow_short(&e, &[0x7F, 0x21, 0x12]),
+        Err(SpecError::NegativeResponse { .. })
+    ));
+    assert!(matches!(
+        rb.decode_checked_allow_short(&e, &[0x7F]),
+        Err(SpecError::TruncatedNegativeResponse { len: 1 })
+    ));
+    assert!(matches!(
+        rb.decode_checked_allow_short(&e, &[0x62, 0x01]),
+        Err(SpecError::UnexpectedSid { .. })
+    ));
+    assert!(matches!(
+        rb.decode_checked_allow_short(&e, &[0x61, 0x05, 0x00]),
+        Err(SpecError::ReplyMismatch { position: 2, .. })
+    ));
+    assert!(matches!(
+        rb.decode_checked_allow_short(&e, &[0x61]),
+        Err(SpecError::TooShort { min: 2, len: 1 })
+    ));
+}
+
+#[test]
+fn little_endian_12_bit_insert_round_trips() {
+    let xml = target(r#"<Datas><Data Name="d"><Bits count="12"><Scaled/></Bits></Data></Datas>"#);
+    let e = EcuDef::from_xml_bytes(&xml).unwrap();
+    let d = e.data("d").unwrap();
+    let item = DataItem {
+        name: "d".into(),
+        first_byte: 1,
+        bit_offset: 0,
+        reference: false,
+        endian: Some(Endian::Little),
+    };
+    // insert is the exact inverse of extract on every raw that extract can produce (the 12-bit
+    // span value X comes back byte-swapped, ddt4all's odd result for LE items that are not a
+    // multiple of 8 bits wide; docs/spec-semantics.md), and bits 12..16 are left untouched.
+    for x in 0..0x1000u16 {
+        let frame = (0xF000 | x).to_be_bytes();
+        let raw = d.raw_from_bytes(&d.extract(&frame, &item, Endian::Big).unwrap());
+        assert_eq!(raw, Raw::Int(u64::from(x.swap_bytes())), "x={x:#x}");
+        let mut out = [0xFFu8, 0xFF];
+        d.insert(&raw, &mut out, &item, Endian::Big).unwrap();
+        assert_eq!(out, (0xF000 | x).to_be_bytes(), "x={x:#x}");
+    }
+    // A raw outside that set is refused instead of corrupting the neighbouring bits.
+    let mut frame = [0u8; 2];
+    assert!(matches!(
+        d.insert(&Raw::Int(16), &mut frame, &item, Endian::Big),
+        Err(SpecError::Encode { .. })
+    ));
+    assert_eq!(frame, [0, 0]);
+}
+
+#[test]
+fn addressing_rejects_dtd() {
+    let xml = br#"<?xml version="1.0"?><!DOCTYPE Functions [<!ENTITY a "x">]><Functions/>"#;
+    assert!(matches!(
+        Addressing::from_xml_bytes(xml),
+        Err(SpecError::Xml(_))
+    ));
 }
