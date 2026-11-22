@@ -492,6 +492,9 @@ pub struct Attempt {
     pub round: u8,
     pub address_byte: Option<u8>,
     pub error: Option<String>,
+    /// The wait before the next attempt because the ECU answered this failed one (P3max,
+    /// final critique F14).
+    pub answered_wait_ms: Option<u32>,
 }
 
 impl Attempt {
@@ -503,7 +506,44 @@ impl Attempt {
             "address_byte": self.address_byte.map(|b| format!("{b:02X}")),
             "ok": self.error.is_none(),
             "error": self.error,
+            "answered_wait_ms": self.answered_wait_ms,
         })
+    }
+}
+
+/// Whether the ECU sent anything in a failed init attempt (key bytes, ~address, a reply or
+/// part of one), so it may still be in a half-open session (final critique F14). False only
+/// when nothing came back: silence, no echo, a timing-guard abort before the request, or a
+/// refusal before anything was sent. A collision counts as answered (the other talker may be
+/// the ECU): waiting too long is the safe side.
+pub fn ecu_answered(e: &LinkError) -> bool {
+    match e {
+        LinkError::NoKeywords { received } => !received.is_empty(),
+        LinkError::NoReply
+        | LinkError::KLineInactive
+        | LinkError::InitTiming { .. }
+        | LinkError::Denied(_)
+        | LinkError::WrongInitKind
+        | LinkError::AliasedAddress { .. }
+        | LinkError::PermitMismatch
+        | LinkError::UnexpectedEvent => false,
+        LinkError::KeywordMismatch { .. }
+        | LinkError::NoAddressComplement { .. }
+        | LinkError::Collision { .. }
+        | LinkError::IncompleteReply { .. }
+        | LinkError::Frame(_)
+        | LinkError::TooManyPending { .. }
+        | LinkError::UnexpectedStartReply(_) => true,
+    }
+}
+
+/// Sleep `ms` in steps of at most 100 ms, returning early when `stopped()` (Ctrl-C).
+fn sleep_unless_stopped(link: &mut Link, ms: u32, stopped: &dyn Fn() -> bool) {
+    let mut left = ms;
+    while left > 0 && !stopped() {
+        let step = left.min(100);
+        link.t.sleep_ms(step);
+        left -= step;
     }
 }
 
@@ -556,7 +596,8 @@ pub fn connect(
         .flat_map(|r| variants.iter().map(move |&v| (r, v)))
         .collect();
     let mut last_round = 1;
-    for (round, v) in schedule {
+    let attempts_total = schedule.len();
+    for (index, (round, v)) in schedule.into_iter().enumerate() {
         if stopped() {
             return Err(interrupted());
         }
@@ -572,7 +613,18 @@ pub fn connect(
         let address_byte = (!matches!(cfg.init_kind(), InitKind::KwpFast { .. }))
             .then(|| cfg.five_baud_address_byte());
         let r = link.init(&cfg).map_err(CliError::io)?;
+        // F14: the ECU answered this failed attempt, so it may still hold a half-open
+        // session; the next init waits P3max for it to time out. A failed attempt never has
+        // an open Session here (one exists only after a complete init), so there is no Stop
+        // to send instead.
+        let answered_wait_ms = match &r {
+            Err(e) if ecu_answered(e) && index + 1 < attempts_total => {
+                Some(policy.answered_init_wait_ms)
+            }
+            _ => None,
+        };
         let a = Attempt {
+            answered_wait_ms,
             variant: v,
             round,
             address_byte,
@@ -599,6 +651,13 @@ pub fn connect(
         }
         on_attempt(&a);
         attempts.push(a);
+        if let Some(ms) = answered_wait_ms {
+            link.trace.line(
+                link.t.now_us(),
+                format!("INIT the ECU answered the failed attempt: waiting {ms} ms (P3max) before the next init"),
+            );
+            sleep_unless_stopped(link, ms, &stopped);
+        }
         if let Ok(o) = r {
             if let Some(w) = o.sync_warning() {
                 link.trace

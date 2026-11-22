@@ -254,6 +254,18 @@ our MultiEcu fallback; ISO8 (Safir) only SingleEcu. The whole list is tried up t
 500 ms apart (DDT2000 "Init retry n/3"; `--init-attempts`). Constants:
 `kline_core::retry::{DDT2000_DETECTION_ORDER, RetryPolicy}`.
 
+Wait after an answered attempt (final critique F14, ours): when a failed attempt got anything
+from the ECU (key bytes, ~address, a StartCommunication reply or part of one, or a collision),
+the ECU may still be in a half-open session, so the next init starts only after
+`RetryPolicy::answered_init_wait_ms` = P3max, 5000 ms (ISO 14230-2,
+`timing::consts::P3_MAX_MS`), on top of the normal gap. Silence, a missing echo and a
+timing-guard abort get no extra wait. A failed attempt never has an open session in kline (the
+`Session` exists only after a complete init), so there is no Stop to send instead. The trace
+says `INIT the ECU answered the failed attempt: waiting 5000 ms (P3max) before the next init`,
+the attempt line `... after waiting 5000 ms (P3max) ...` (JSON `answered_wait_ms`). Ctrl-C
+ends the wait within 100 ms. DDT2000 has no such wait; NOT VERIFIED that the car's ECUs need
+it.
+
 ## KWP2000 fast init (ISO 14230-2)
 
 RE: IOTBD32V3 fast init: (ours) idle 300 ms, DTR high, 1 ms, break 25 ms, break off 25 ms,

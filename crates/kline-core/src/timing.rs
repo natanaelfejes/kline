@@ -47,6 +47,10 @@ pub mod consts {
     pub const RESPONSE_PENDING_TIMEOUT_MS: u32 = 5_000;
     /// Maximum consecutive 0x78 replies before giving up. ours.
     pub const MAX_RESPONSE_PENDING: u8 = 10;
+    /// P3max: an ECU ends its session after this long without a request (ISO 14230-2,
+    /// 5000 ms). Used as the wait before the next init after an attempt the ECU answered
+    /// (final critique F14); DDT2000 has no such wait.
+    pub const P3_MAX_MS: u32 = 5_000;
 }
 
 /// How the link is initialised and framed.

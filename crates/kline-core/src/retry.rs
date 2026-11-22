@@ -36,6 +36,10 @@ pub struct RetryPolicy {
     pub cycle_retries: u8,
     /// Wait before such a retry. RE: DdtDiagScrXml 0x5204ce50 `param_1[0x32] = 0x190`.
     pub cycle_retry_ms: u32,
+    /// Wait before the next init after a failed attempt in which the ECU answered (key bytes
+    /// or a reply): it may still be in a half-open session. ours (final critique F14):
+    /// [`crate::timing::consts::P3_MAX_MS`]; DDT2000 goes on after its usual gap.
+    pub answered_init_wait_ms: u32,
 }
 
 impl Default for RetryPolicy {
@@ -48,6 +52,7 @@ impl Default for RetryPolicy {
             init_retry_ms: 500,
             cycle_retries: 3,
             cycle_retry_ms: 400,
+            answered_init_wait_ms: crate::timing::consts::P3_MAX_MS,
         }
     }
 }

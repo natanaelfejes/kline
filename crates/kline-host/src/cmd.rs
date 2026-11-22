@@ -662,6 +662,12 @@ pub fn open_session(
                         ),
                         None => String::new(),
                     };
+                    let then = match a.answered_wait_ms {
+                        Some(ms) => format!(
+                            "{then} after waiting {ms} ms (P3max): the ECU answered and may still be in its session"
+                        ),
+                        None => then,
+                    };
                     if next.is_none() {
                         format!("{head}{}: {e}", what(a.address_byte))
                     } else if a.address_byte.is_none()
