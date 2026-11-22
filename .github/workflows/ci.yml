@@ -1,0 +1,52 @@
+# CI: the docs/SAFETY.md gates on Linux, macOS and Windows. No Renault data is available here, so
+# the real-definition tests skip (they print SKIPPED); the pty simulator tests run on Linux and
+# macOS only (Unix pty), the in-process simulator e2e runs on all three.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  gates:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: test
+        run: cargo test --all-features
+      - name: no_std build (kline-core)
+        run: cargo build -p kline-core --no-default-features
+      - name: release kline-agent (refuses approved-routines)
+        run: cargo build --release -p kline-agent
+      - name: no Renault data tracked
+        shell: bash
+        # Windows runners name the interpreter `python`, not `python3`.
+        run: PYTHON=${{ runner.os == 'Windows' && 'python' || 'python3' }} scripts/check-no-renault-data.sh
+      - name: selftest without a cable fails gracefully (exit 3)
+        shell: bash
+        run: |
+          set +e
+          cargo run -q --release -p kline-cli -- selftest
+          code=$?
+          echo "exit=$code"
+          test "$code" -eq 3

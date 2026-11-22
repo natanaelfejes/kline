@@ -6,7 +6,11 @@
 //! macOS a wake-up is typically 50-500 us late but can be more under load.
 //!
 //! So [`sleep_until_us`] sleeps the OS way until [`SPIN_TAIL_US`] before the deadline and
-//! busy-waits the rest on the monotonic clock. On Windows [`TimerResolution`] additionally asks
+//! busy-waits the rest on the monotonic clock. [`AdaptiveTail`] (what the transport uses) also
+//! learns how late the OS sleep itself wakes up and widens the tail to twice that (at most
+//! [`MAX_TAIL_US`]): measured on an M4 Pro under macOS 27, `thread::sleep` woke up to ~5 ms late
+//! (timer coalescing), far beyond a 1 ms tail. The idle wait (W5, 300 ms) before every init
+//! teaches it before the first timed edge. On Windows [`TimerResolution`] additionally asks
 //! for a 1 ms system tick (`timeBeginPeriod(1)`) for as long as a serial transport is open, so the
 //! OS part never overshoots into the spin tail by a whole 15.6 ms tick even where the Rust
 //! standard library's high-resolution waitable timer is unavailable (Windows before 10 1803).
@@ -18,6 +22,59 @@ use std::time::{Duration, Instant};
 /// 1 ms tick `timeBeginPeriod(1)` gives plus scheduling slack; elsewhere 1 ms, above the
 /// typical hrtimer wake-up latency of Linux/macOS.
 pub const SPIN_TAIL_US: u64 = if cfg!(windows) { 2_000 } else { 1_000 };
+
+/// Upper bound of the adaptive tail (ours): TiniL (25 ms) is then busy-waited entirely.
+pub const MAX_TAIL_US: u64 = 25_000;
+
+/// A spin tail that grows with the OS sleep's observed lateness (see the module docs).
+#[derive(Debug, Clone)]
+pub struct AdaptiveTail {
+    base_us: u64,
+    max_os_late_us: u64,
+}
+
+impl AdaptiveTail {
+    pub fn new(base_us: u64) -> AdaptiveTail {
+        AdaptiveTail {
+            base_us,
+            max_os_late_us: 0,
+        }
+    }
+
+    /// The tail the next sleep uses: base plus twice the worst OS lateness seen, capped.
+    pub fn tail_us(&self) -> u64 {
+        (self.base_us + 2 * self.max_os_late_us)
+            .min(MAX_TAIL_US)
+            .max(self.base_us)
+    }
+
+    /// Worst lateness of an OS sleep seen so far (us).
+    pub fn max_os_late_us(&self) -> u64 {
+        self.max_os_late_us
+    }
+
+    /// [`sleep_until_us`] with the learned tail; records how late each OS sleep woke.
+    pub fn sleep_until_us(&mut self, s: &mut impl Sleeper, target_us: u64) {
+        loop {
+            let now = s.now_us();
+            if now >= target_us {
+                return;
+            }
+            let rem = target_us - now;
+            let tail = self.tail_us();
+            if rem <= tail {
+                break;
+            }
+            let req = rem - tail;
+            s.os_sleep_us(req);
+            let late = s.now_us().saturating_sub(now + req);
+            self.max_os_late_us = self.max_os_late_us.max(late);
+        }
+        while s.now_us() < target_us {
+            s.spin();
+        }
+    }
+}
 
 /// What [`sleep_until_us`] needs: a monotonic clock, a (possibly coarse, late-waking) OS sleep
 /// and one busy-wait step. Mocked in tests.
@@ -197,6 +254,34 @@ mod tests {
         let mut m = mock(300, 1_000);
         sleep_until_us(&mut m, 25_000, 2_000);
         assert_eq!(m.now, 25_000);
+    }
+
+    #[test]
+    fn the_adaptive_tail_learns_a_late_os_sleep_and_then_lands_on_time() {
+        // macOS timer coalescing: every OS sleep wakes 4 ms late, beyond a 1 ms tail.
+        let mut m = mock(4_000, 0);
+        let mut a = AdaptiveTail::new(1_000);
+        // W5 idle (300 ms) first: late, but it teaches the tail.
+        a.sleep_until_us(&mut m, 300_000);
+        assert_eq!(m.now, 303_000, "first OS sleep: 299 ms + 4 ms late");
+        assert_eq!((a.max_os_late_us(), a.tail_us()), (4_000, 9_000));
+        // TiniL then lands exactly.
+        let t = m.now + 25_000;
+        a.sleep_until_us(&mut m, t);
+        assert_eq!(m.now, t);
+        // An outlier is capped: never more than MAX_TAIL_US of spinning.
+        let mut m = mock(100_000, 0);
+        let mut a = AdaptiveTail::new(1_000);
+        a.sleep_until_us(&mut m, 200_000);
+        assert_eq!(a.tail_us(), MAX_TAIL_US);
+        let t = m.now + 25_000;
+        a.sleep_until_us(&mut m, t);
+        assert_eq!(m.now, t);
+        assert_eq!(
+            m.os_calls.len(),
+            1,
+            "25 ms with a 25 ms tail is spun entirely"
+        );
     }
 
     #[test]

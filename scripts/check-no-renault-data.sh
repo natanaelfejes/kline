@@ -12,7 +12,7 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 KB_LIMIT="${KB_LIMIT:-8}"
 
-git ls-files -z | KB_LIMIT="$KB_LIMIT" python3 -I -c '
+git ls-files -z | KB_LIMIT="$KB_LIMIT" "${PYTHON:-python3}" -I -c '
 import os, re, sys
 limit = int(os.environ["KB_LIMIT"]) * 1024
 names = re.compile(r"^(S2000|BMT_X65|SBMT).*\.(xml|xml\.gz|zip)$", re.I)

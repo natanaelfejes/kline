@@ -164,6 +164,10 @@ pub const SLEEP_TARGETS: [(u32, u64); 3] = [
 ];
 /// Repetitions per sleep target (ours: ~2.3 s in total).
 pub const SLEEP_REPS: u32 = 10;
+/// One sleep before measuring, as the idle wait W5 (300 ms, docs/protocol.md) precedes every
+/// init: it lets the adaptive spin tail ([`crate::hrtimer::AdaptiveTail`]) learn the OS's
+/// lateness. ours.
+pub const SLEEP_WARMUP_MS: u32 = 300;
 
 /// How late (or early) sleeps of one target woke up.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

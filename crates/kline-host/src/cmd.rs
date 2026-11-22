@@ -575,6 +575,8 @@ fn selftest_timing(ctx: &mut Ctx) {
     let mut clock = (ctx.env.host_clock)();
     let res = SystemClock::new();
     let tick_1ms = res.timer_resolution_active();
+    let w = clock.now_us() + u64::from(crate::selftest::SLEEP_WARMUP_MS) * 1000;
+    clock.sleep_until_us(w);
     let js: Vec<crate::selftest::SleepJitter> = crate::selftest::SLEEP_TARGETS
         .iter()
         .map(|&(ms, tol)| {
@@ -588,10 +590,13 @@ fn selftest_timing(ctx: &mut Ctx) {
         .collect();
     drop(res);
     let ok = js.iter().all(|j| j.ok);
+    let tail = clock.spin_tail_us();
+    let os_late = clock.os_oversleep_max_us();
     let mut human = format!(
-        "host timing ({}, spin tail {} us{}):",
+        "host timing ({}, spin tail {} us, OS sleep up to {} us late{}):",
         std::env::consts::OS,
-        crate::hrtimer::SPIN_TAIL_US,
+        tail.unwrap_or(crate::hrtimer::SPIN_TAIL_US),
+        os_late.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
         if cfg!(windows) {
             if tick_1ms {
                 ", timeBeginPeriod(1) granted"
@@ -617,7 +622,8 @@ fn selftest_timing(ctx: &mut Ctx) {
     }
     ctx.out.emit(
         json!({"event": "selftest_timing", "os": std::env::consts::OS,
-               "spin_tail_us": crate::hrtimer::SPIN_TAIL_US,
+               "spin_tail_base_us": crate::hrtimer::SPIN_TAIL_US,
+               "spin_tail_us": tail, "os_oversleep_max_us": os_late,
                "timer_1ms_tick": tick_1ms, "sleep_jitter": js, "ok": ok}),
         human,
     );

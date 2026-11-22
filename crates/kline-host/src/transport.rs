@@ -42,12 +42,21 @@ pub trait Transport {
 pub trait Clock {
     fn now_us(&self) -> u64;
     fn sleep_until_us(&mut self, t_us: u64);
+    /// Worst lateness of the OS sleep seen so far, if the clock tracks it (selftest).
+    fn os_oversleep_max_us(&self) -> Option<u64> {
+        None
+    }
+    /// The busy-wait tail the next sleep uses, if any (selftest).
+    fn spin_tail_us(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// Real time from `Instant`, with the high-resolution sleep of [`crate::hrtimer`] (OS sleep plus
 /// a busy-wait tail; on Windows a 1 ms system tick while the clock lives).
 pub struct SystemClock {
     sleeper: crate::hrtimer::OsSleeper,
+    tail: crate::hrtimer::AdaptiveTail,
     resolution: crate::hrtimer::TimerResolution,
 }
 
@@ -56,6 +65,7 @@ impl SystemClock {
         SystemClock {
             resolution: crate::hrtimer::TimerResolution::request(),
             sleeper: crate::hrtimer::OsSleeper { t0: Instant::now() },
+            tail: crate::hrtimer::AdaptiveTail::new(crate::hrtimer::SPIN_TAIL_US),
         }
     }
 
@@ -77,7 +87,13 @@ impl Clock for SystemClock {
         self.sleeper.now_us()
     }
     fn sleep_until_us(&mut self, t_us: u64) {
-        crate::hrtimer::sleep_until_us(&mut self.sleeper, t_us, crate::hrtimer::SPIN_TAIL_US);
+        self.tail.sleep_until_us(&mut self.sleeper, t_us);
+    }
+    fn os_oversleep_max_us(&self) -> Option<u64> {
+        Some(self.tail.max_os_late_us())
+    }
+    fn spin_tail_us(&self) -> Option<u64> {
+        Some(self.tail.tail_us())
     }
 }
 

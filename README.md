@@ -23,7 +23,7 @@ this). Put your own copies in a directory and point kline at it:
 kline --defs /path/to/ecus ...        # or export KLINE_DDT_XML=/path/to/ecus
 ```
 
-Default: `~/.local/share/kline/ecus`. `--xml FILE` takes a single definition. (`CLIO_DDT_XML` is
+Default: `~/.local/share/kline/ecus` (Linux, macOS) or `%APPDATA%\kline\ecus` (Windows). `--xml FILE` takes a single definition. (`CLIO_DDT_XML` is
 still read as a deprecated fallback for one release.) The tests that need real definitions look in
 `ddt-xml/` (gitignored) or `$KLINE_DDT_XML` and are skipped when absent.
 
@@ -40,7 +40,8 @@ The policy lives in `kline-core`, not in the CLI, and is default-deny on the exa
 | Forbidden | immobilizer/transponder/key functions only (BMT/UCH/decoder and Sirius immobilizer fields, plus definition requests named like them) | never |
 
 Approvals exist only with the cargo feature `approved-routines`, which only the interactive
-`kline` binary enables; it reads the confirmation from `/dev/tty`. `kline-agent` (read-only,
+`kline` binary enables; it reads the confirmation from `/dev/tty` (Windows: the console,
+`CONIN$`). `kline-agent` (read-only,
 JSON, for AI use) is built without it and can only *prepare* a request. Details:
 [docs/protocol.md](docs/protocol.md).
 
@@ -50,17 +51,31 @@ protection against an AI agent that drives a terminal: such an agent can read th
 screen and type it. The owner allows that deliberately when he lets an agent run `kline exec`. If
 you run AI agents and do not want that, do not give them a terminal that can run `kline`.
 
+## Install and build
+
+kline builds and its test suite runs on Linux, macOS and Windows (CI matrix in
+`.github/workflows/ci.yml`; per-OS cables, drivers, permissions and timing in
+[docs/platforms.md](docs/platforms.md)). You need Rust stable (https://rustup.rs) and nothing else
+on Linux and macOS; on Windows the MSVC toolchain (Visual Studio Build Tools, "Desktop development
+with C++", plus the ARM64 tools on an ARM PC).
+
+| OS | Cable shows up as | Driver | Before first use |
+|---|---|---|---|
+| Linux | `/dev/ttyUSB0` | `ftdi_sio` (in the kernel) | join the `dialout` group (`uucp` on Arch); optional `kline selftest --set-latency 1` |
+| macOS | `/dev/cu.usbserial-*` | AppleUSBFTDI (built in) | nothing; never use `/dev/tty.*` |
+| Windows | `COM3`, `COM12`, ... | FTDI VCP (Windows Update or ftdichip.com) | Device Manager > Port > Advanced > Latency Timer 1 ms |
+
 ## Build and run
 
 ```
-cargo build --release -p kline-cli      # target/release/kline
+cargo build --release -p kline-cli      # target/release/kline (kline.exe on Windows)
 cargo build --release -p kline-agent    # target/release/kline-agent (no approvals)
 kline ports
 kline selftest                          # cable in the computer only, not in a car
 kline connect --ecu sirius
 ```
 
-Captures (JSONL) go to `~/.local/share/kline/captures` by default; override with
+Captures (JSONL) go to `~/.local/share/kline/captures` (Windows: `%APPDATA%\kline\captures`) by default; override with
 `--captures DIR` (alias `--capture-dir`) or `KLINE_CAPTURE_DIR`. Full command reference:
 [docs/cli.md](docs/cli.md). Simulator: [docs/sim.md](docs/sim.md).
 
@@ -72,7 +87,7 @@ feature into it and `kline-agent` then refuses to start (exit 7; see docs/cli.md
 
 - `crates/kline-spec`: DDT2000 XML to typed model, data decode/encode (pure)
 - `crates/kline-core`: `no_std` + alloc protocol engine and safety policy
-- `crates/kline-sim`: ECU simulator over a pty for end-to-end tests
+- `crates/kline-sim`: ECU simulator, in-process (all OSes) and over a pty (Linux, macOS) for end-to-end tests
 - `crates/kline-host`: shared runtime (transports, capture, commands)
 - `crates/kline-cli`: `kline` binary
 - `crates/kline-agent`: `kline-agent` binary
