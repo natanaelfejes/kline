@@ -139,4 +139,4 @@ pub use error::LinkError;
 pub mod security_regressions {}
 pub use io::{Action, Event, Step};
 pub use retry::{RetryPolicy, TesterPresentMode};
-pub use timing::{InitKind, InitVariant, KTiming, LinkConfig, RtsMode};
+pub use timing::{DtrMode, InitKind, InitVariant, KTiming, LinkConfig, RtsMode};

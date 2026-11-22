@@ -194,6 +194,33 @@ pub struct LinkConfig {
     /// What the host does with RTS right after it opens the port, before the first init
     /// ([`RtsMode`]). Default [`RtsMode::Leave`].
     pub rts: RtsMode,
+    /// What the host does with DTR right after it opens the port, before the first init
+    /// ([`DtrMode`]). Default [`DtrMode::High`]. The inits drive DTR themselves afterwards.
+    pub dtr: DtrMode,
+    /// Override of P3 (`ReplyToRequest@Delay`), the minimum gap between a reply and the next
+    /// request; `None`: the definition's value. Final critique F09: the definitions say 5 ms,
+    /// ISO 14230-2 P3min is 55 ms; NOT VERIFIED which one the car's ECUs need.
+    pub p3_ms: Option<u32>,
+    /// Override of the tester inter-byte time (`InterByte@Delay`, ISO 14230-2 P4, 0..20 ms);
+    /// `None`: the definition's value (or Multipoint's fixed 7 ms).
+    pub inter_byte_ms: Option<u32>,
+    /// Override of W4, the wait after KW2 before ~KW2 (`KW2_@Delay`, ISO 14230-2 W4 25..50 ms);
+    /// `None`: the definition's value.
+    pub w4_ms: Option<u32>,
+}
+
+/// DTR line state right after the port is opened, before the first init (final critique
+/// F15). The FTDI KKL cable's use of DTR is NOT VERIFIED: DDT2000 drives it low during the
+/// 5-baud bits with its own interface, which this tool copies in the init.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DtrMode {
+    /// Raise DTR once after open (default; what the open did before this option existed).
+    #[default]
+    High,
+    /// Drop DTR once after open.
+    Low,
+    /// Do not touch DTR after open: as the OS opened the port.
+    Leave,
 }
 
 /// RTS line handling after the port is opened. DDT2000's IOTBDSetup opens the port with RTS
@@ -236,6 +263,10 @@ impl LinkConfig {
             tester_present_mode: crate::retry::TesterPresentMode::Idle,
             strict_break_loopback: false,
             rts: RtsMode::Leave,
+            dtr: DtrMode::High,
+            p3_ms: None,
+            inter_byte_ms: None,
+            w4_ms: None,
         }
     }
 
@@ -258,8 +289,9 @@ impl LinkConfig {
         }
     }
 
-    /// Timing actually used: `timing` with [`LinkConfig::init_kind`], and with Multipoint in
-    /// effect DDT2000's fixed values (RE: KWP2000Diag4 KWP2000Ecu Multipoint init 0x2305a370
+    /// Timing actually used: `timing` with [`LinkConfig::init_kind`], last the command-line
+    /// overrides [`LinkConfig::p3_ms`], [`LinkConfig::inter_byte_ms`] and [`LinkConfig::w4_ms`],
+    /// and before them, with Multipoint in effect, DDT2000's fixed values (RE: KWP2000Diag4 KWP2000Ecu Multipoint init 0x2305a370
     /// at 0x2305aa5e..0x2305ae2b, same in 0x230673c0): 10400 baud, inter-byte 7, KW2 delay 25,
     /// FirstRequest 20, ReplyToRequest 5, TesterPresent 3000, and 300 for KW2Timeout,
     /// RequestToReply and OnError. The monopoint branch of the same function passes the
@@ -279,6 +311,16 @@ impl LinkConfig {
             t.kw2_timeout_ms = 300;
             t.request_to_reply_timeout_ms = 300;
             t.on_error_ms = consts::MULTIPOINT_ON_ERROR_MS;
+        }
+        // Command-line overrides (final critique F09) win over the definition and Multipoint.
+        if let Some(v) = self.p3_ms {
+            t.reply_to_request_ms = v;
+        }
+        if let Some(v) = self.inter_byte_ms {
+            t.inter_byte_ms = v;
+        }
+        if let Some(v) = self.w4_ms {
+            t.kw2_delay_ms = v;
         }
         t
     }

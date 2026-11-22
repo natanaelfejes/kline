@@ -57,6 +57,51 @@ pub struct GlobalArgs {
     /// 100 ms. If connect fails with no keywords received, retry with `--kw-window 700`.
     #[arg(long, global = true, value_name = "MS", value_parser = clap::value_parser!(u32).range(100..=2000))]
     pub kw_window: Option<u32>,
+    /// P3: minimum gap in ms between a reply and the next request (0..=1000; default: the
+    /// definition's ReplyToRequest, 5 ms on the car's ECUs; ISO 14230-2 P3min is 55). Try
+    /// `--p3 55` when the second request of a session is not answered.
+    #[arg(long, global = true, value_name = "MS", value_parser = clap::value_parser!(u32).range(0..=1000))]
+    pub p3: Option<u32>,
+    /// Tester inter-byte time in ms (0..=20, ISO 14230-2 P4; default: the definition's
+    /// InterByte, 0 = a frame in one write; Multipoint 7).
+    #[arg(long, global = true, value_name = "MS", value_parser = clap::value_parser!(u32).range(0..=20))]
+    pub inter_byte: Option<u32>,
+    /// W4: wait in ms after the key bytes before ~KW2 in a 5-baud init (25..=50, ISO 14230-2;
+    /// default: the definition's KW2 delay, 25).
+    #[arg(long, global = true, value_name = "MS", value_parser = clap::value_parser!(u32).range(25..=50))]
+    pub w4: Option<u32>,
+    /// DTR after the port is opened, before the first init (also `selftest`): `high`
+    /// (default, as before), `low`, or `leave` it as the OS opened the port. The inits drive
+    /// DTR themselves. Whether the KKL cable uses DTR is NOT VERIFIED.
+    #[arg(long, global = true, value_enum, default_value_t = DtrArg::High)]
+    pub dtr: DtrArg,
+}
+
+/// `--dtr` ([`kline_core::DtrMode`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum DtrArg {
+    #[default]
+    High,
+    Low,
+    Leave,
+}
+
+impl DtrArg {
+    pub fn mode(self) -> kline_core::DtrMode {
+        match self {
+            DtrArg::High => kline_core::DtrMode::High,
+            DtrArg::Low => kline_core::DtrMode::Low,
+            DtrArg::Leave => kline_core::DtrMode::Leave,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DtrArg::High => "high",
+            DtrArg::Low => "low",
+            DtrArg::Leave => "leave",
+        }
+    }
 }
 
 /// `--rts` ([`kline_core::RtsMode`]).
@@ -106,7 +151,30 @@ impl GlobalArgs {
         if let Some(ms) = self.kw_window {
             v.extend(["--kw-window".into(), ms.to_string()]);
         }
+        for (flag, val) in [
+            ("--p3", self.p3),
+            ("--inter-byte", self.inter_byte),
+            ("--w4", self.w4),
+        ] {
+            if let Some(ms) = val {
+                v.extend([flag.into(), ms.to_string()]);
+            }
+        }
+        if self.dtr != DtrArg::High {
+            v.extend(["--dtr".into(), self.dtr.label().into()]);
+        }
         v
+    }
+
+    /// Apply the global link options to `cfg` (RTS/DTR after open, keyword window, timing
+    /// overrides).
+    pub fn apply(&self, cfg: &mut kline_core::LinkConfig) {
+        cfg.rts = self.rts.mode();
+        cfg.dtr = self.dtr.mode();
+        cfg.kw_window_ms = self.kw_window;
+        cfg.p3_ms = self.p3;
+        cfg.inter_byte_ms = self.inter_byte;
+        cfg.w4_ms = self.w4;
     }
 }
 
@@ -496,8 +564,7 @@ pub fn open_session(
         cfg.tester_present_mode = kline_core::TesterPresentMode::DDT2000_PERIODIC;
     }
     cfg.strict_break_loopback = args.strict_loopback;
-    cfg.rts = ctx.g.rts.mode();
-    cfg.kw_window_ms = ctx.g.kw_window;
+    ctx.g.apply(&mut cfg);
     let policy = args.retry_policy();
     let spec = ctx.port_spec()?;
     let tracer = if ctx.g.trace {
@@ -542,7 +609,7 @@ pub fn open_session(
     let t = (ctx.env.opener)(&spec, cfg.timing.baud, tracer.clone())
         .map_err(|e| CliError::port(format!("cannot open {port_desc}: {e}")))?;
     let mut link = Link::new(t, tracer, Some(cap));
-    link.prepare_port(cfg.rts).map_err(CliError::io)?;
+    link.prepare_port(cfg.dtr, cfg.rts).map_err(CliError::io)?;
     let variants = link::variants(&cfg, args.variant);
     let out = ctx.out.clone();
     // The whole schedule, so a failed attempt can say what comes next.
@@ -929,7 +996,8 @@ pub fn selftest(ctx: &mut Ctx, a: &SelftestArgs) -> Result<(), CliError> {
     } else {
         Tracer::off()
     };
-    crate::link::prepare_port(t.as_mut(), &trace, ctx.g.rts.mode()).map_err(CliError::io)?;
+    crate::link::prepare_port(t.as_mut(), &trace, ctx.g.dtr.mode(), ctx.g.rts.mode())
+        .map_err(CliError::io)?;
     let reported = t.baud_rate();
     let j = crate::selftest::measure_break_jitter(
         t.as_mut(),

@@ -135,6 +135,19 @@ the KWP2000Ecu Multipoint init. Class defaults apply only when the XML attribute
 `LinkConfig::effective_timing()` applies the Multipoint column only under `MultiEcu`.
 XML values are assumed to be ms.
 
+Command-line overrides (final critique F09, ours): `LinkConfig::p3_ms` (`--p3`, 0..=1000),
+`inter_byte_ms` (`--inter-byte`, 0..=20, ISO 14230-2 P4 range) and `w4_ms` (`--w4`, 25..=50,
+ISO 14230-2 W4 range) replace `reply_to_request_ms`, `inter_byte_ms` and `kw2_delay_ms` in
+`effective_timing()`, after the Multipoint column. The defaults stay the definition's values
+above: the car's definitions give P3 5 ms and inter-byte 0, below ISO 14230-2 P3min 55 ms and
+P4min 5 ms; NOT VERIFIED which values the car's ECUs need. The init trace line names the
+effective values and marks an overridden one (`P3 55 ms (--p3)`). `--p3` does not change
+`first_request_ms`, the wait after the init before the first request.
+
+DTR after open (final critique F15, ours): `LinkConfig::dtr` (`--dtr high|low|leave`, default
+high) is set once right after the port opens, before the first init and before `selftest`'s
+break toggles (`PORT dtr=..` in the trace); the inits then drive DTR as below.
+
 ### Fixed constants (`timing::consts`)
 
 | Constant | Value | Source |

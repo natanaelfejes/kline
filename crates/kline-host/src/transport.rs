@@ -863,7 +863,7 @@ impl SerialportIo {
             .timeout(Duration::from_millis(10));
         #[cfg(unix)]
         #[allow(unused_variables)] // fd: macOS only
-        let (mut port, fd): (Box<dyn serialport::SerialPort>, _) = {
+        let (port, fd): (Box<dyn serialport::SerialPort>, _) = {
             use std::os::unix::io::AsRawFd;
             let mut native = builder.open_native().map_err(io::Error::from)?;
             apply_kline_settings(&mut NativeLine(&mut native), baud, SPEED_SET_BY_IOCTL)?;
@@ -871,9 +871,9 @@ impl SerialportIo {
             (Box::new(native), fd)
         };
         #[cfg(not(unix))]
-        let mut port = builder.open().map_err(io::Error::from)?;
-        // A pty refuses DTR (ENOTTY); a real cable must accept it.
-        let _ = port.write_data_terminal_ready(true);
+        let port = builder.open().map_err(io::Error::from)?;
+        // DTR is not touched here: `Link::prepare_port` sets it right after the open as
+        // `--dtr` says (default high, as this open did before; final critique F15).
         Ok(SerialportIo {
             port,
             #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -1625,7 +1625,8 @@ mod tests {
         let (buf_sink, buf) = crate::out::Sink::buffer();
         let (l, m) = line(500);
         let mut link = crate::link::Link::new(Box::new(l), Tracer::to(buf_sink), None);
-        link.prepare_port(kline_core::RtsMode::Low).unwrap();
+        link.prepare_port(kline_core::DtrMode::High, kline_core::RtsMode::Low)
+            .unwrap();
         let calls: Vec<Call> =
             m.0.borrow()
                 .calls
@@ -1651,7 +1652,8 @@ mod tests {
 
         let (l, m) = line(500);
         let mut link = crate::link::Link::new(Box::new(l), Tracer::off(), None);
-        link.prepare_port(kline_core::RtsMode::Leave).unwrap();
+        link.prepare_port(kline_core::DtrMode::High, kline_core::RtsMode::Leave)
+            .unwrap();
         let _ = link.init(&cfg).unwrap();
         assert!(!m
             .0
