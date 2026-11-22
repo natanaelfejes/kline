@@ -182,8 +182,8 @@ const MAX_DRAIN: usize = 4096;
 /// chain. With the init guard on ([`Transport::set_init_guard`]), a 5-baud start/data bit or a
 /// fast-init TiniL/TWuP sleep that wakes up more than [`wake_sleep_tolerance_us`] late means
 /// the bit or pulse is already wrong: the next call fails with [`InitTimingError`]. In a 5-baud
-/// address it first holds K low through the stop-bit slot (a framing error, so no other ECU can
-/// take a corrupted byte as its own address), then releases K and raises DTR. The idle, the
+/// address it first holds K low through the stop-bit slot (a framing error, which covers a late
+/// wake-up; a longer host stall can still leave another valid byte), then releases K and raises DTR. The idle, the
 /// 1 ms before TiniL and the stop-bit wait are not guarded: their lateness is harmless.
 pub struct KklLine<P: SerialIo, C: Clock> {
     port: P,
@@ -241,8 +241,10 @@ impl<P: SerialIo, C: Clock> KklLine<P, C> {
 
     /// Report a pending timing fault and fail. In a 5-baud address K is held low through the
     /// remaining bit slots and the stop-bit slot (start + 10 bit times), so a receiver sees a
-    /// framing error and never a valid, different address byte (code review M1); then K is
-    /// released and DTR raised (idle), and the chain ends.
+    /// framing error for a late wake-up (code review M1). A stall longer than the remaining
+    /// slot can still leave a different valid address byte (0x7A read as 0xFA after about
+    /// 350 ms): rare, badly loaded host only. Then K is released and DTR raised (idle), and
+    /// the chain ends.
     fn check_fault(&mut self) -> io::Result<()> {
         let Some(f) = self.fault.take() else {
             return Ok(());
