@@ -438,7 +438,11 @@ pub fn release_k_line_now() -> bool {
 pub fn on_interrupt(stop: &std::sync::atomic::AtomicBool) {
     if stop.swap(true, std::sync::atomic::Ordering::SeqCst) {
         let released = release_k_line_now();
-        eprintln!(
+        // writeln! instead of eprintln!: eprintln! panics when stderr is gone (closed terminal,
+        // dropped remote session), which would skip the exit below (re-check R03).
+        use std::io::Write as _;
+        let _ = writeln!(
+            std::io::stderr(),
             "kline: second interrupt, exiting now{}",
             if released {
                 " (K released, DTR high)"
@@ -840,6 +844,9 @@ impl SerialIo for SerialportIo {
         match self.port.read(buf) {
             Ok(n) => Ok(n),
             Err(e) if e.kind() == io::ErrorKind::TimedOut => Ok(0),
+            // A signal (Ctrl-C, SIGTERM, SIGHUP) interrupting poll(): not a line error. Report
+            // "nothing yet" so the caller's loop sees the stop flag and sends Stop (re-check R01).
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => Ok(0),
             Err(e) => Err(e),
         }
     }
