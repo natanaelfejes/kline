@@ -5,6 +5,7 @@ mod common;
 
 use common::*;
 use kline_sim::ecu::{AddressAccept, EcuProfile, EcuProtocol, FaultRule, ReplyFault, SpecEcu};
+use kline_sim::line::VirtualLine;
 use serde_json::json;
 
 fn sirius_with(accept: AddressAccept, fast: bool) -> SpecEcu {
@@ -378,6 +379,7 @@ fn exec_sends_only_after_the_shown_code_is_typed() {
         Opts {
             interactive: true,
             human: Human::TypesShownCode,
+            ..Opts::default()
         },
     );
     assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
@@ -406,6 +408,7 @@ fn exec_with_a_wrong_code_sends_nothing() {
         Opts {
             interactive: true,
             human: Human::TypesWrongCode,
+            ..Opts::default()
         },
     );
     assert_eq!(r.code, 9, "{}\n{}", r.stdout, r.stderr);
@@ -420,6 +423,7 @@ fn exec_expert_tier_shows_unknown_effect_and_a_10_char_code() {
         Opts {
             interactive: true,
             human: Human::TypesShownCode,
+            ..Opts::default()
         },
     );
     assert_eq!(
@@ -446,6 +450,7 @@ fn exec_refuses_forbidden_requests_even_interactively() {
             Opts {
                 interactive: true,
                 human: Human::TypesShownCode,
+                ..Opts::default()
             },
         );
         assert_eq!(r.code, 7, "{req}: {}", r.stderr);
@@ -557,6 +562,7 @@ fn non_clio_name_guard_refuses_immobilizer_requests() {
         Opts {
             interactive: true,
             human: Human::TypesShownCode,
+            ..Opts::default()
         },
     );
     assert_eq!(r.code, 7);
@@ -670,6 +676,7 @@ fn bmt_ident_with_two_2180_requests_and_remote_learning_exec() {
         Opts {
             interactive: true,
             human: Human::TypesShownCode,
+            ..Opts::default()
         },
     );
     assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
@@ -687,6 +694,7 @@ fn bmt_transponder_routines_are_never_offered() {
             Opts {
                 interactive: true,
                 human: Human::TypesShownCode,
+                ..Opts::default()
             },
         );
         assert_eq!(r.code, 7, "{req}");
@@ -703,6 +711,7 @@ fn config_write_reads_identification_and_backup_first() {
         Opts {
             interactive: true,
             human: Human::TypesShownCode,
+            ..Opts::default()
         },
     );
     // The fixture BMT has no 3B D2 definition: the sim answers 7F 3B 12 (exit 6), but only
@@ -766,6 +775,7 @@ fn clear_dtc_sends_the_definition_request_only_after_approval() {
         Opts {
             interactive: true,
             human: Human::TypesShownCode,
+            ..Opts::default()
         },
     );
     assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
@@ -799,6 +809,7 @@ fn clear_dtc_ddt2000_mode_and_refusals() {
         Opts {
             interactive: true,
             human: Human::TypesShownCode,
+            ..Opts::default()
         },
     );
     // The simulated ECU only knows its definition's 14 00 00 and answers 7F 14 12 (exit 6).
@@ -823,6 +834,7 @@ fn clear_dtc_ddt2000_mode_and_refusals() {
         Opts {
             interactive: true,
             human: Human::TypesWrongCode,
+            ..Opts::default()
         },
     );
     assert_eq!(r.code, 9, "{}", r.stdout);
@@ -990,6 +1002,114 @@ fn selftest_toggles_break_only_and_reports_timing() {
 }
 
 #[test]
+fn selftest_reports_host_sleep_jitter_before_opening_the_port() {
+    let (r, _) = run(sirius_ecu(), &["--json", "selftest"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let t = &r.event("selftest_timing")[0];
+    let js = t["sleep_jitter"].as_array().unwrap();
+    let targets: Vec<u64> = js
+        .iter()
+        .map(|j| j["target_ms"].as_u64().unwrap())
+        .collect();
+    assert_eq!(targets, [1, 25, 200], "{t}");
+    assert_eq!(t["ok"], true, "{t}");
+    assert!(js
+        .iter()
+        .all(|j| j["samples"] == 10 && j["max_late_us"] == 0));
+    // Timing comes first (it needs no cable), then the port.
+    let names: Vec<String> = r
+        .events()
+        .iter()
+        .map(|e| e["event"].as_str().unwrap_or("").to_string())
+        .collect();
+    let (a, b) = (
+        names.iter().position(|n| n == "selftest_timing").unwrap(),
+        names.iter().position(|n| n == "selftest").unwrap(),
+    );
+    assert!(a < b, "{names:?}");
+
+    // A host whose sleeps wake 1.5 ms late cannot hold TiniL (25 +- 1 ms).
+    let r = run_line_port(
+        VirtualLine::with_ecu(sirius_ecu()),
+        "virtual",
+        &["--json", "selftest"],
+        Opts {
+            clock_late_us: 1_500,
+            ..Opts::default()
+        },
+    );
+    let t = &r.event("selftest_timing")[0];
+    assert_eq!(t["ok"], false, "{t}");
+    assert_eq!(t["sleep_jitter"][1]["ok"], false, "{t}");
+    assert_eq!(
+        t["sleep_jitter"][2]["ok"], true,
+        "200 ms +-10 ms still fine: {t}"
+    );
+    // Human output names the verdict.
+    let r = run_line_port(
+        VirtualLine::with_ecu(sirius_ecu()),
+        "virtual",
+        &["selftest"],
+        Opts {
+            clock_late_us: 1_500,
+            ..Opts::default()
+        },
+    );
+    assert!(
+        r.stdout.contains("sleep  25 ms x10") && r.stdout.contains("TOO IMPRECISE"),
+        "{}",
+        r.stdout
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn selftest_reads_and_sets_the_linux_ftdi_latency_timer() {
+    let root = temp_dir("sysfs");
+    let dev = root.join("bus/usb-serial/devices/ttyUSB7");
+    std::fs::create_dir_all(&dev).unwrap();
+    std::fs::write(dev.join("latency_timer"), "16\n").unwrap();
+    let o = || Opts {
+        sys_root: Some(root.clone()),
+        ..Opts::default()
+    };
+    let r = run_line_port(
+        VirtualLine::with_ecu(sirius_ecu()),
+        "/dev/ttyUSB7",
+        &["--json", "selftest"],
+        o(),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.event("selftest")[0]["latency_timer"]["ms"], 16);
+    let r = run_line_port(
+        VirtualLine::with_ecu(sirius_ecu()),
+        "/dev/ttyUSB7",
+        &["--json", "selftest", "--set-latency", "1"],
+        o(),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.event("selftest")[0]["latency_timer"]["ms"], 1);
+    assert_eq!(
+        std::fs::read_to_string(dev.join("latency_timer")).unwrap(),
+        "1\n"
+    );
+    // Out of range is a usage error; a non-ttyUSB port cannot be set.
+    let (r, _) = run(sirius_ecu(), &["selftest", "--set-latency", "0"]);
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    let (r, _) = run(sirius_ecu(), &["selftest", "--set-latency", "1"]);
+    assert_eq!(r.code, 3, "{}", r.stderr);
+    assert!(r.stderr.contains("not a ttyUSB"), "{}", r.stderr);
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn selftest_set_latency_is_linux_only() {
+    let (r, _) = run(sirius_ecu(), &["selftest", "--set-latency", "1"]);
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    assert!(r.stderr.contains("Linux-only"), "{}", r.stderr);
+}
+
+#[test]
 fn refused_session_is_reported_and_no_other_session_is_tried() {
     let ecu = sirius_ecu().with_fault(FaultRule::on(
         &[0x10, 0xA0],
@@ -1051,6 +1171,7 @@ fn crafted_definition_names_are_sanitized_in_security_prompts() {
         Opts {
             interactive: true,
             human: Human::TypesWrongCode,
+            ..Opts::default()
         },
     );
     assert_eq!(r.code, 9, "{}", r.stderr);
@@ -1185,6 +1306,7 @@ fn exec_stop_request_gets_its_own_approval_and_is_sent_after() {
         Opts {
             interactive: true,
             human: Human::TypesShownCode,
+            ..Opts::default()
         },
     );
     assert_eq!(r.code, 0, "{}\n{}\n{}", r.stdout, r.stderr, r.screen);
@@ -1213,6 +1335,7 @@ fn exec_stop_request_gets_its_own_approval_and_is_sent_after() {
         Opts {
             interactive: true,
             human: Human::TypesShownCode,
+            ..Opts::default()
         },
     );
     assert_eq!(r.code, 7, "a refused stop refuses the test: {}", r.stdout);

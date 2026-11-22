@@ -54,11 +54,21 @@ pub fn list() -> std::io::Result<Vec<PortInfo>> {
         .collect())
 }
 
-/// A port that looks like the KKL cable: macOS `/dev/cu.usbserial-*` (AppleUSBFTDI,
-/// the design notes), or (convenience, not the target platform) a Linux `/dev/ttyUSB*` FTDI.
+/// A port that looks like the KKL cable (docs/platforms.md): macOS `/dev/cu.usbserial-*`
+/// (AppleUSBFTDI, the design notes), a Linux `/dev/ttyUSB*` with the FTDI vendor id (ftdi_sio), or
+/// a Windows `COMn` with the FTDI vendor id (FTDI VCP driver).
 pub fn is_candidate(p: &PortInfo) -> bool {
+    let ftdi = p.usb.is_some_and(|u| u.0 == FTDI_VID);
     p.path.starts_with("/dev/cu.usbserial-")
-        || (p.path.starts_with("/dev/ttyUSB") && p.usb.is_some_and(|u| u.0 == FTDI_VID))
+        || (p.path.starts_with("/dev/ttyUSB") && ftdi)
+        || (is_windows_com(&p.path) && ftdi)
+}
+
+/// `COMn` or `\\.\COMn` (any case). `serialport` prefixes `\\.\` itself, so `COM10` and
+/// above open without the user typing the device-namespace form.
+pub fn is_windows_com(path: &str) -> bool {
+    let p = path.strip_prefix(r"\\.\").unwrap_or(path);
+    p.len() > 3 && p[..3].eq_ignore_ascii_case("com") && p[3..].bytes().all(|b| b.is_ascii_digit())
 }
 
 /// An explicit `--port` must not be a macOS callin device `/dev/tty.*`: opening it waits for
@@ -77,7 +87,7 @@ pub fn auto_detect(ports: &[PortInfo]) -> Result<String, String> {
     let c: Vec<&PortInfo> = ports.iter().filter(|p| is_candidate(p)).collect();
     match c.as_slice() {
         [one] => Ok(one.path.clone()),
-        [] => Err("no KKL cable found (no /dev/cu.usbserial-*); plug it in or pass --port".into()),
+        [] => Err("no KKL cable found (no /dev/cu.usbserial-*, FTDI /dev/ttyUSB* or FTDI COMn); plug it in or pass --port".into()),
         many => Err(format!(
             "several cables found ({}); pass --port",
             many.iter()
@@ -123,6 +133,27 @@ mod tests {
             auto_detect(&ports),
             Ok("/dev/cu.usbserial-A50285BI".to_string())
         );
+    }
+
+    #[test]
+    fn detects_ftdi_ports_on_linux_and_windows_only() {
+        assert_eq!(
+            auto_detect(&[p("/dev/ttyS0", None), p("/dev/ttyUSB0", Some(FTDI_VID))]),
+            Ok("/dev/ttyUSB0".to_string())
+        );
+        // Windows: COM1 is the motherboard UART, COM12 an FTDI (COM10+ needs \\.\ inside
+        // serialport, which adds it).
+        assert_eq!(
+            auto_detect(&[
+                p("COM1", None),
+                p("COM12", Some(FTDI_VID)),
+                p("COM3", Some(0x10c4))
+            ]),
+            Ok("COM12".to_string())
+        );
+        assert!(is_windows_com(r"\\.\COM12") && is_windows_com("com3"));
+        assert!(!is_windows_com("COM") && !is_windows_com("COMX") && !is_windows_com("/dev/COM1"));
+        assert!(check_explicit_port(r"\\.\COM12").is_ok() && check_explicit_port("COM3").is_ok());
     }
 
     #[test]

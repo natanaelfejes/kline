@@ -152,6 +152,69 @@ pub fn measure_echo_rtt(t: &mut dyn Transport, count: u32) -> io::Result<EchoRtt
     })
 }
 
+/// Host sleep precision, measured without any port: each target is slept [`SLEEP_REPS`] times
+/// with the transport's clock ([`crate::transport::SystemClock`], OS sleep plus spin tail). The
+/// targets and tolerances are the init timings that are bit-banged: 1 ms (fast-init DTR settle,
+/// judged with the TiniL tolerance), 25 ms (TiniL, +-1 ms, ISO 14230-2) and 200 ms (5-baud bit,
+/// +-10 ms, ISO 9141-2).
+pub const SLEEP_TARGETS: [(u32, u64); 3] = [
+    (1, FAST_INIT_TOLERANCE_US),
+    (25, FAST_INIT_TOLERANCE_US),
+    (200, FIVE_BAUD_TOLERANCE_US),
+];
+/// Repetitions per sleep target (ours: ~2.3 s in total).
+pub const SLEEP_REPS: u32 = 10;
+
+/// How late (or early) sleeps of one target woke up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SleepJitter {
+    pub target_ms: u32,
+    pub samples: u32,
+    /// Wake-ups before the target (a correct sleep never has any).
+    pub early: u32,
+    pub min_late_us: u64,
+    pub mean_late_us: u64,
+    pub max_late_us: u64,
+    pub tolerance_us: u64,
+    /// No early wake-up and every one less than `tolerance_us` late.
+    pub ok: bool,
+}
+
+/// Sleep `target_ms` `reps` times on `c` and measure each wake-up against its deadline.
+pub fn measure_sleep_jitter(
+    c: &mut dyn crate::transport::Clock,
+    target_ms: u32,
+    reps: u32,
+    tolerance_us: u64,
+) -> SleepJitter {
+    let mut late = Vec::with_capacity(reps as usize);
+    let mut early = 0;
+    for _ in 0..reps {
+        let deadline = c.now_us() + u64::from(target_ms) * 1000;
+        c.sleep_until_us(deadline);
+        let woke = c.now_us();
+        if woke < deadline {
+            early += 1;
+        }
+        late.push(woke.saturating_sub(deadline));
+    }
+    let max = late.iter().copied().max().unwrap_or(0);
+    SleepJitter {
+        target_ms,
+        samples: reps,
+        early,
+        min_late_us: late.iter().copied().min().unwrap_or(0),
+        mean_late_us: if late.is_empty() {
+            0
+        } else {
+            late.iter().sum::<u64>() / late.len() as u64
+        },
+        max_late_us: max,
+        tolerance_us,
+        ok: early == 0 && max < tolerance_us,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,5 +372,69 @@ mod tests {
         let j = measure_break_jitter(&mut slow, 5, 10).unwrap();
         assert!(j.max_dev_us >= 3_000, "{j:?}");
         assert!(!j.fast_init_ok && j.five_baud_ok, "{j:?}");
+    }
+
+    /// Virtual clock whose sleeps wake up late by the next value of `late` (cycled), or
+    /// `early_us` early.
+    struct LateClock {
+        now: u64,
+        late: Vec<u64>,
+        early_us: u64,
+        i: usize,
+    }
+
+    impl crate::transport::Clock for LateClock {
+        fn now_us(&self) -> u64 {
+            self.now
+        }
+        fn sleep_until_us(&mut self, t: u64) {
+            let l = self.late[self.i % self.late.len()];
+            self.i += 1;
+            self.now = (t + l).saturating_sub(self.early_us);
+        }
+    }
+
+    #[test]
+    fn sleep_jitter_stats_and_verdicts() {
+        let mut c = LateClock {
+            now: 0,
+            late: vec![0, 300, 1_500],
+            early_us: 0,
+            i: 0,
+        };
+        let j = measure_sleep_jitter(&mut c, 25, 6, FAST_INIT_TOLERANCE_US);
+        assert_eq!(
+            (
+                j.samples,
+                j.early,
+                j.min_late_us,
+                j.mean_late_us,
+                j.max_late_us
+            ),
+            (6, 0, 0, 600, 1_500)
+        );
+        assert!(!j.ok, "1.5 ms late breaks TiniL +-1 ms: {j:?}");
+
+        let mut c = LateClock {
+            now: 0,
+            late: vec![100, 200],
+            early_us: 0,
+            i: 0,
+        };
+        let j = measure_sleep_jitter(&mut c, 200, 4, FIVE_BAUD_TOLERANCE_US);
+        assert!(
+            j.ok && j.max_late_us == 200 && j.mean_late_us == 150,
+            "{j:?}"
+        );
+
+        // Waking early is always wrong, however small.
+        let mut c = LateClock {
+            now: 0,
+            late: vec![0],
+            early_us: 50,
+            i: 0,
+        };
+        let j = measure_sleep_jitter(&mut c, 1, 3, FAST_INIT_TOLERANCE_US);
+        assert_eq!((j.early, j.ok), (3, false));
     }
 }

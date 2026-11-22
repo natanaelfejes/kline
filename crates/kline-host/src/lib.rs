@@ -11,7 +11,8 @@
 //! - [`defs`]: ECU definitions (`--ecu`, `--xml`, `--vehicle`, `--address`).
 //! - [`cmd`]: the shared commands and the session lifecycle.
 
-#![forbid(unsafe_code)]
+// Only `hrtimer`'s Windows `timeBeginPeriod` FFI is allowed unsafe code (two integer calls).
+#![deny(unsafe_code)]
 
 pub mod capture;
 pub mod cmd;
@@ -19,6 +20,8 @@ pub mod cmd;
 pub mod control;
 pub mod defs;
 pub mod error;
+pub mod hrtimer;
+pub mod latency;
 pub mod link;
 pub mod out;
 pub mod ports;

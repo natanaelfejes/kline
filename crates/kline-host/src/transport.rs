@@ -44,14 +44,24 @@ pub trait Clock {
     fn sleep_until_us(&mut self, t_us: u64);
 }
 
-/// Real time from `Instant`.
+/// Real time from `Instant`, with the high-resolution sleep of [`crate::hrtimer`] (OS sleep plus
+/// a busy-wait tail; on Windows a 1 ms system tick while the clock lives).
 pub struct SystemClock {
-    t0: Instant,
+    sleeper: crate::hrtimer::OsSleeper,
+    resolution: crate::hrtimer::TimerResolution,
 }
 
 impl SystemClock {
     pub fn new() -> SystemClock {
-        SystemClock { t0: Instant::now() }
+        SystemClock {
+            resolution: crate::hrtimer::TimerResolution::request(),
+            sleeper: crate::hrtimer::OsSleeper { t0: Instant::now() },
+        }
+    }
+
+    /// Whether the Windows 1 ms timer tick was granted (always false elsewhere).
+    pub fn timer_resolution_active(&self) -> bool {
+        self.resolution.active()
     }
 }
 
@@ -63,13 +73,11 @@ impl Default for SystemClock {
 
 impl Clock for SystemClock {
     fn now_us(&self) -> u64 {
-        self.t0.elapsed().as_micros() as u64
+        use crate::hrtimer::Sleeper as _;
+        self.sleeper.now_us()
     }
     fn sleep_until_us(&mut self, t_us: u64) {
-        let now = self.now_us();
-        if t_us > now {
-            std::thread::sleep(Duration::from_micros(t_us - now));
-        }
+        crate::hrtimer::sleep_until_us(&mut self.sleeper, t_us, crate::hrtimer::SPIN_TAIL_US);
     }
 }
 

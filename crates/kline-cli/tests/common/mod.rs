@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use kline_cli::{CliEnv, Prompt};
 use kline_host::cmd::Env;
 use kline_host::out::Sink;
-use kline_host::transport::Transport;
+use kline_host::transport::{Clock, Transport};
 use kline_sim::bus::Responder;
 use kline_sim::ecu::{EcuProfile, SpecEcu};
 use kline_sim::journal::Journal;
@@ -257,6 +257,10 @@ pub fn temp_dir(tag: &str) -> PathBuf {
 pub struct Opts {
     pub interactive: bool,
     pub human: Human,
+    /// Fake Linux sysfs root for the FTDI latency timer (default: a path that does not exist).
+    pub sys_root: Option<PathBuf>,
+    /// Host clock sleeps wake up this late (us), for selftest's sleep-jitter check.
+    pub clock_late_us: u64,
 }
 
 impl Default for Opts {
@@ -264,6 +268,8 @@ impl Default for Opts {
         Opts {
             interactive: false,
             human: Human::TypesShownCode,
+            sys_root: None,
+            clock_late_us: 0,
         }
     }
 }
@@ -325,6 +331,11 @@ fn run_line_inner(line: VirtualLine, port: &str, args: &[&str], o: Opts, blind: 
     let screen = Arc::new(Mutex::new(String::new()));
     let screen2 = screen.clone();
     let human = o.human;
+    let clock_late_us = o.clock_late_us;
+    let sys_root = o
+        .sys_root
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("/nonexistent-kline-sysfs"));
     let mut env = CliEnv {
         host: Env {
             stdout: out,
@@ -340,6 +351,13 @@ fn run_line_inner(line: VirtualLine, port: &str, args: &[&str], o: Opts, blind: 
             }),
             list_ports: Box::new(|| Ok(Vec::new())),
             stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            host_clock: Box::new(move || {
+                Box::new(LateClock {
+                    now: 0,
+                    late_us: clock_late_us,
+                }) as Box<dyn Clock>
+            }),
+            sys_root: sys_root.clone(),
         },
         interactive: o.interactive,
         tty: Box::new(move || {
@@ -393,4 +411,19 @@ pub fn scenario_json(v: &Value) -> Json {
 
 pub fn path_str(p: &Path) -> String {
     p.display().to_string()
+}
+
+/// Virtual host clock: every sleep wakes exactly `late_us` late, instantly.
+pub struct LateClock {
+    pub now: u64,
+    pub late_us: u64,
+}
+
+impl Clock for LateClock {
+    fn now_us(&self) -> u64 {
+        self.now
+    }
+    fn sleep_until_us(&mut self, t: u64) {
+        self.now = self.now.max(t) + self.late_us;
+    }
 }

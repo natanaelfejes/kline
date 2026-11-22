@@ -3,8 +3,9 @@
 //! kline-core's `approved-routines` feature is enabled here and nowhere else.
 //!
 //! `exec` runs only in an interactive terminal (stdin and stdout are TTYs), never with
-//! `--json`; it shows the request's `RiskInfo` verbatim on `/dev/tty` and reads the random
-//! confirmation code from `/dev/tty`, not from stdin, so a pipe cannot answer it.
+//! `--json`; it shows the request's `RiskInfo` verbatim on `/dev/tty` (Windows: `CONOUT$`) and
+//! reads the random confirmation code from `/dev/tty` (`CONIN$`), not from stdin, so a pipe
+//! cannot answer it.
 
 #![forbid(unsafe_code)]
 
@@ -111,18 +112,37 @@ pub trait Prompt {
     fn ask(&mut self) -> Receiver<io::Result<String>>;
 }
 
-/// `/dev/tty` (the controlling terminal, not stdin).
+/// The console the confirmation is shown on and read from: the controlling terminal, not
+/// stdin/stdout, so a pipe cannot answer it (docs/platforms.md "Approval terminal").
+#[cfg(not(windows))]
+pub const TTY_IN: &str = "/dev/tty";
+#[cfg(not(windows))]
+pub const TTY_OUT: &str = "/dev/tty";
+/// Windows: the console input and screen buffers of the process (`CONIN$`/`CONOUT$`), the
+/// equivalent of `/dev/tty`: they reach the console even when stdin/stdout are redirected.
+#[cfg(windows)]
+pub const TTY_IN: &str = "CONIN$";
+#[cfg(windows)]
+pub const TTY_OUT: &str = "CONOUT$";
+
+/// The controlling terminal ([`TTY_IN`]/[`TTY_OUT`]), not stdin.
 pub struct DevTty {
+    r: std::fs::File,
     w: std::fs::File,
 }
 
 impl DevTty {
     pub fn open() -> io::Result<DevTty> {
-        let w = std::fs::OpenOptions::new()
+        let r = std::fs::OpenOptions::new()
             .read(true)
-            .write(true)
-            .open("/dev/tty")?;
-        Ok(DevTty { w })
+            .write(TTY_IN == TTY_OUT)
+            .open(TTY_IN)?;
+        let w = if TTY_IN == TTY_OUT {
+            r.try_clone()?
+        } else {
+            std::fs::OpenOptions::new().write(true).open(TTY_OUT)?
+        };
+        Ok(DevTty { r, w })
     }
 }
 
@@ -134,7 +154,7 @@ impl Prompt for DevTty {
 
     fn ask(&mut self) -> Receiver<io::Result<String>> {
         let (tx, rx) = mpsc::channel();
-        match self.w.try_clone() {
+        match self.r.try_clone() {
             Ok(f) => {
                 std::thread::spawn(move || {
                     let mut line = String::new();
@@ -288,7 +308,7 @@ pub fn exec(
         None => None,
     };
     let mut prompt = (tty)().map_err(|e| {
-        CliError::refused(format!("cannot open /dev/tty for the confirmation: {e}"))
+        CliError::refused(format!("cannot open {TTY_IN} for the confirmation: {e}"))
     })?;
     ctx.out.emit(json!({}), cmd::assessment_human(&asx));
     if let Some((s, _)) = &stop {
@@ -407,7 +427,7 @@ fn approve_and_send(
     );
     prompt
         .show(&screen)
-        .map_err(|e| CliError::refused(format!("cannot write to /dev/tty: {e}")))?;
+        .map_err(|e| CliError::refused(format!("cannot write to {TTY_OUT}: {e}")))?;
     let rx = prompt.ask();
     let start = o.link.now_ms();
     let typed = loop {
@@ -417,7 +437,7 @@ fn approve_and_send(
                 return Err(CliError::new(
                     exit::NOT_APPROVED,
                     "not_approved",
-                    format!("reading /dev/tty failed: {e}; nothing was sent"),
+                    format!("reading {TTY_IN} failed: {e}; nothing was sent"),
                 ))
             }
             Err(RecvTimeoutError::Disconnected) => {

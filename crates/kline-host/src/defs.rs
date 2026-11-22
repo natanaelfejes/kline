@@ -1,7 +1,7 @@
 //! Which ECU definition(s) a command uses, and what the link and the policy need from them.
 //!
 //! `--ecu sirius|bmt` are shortcuts for the car's files in the definitions directory
-//! (`--defs`, `$KLINE_DDT_XML` (deprecated fallback `$CLIO_DDT_XML`), default `~/.local/share/kline/ecus`). `--xml` takes any
+//! (`--defs`, `$KLINE_DDT_XML` (deprecated fallback `$CLIO_DDT_XML`), default `~/.local/share/kline/ecus`, `%APPDATA%\kline\ecus` on Windows). `--xml` takes any
 //! DDT2000 ECU definition (repeatable: candidates for `ident`); `--address` overrides its
 //! `<Function Address>`, `--vehicle` names a vehicle addressing file (e.g. `x65_addressing.xml`)
 //! for the function name, its protocols and the tool address.
@@ -116,13 +116,31 @@ pub fn default_defs_dir() -> PathBuf {
         eprintln!("warning: CLIO_DDT_XML is deprecated, use KLINE_DDT_XML");
         return PathBuf::from(p);
     }
-    home().join(".local/share/kline/ecus")
+    data_dir().join("ecus")
 }
 
-pub fn home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
+/// kline's data directory (ECU definitions `ecus/`, `captures/`), docs/platforms.md:
+/// `~/.local/share/kline` on Linux and macOS (the historical default, kept on macOS too so
+/// existing setups keep working), `%APPDATA%\kline` on Windows.
+pub fn data_dir() -> PathBuf {
+    data_dir_from(cfg!(windows), |k| std::env::var_os(k))
+}
+
+/// [`data_dir`] for a given OS family and environment (tests).
+pub fn data_dir_from(windows: bool, env: impl Fn(&str) -> Option<std::ffi::OsString>) -> PathBuf {
+    let nonempty = |k: &str| env(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+    if windows {
+        if let Some(a) = nonempty("APPDATA") {
+            return a.join("kline");
+        }
+        if let Some(u) = nonempty("USERPROFILE") {
+            return u.join("AppData").join("Roaming").join("kline");
+        }
+        return PathBuf::from("kline-data");
+    }
+    nonempty("HOME")
         .unwrap_or_else(|| PathBuf::from("."))
+        .join(".local/share/kline")
 }
 
 fn load(path: &Path) -> Result<EcuDef, CliError> {
@@ -565,5 +583,48 @@ pub fn choose_by_ident(ecu: &Ecu, keywords: (u8, u8), sent: &[u8], reply: &[u8])
         chosen: fits.first().copied(),
         ambiguous: fits.len() > 1,
         results,
+    }
+}
+
+#[cfg(test)]
+mod data_dir_tests {
+    use super::data_dir_from;
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    fn env(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<OsString> {
+        move |k| {
+            pairs
+                .iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| OsString::from(*v))
+        }
+    }
+
+    #[test]
+    fn unix_keeps_the_xdg_style_default() {
+        assert_eq!(
+            data_dir_from(false, env(&[("HOME", "/home/n"), ("APPDATA", "C:\\x")])),
+            PathBuf::from("/home/n/.local/share/kline")
+        );
+        assert_eq!(
+            data_dir_from(false, env(&[])),
+            PathBuf::from("./.local/share/kline")
+        );
+    }
+
+    #[test]
+    fn windows_uses_appdata_then_userprofile() {
+        let a = data_dir_from(true, env(&[("APPDATA", "R"), ("HOME", "/h")]));
+        assert_eq!(a, PathBuf::from("R").join("kline"));
+        let u = data_dir_from(true, env(&[("APPDATA", ""), ("USERPROFILE", "U")]));
+        assert_eq!(
+            u,
+            PathBuf::from("U")
+                .join("AppData")
+                .join("Roaming")
+                .join("kline")
+        );
+        assert_eq!(data_dir_from(true, env(&[])), PathBuf::from("kline-data"));
     }
 }

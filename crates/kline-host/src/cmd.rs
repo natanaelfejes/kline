@@ -20,7 +20,7 @@ use crate::link::{self, Connected, Link, SessionArg, VariantArg};
 use crate::out::{Out, Sink};
 use crate::ports::{self, PortInfo};
 use crate::trace::Tracer;
-use crate::transport::{PortSpec, Transport};
+use crate::transport::{Clock, PortSpec, SystemClock, Transport};
 use crate::{hex, hex_sp, risk_json, tier_name};
 
 /// Options every command accepts.
@@ -32,16 +32,19 @@ pub struct GlobalArgs {
     /// Print every action, TX and RX byte with its time on stderr (also saved next to the capture).
     #[arg(long, global = true)]
     pub trace: bool,
-    /// Serial port of the KKL cable (default: the one /dev/cu.usbserial-*).
+    /// Serial port of the KKL cable (default: the one /dev/cu.usbserial-*, FTDI /dev/ttyUSB* or
+    /// FTDI COMn).
     #[arg(long, global = true, value_name = "PATH")]
     pub port: Option<String>,
     /// Simulator control socket: --port is then kline-sim's pty (docs/sim.md).
     #[arg(long, global = true, value_name = "SOCKET")]
     pub sim_control: Option<PathBuf>,
-    /// Capture directory (default $KLINE_CAPTURE_DIR, else ~/.local/share/kline/captures).
+    /// Capture directory (default $KLINE_CAPTURE_DIR, else ~/.local/share/kline/captures;
+    /// %APPDATA%\kline\captures on Windows).
     #[arg(long, visible_alias = "captures", global = true, value_name = "DIR")]
     pub capture_dir: Option<PathBuf>,
-    /// ECU definitions directory for --ecu (default $KLINE_DDT_XML or ~/.local/share/kline/ecus).
+    /// ECU definitions directory for --ecu (default $KLINE_DDT_XML or ~/.local/share/kline/ecus;
+    /// %APPDATA%\kline\ecus on Windows).
     #[arg(long, global = true, value_name = "DIR")]
     pub defs: Option<PathBuf>,
 }
@@ -51,7 +54,7 @@ impl GlobalArgs {
         self.capture_dir
             .clone()
             .or_else(|| std::env::var_os("KLINE_CAPTURE_DIR").map(PathBuf::from))
-            .unwrap_or_else(|| defs::home().join(".local/share/kline/captures"))
+            .unwrap_or_else(|| defs::data_dir().join("captures"))
     }
 
     pub fn defs_dir(&self) -> PathBuf {
@@ -207,6 +210,10 @@ pub struct Env {
     pub opener: Opener,
     pub list_ports: Box<dyn Fn() -> io::Result<Vec<PortInfo>>>,
     pub stop: Arc<AtomicBool>,
+    /// The host clock `selftest` measures sleep precision with (real: [`SystemClock`]).
+    pub host_clock: Box<dyn Fn() -> Box<dyn Clock>>,
+    /// Linux sysfs root for the FTDI latency timer ([`crate::latency::SYS_ROOT`]).
+    pub sys_root: PathBuf,
 }
 
 impl Env {
@@ -217,6 +224,8 @@ impl Env {
             opener: Box::new(crate::transport::open),
             list_ports: Box::new(ports::list),
             stop: Arc::new(AtomicBool::new(false)),
+            host_clock: Box::new(|| Box::new(SystemClock::new())),
+            sys_root: PathBuf::from(crate::latency::SYS_ROOT),
         }
     }
 }
@@ -553,16 +562,125 @@ pub struct SelftestArgs {
     /// sent) or TX wired to RX.
     #[arg(long)]
     pub echo_rtt: bool,
+    /// Linux only: write the FTDI latency timer (ms, 1..255) of the ttyUSB port before
+    /// measuring (`/sys/bus/usb-serial/devices/ttyUSBn/latency_timer`; needs root or the udev
+    /// rule in docs/platforms.md). On Windows set it in Device Manager (FTDI VCP driver).
+    #[arg(long, value_name = "MS", value_parser = clap::value_parser!(u8).range(1..=255))]
+    pub set_latency: Option<u8>,
+}
+
+/// The host-timing part of `selftest`, before any port is opened: sleep precision of the clock
+/// the transport uses (crate::selftest::measure_sleep_jitter).
+fn selftest_timing(ctx: &mut Ctx) {
+    let mut clock = (ctx.env.host_clock)();
+    let res = SystemClock::new();
+    let tick_1ms = res.timer_resolution_active();
+    let js: Vec<crate::selftest::SleepJitter> = crate::selftest::SLEEP_TARGETS
+        .iter()
+        .map(|&(ms, tol)| {
+            crate::selftest::measure_sleep_jitter(
+                clock.as_mut(),
+                ms,
+                crate::selftest::SLEEP_REPS,
+                tol,
+            )
+        })
+        .collect();
+    drop(res);
+    let ok = js.iter().all(|j| j.ok);
+    let mut human = format!(
+        "host timing ({}, spin tail {} us{}):",
+        std::env::consts::OS,
+        crate::hrtimer::SPIN_TAIL_US,
+        if cfg!(windows) {
+            if tick_1ms {
+                ", timeBeginPeriod(1) granted"
+            } else {
+                ", timeBeginPeriod(1) REFUSED"
+            }
+        } else {
+            ""
+        }
+    );
+    for j in &js {
+        human.push_str(&format!(
+            "\n  sleep {:>3} ms x{}: late min {:.3} / mean {:.3} / max {:.3} ms, early {} (limit {:.0} ms): {}",
+            j.target_ms,
+            j.samples,
+            j.min_late_us as f64 / 1000.0,
+            j.mean_late_us as f64 / 1000.0,
+            j.max_late_us as f64 / 1000.0,
+            j.early,
+            j.tolerance_us as f64 / 1000.0,
+            if j.ok { "OK" } else { "TOO IMPRECISE" }
+        ));
+    }
+    ctx.out.emit(
+        json!({"event": "selftest_timing", "os": std::env::consts::OS,
+               "spin_tail_us": crate::hrtimer::SPIN_TAIL_US,
+               "timer_1ms_tick": tick_1ms, "sleep_jitter": js, "ok": ok}),
+        human,
+    );
+}
+
+/// Linux: the ttyUSB port's FTDI latency timer, written first if `set` (crate::latency).
+/// `Ok(None)` elsewhere or for a port that is not a ttyUSB.
+fn selftest_latency(
+    ctx: &Ctx,
+    path: &str,
+    set: Option<u8>,
+) -> Result<Option<(PathBuf, Option<u8>)>, CliError> {
+    if !cfg!(target_os = "linux") {
+        return match set {
+            Some(_) => Err(CliError::usage(
+                "--set-latency is Linux-only (ftdi_sio sysfs); on Windows set Latency Timer in Device Manager > Port > Advanced (FTDI VCP), on macOS AppleUSBFTDI has no setting (docs/platforms.md)",
+            )),
+            None => Ok(None),
+        };
+    }
+    let Some(p) = crate::latency::sysfs_path(path, &ctx.env.sys_root) else {
+        return match set {
+            Some(_) => Err(CliError::port(format!(
+                "--set-latency: {path} is not a ttyUSB (ftdi_sio) port"
+            ))),
+            None => Ok(None),
+        };
+    };
+    if let Some(ms) = set {
+        crate::latency::write(&p, ms).map_err(|e| {
+            CliError::port(format!(
+                "cannot write {}: {e}; {}",
+                p.display(),
+                crate::latency::write_hint(&p, ms)
+            ))
+        })?;
+    }
+    let v = crate::latency::read(&p).ok();
+    Ok(Some((p, v)))
 }
 
 /// `selftest`: port at 10400, what the driver reports, break-toggle jitter, optionally the echo
 /// round trip. Without `--echo-rtt` nothing is written, only 10 ms break pulses
 /// (crate::selftest).
 pub fn selftest(ctx: &mut Ctx, a: &SelftestArgs) -> Result<(), CliError> {
+    // Host timing first: it needs no cable, so it is reported even when no port opens.
+    selftest_timing(ctx);
     let spec = ctx.port_spec()?;
     let path = match &spec {
         PortSpec::Serial(p) => p.clone(),
         PortSpec::Sim { tty, .. } => format!("{tty} (simulator)"),
+    };
+    let latency = match &spec {
+        PortSpec::Serial(p) => selftest_latency(ctx, p, a.set_latency)?,
+        PortSpec::Sim { .. } => None,
+    };
+    let latency_json = latency
+        .as_ref()
+        .map(|(p, v)| json!({"path": p.display().to_string(), "ms": v, "set": a.set_latency}));
+    let latency_human = match &latency {
+        Some((p, Some(v))) => format!("\nFTDI latency timer: {v} ms ({})", p.display()),
+        Some((p, None)) => format!("\nFTDI latency timer: unreadable ({})", p.display()),
+        None => String::new(),
     };
     let usb = (ctx.env.list_ports)()
         .ok()
@@ -618,9 +736,10 @@ pub fn selftest(ctx: &mut Ctx, a: &SelftestArgs) -> Result<(), CliError> {
                "usb": usb.as_ref().map(|u| u.to_json()),
                "baud_requested": baud, "baud_reported": reported,
                "baud_reported_source": baud_source,
-               "break_jitter": j, "echo_rtt": echo, "note": note}),
+               "break_jitter": j, "echo_rtt": echo, "latency_timer": latency_json,
+               "note": note}),
         format!(
-            "port: {path}{}\nbaud: requested {baud}, driver reports {} ({baud_source})\nbreak toggles: {} edges, {} ms half-period: max deviation {:.2} ms, mean {:.2} ms, slowest set_break {:.2} ms; loopback {}\n5-baud bits (+-10 ms): {}; fast-init TiniL (+-1 ms): {}{echo_human}\n{note}",
+            "port: {path}{}\nbaud: requested {baud}, driver reports {} ({baud_source})\nbreak toggles: {} edges, {} ms half-period: max deviation {:.2} ms, mean {:.2} ms, slowest set_break {:.2} ms; loopback {}\n5-baud bits (+-10 ms): {}; fast-init TiniL (+-1 ms): {}{echo_human}{latency_human}\n{note}",
             usb.as_ref()
                 .and_then(|u| u.usb.map(|v| format!(" (usb {:04x}:{:04x} {})", v.0, v.1, u.product.clone().unwrap_or_default())))
                 .unwrap_or_default(),
