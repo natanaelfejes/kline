@@ -25,6 +25,13 @@ pub mod consts {
     pub const FAST_INIT_HIGH_MS: u32 = 25;
     /// Inter-byte delay forced by Multipoint. RE: KWP2000Diag4 KWP2000Ecu Multipoint init.
     pub const MULTIPOINT_INTER_BYTE_MS: u32 = 7;
+    /// ReplyToRequest (P3) forced by Multipoint. RE: KWP2000Diag4 0x2305a370 (`5` to the
+    /// setter at vtable 0x9c, the one the monopoint branch feeds with field `[0x17]`, which
+    /// the KWP2000Ecu constructor 0x23051370 sets to 5 = ReplyToRequest).
+    pub const MULTIPOINT_REPLY_TO_REQUEST_MS: u32 = 5;
+    /// OnError delay forced by Multipoint: all three 300 ms setters (vtable 0xa8, 0xac, 0xb0;
+    /// KW2Timeout, RequestToReply, OnError) get 300. RE: KWP2000Diag4 0x2305a370.
+    pub const MULTIPOINT_ON_ERROR_MS: u32 = 300;
     /// XOR applied to the 5-baud address in Multipoint. RE: KWP2000Diag4 KWP2000Ecu Multipoint init.
     pub const MULTIPOINT_ADDRESS_XOR: u8 = 0x80;
     /// Tester (source) address in KWP headers. RE: KWP2000Diag4 KWP2000Ecu default ToolAddress.
@@ -178,6 +185,12 @@ pub struct LinkConfig {
     /// When TesterPresent is sent; default [`TesterPresentMode::Idle`] (DDT2000's wire-level
     /// behaviour). [`TesterPresentMode::DDT2000_PERIODIC`] is the screen player option.
     pub tester_present_mode: crate::retry::TesterPresentMode,
+    /// Abort a 5-baud init when the break loopback check sees nothing on RX (`KLineInactive`).
+    /// Default false: go on and report it in [`crate::init::InitOutcome::break_loopback_seen`]
+    /// (ours: DDT2000 aborts with 0x3F0, but it detects the break with Windows' `EV_BREAK`
+    /// event, RE: IOTBD32V3 FUN_10001380; a POSIX tty can drop a break or deliver no byte for
+    /// it). NOT VERIFIED what the FTDI cable under macOS delivers.
+    pub strict_break_loopback: bool,
 }
 
 impl LinkConfig {
@@ -195,6 +208,7 @@ impl LinkConfig {
             max_response_pending: consts::MAX_RESPONSE_PENDING,
             kw_window_ms: None,
             tester_present_mode: crate::retry::TesterPresentMode::Idle,
+            strict_break_loopback: false,
         }
     }
 
@@ -218,9 +232,13 @@ impl LinkConfig {
     }
 
     /// Timing actually used: `timing` with [`LinkConfig::init_kind`], and with Multipoint in
-    /// effect DDT2000's fixed values (RE: KWP2000Diag4 KWP2000Ecu Multipoint init): 10400 baud,
-    /// inter-byte 7, KW2 delay 25, FirstRequest 20, TesterPresent 3000, KW2Timeout 300,
-    /// RequestToReply 300. ReplyToRequest and OnError stay as declared.
+    /// effect DDT2000's fixed values (RE: KWP2000Diag4 KWP2000Ecu Multipoint init 0x2305a370
+    /// at 0x2305aa5e..0x2305ae2b, same in 0x230673c0): 10400 baud, inter-byte 7, KW2 delay 25,
+    /// FirstRequest 20, ReplyToRequest 5, TesterPresent 3000, and 300 for KW2Timeout,
+    /// RequestToReply and OnError. The monopoint branch of the same function passes the
+    /// object fields `[0x17]`..`[0x1b]` to the same setters; the KWP2000Ecu constructor
+    /// (0x23051370) sets `[0x17] = 5` (ReplyToRequest) and `[0x19..0x1b] = 300`, so every
+    /// timing is fixed under Multipoint.
     pub fn effective_timing(&self) -> KTiming {
         let mut t = self.timing;
         t.init = self.init_kind();
@@ -229,9 +247,11 @@ impl LinkConfig {
             t.inter_byte_ms = consts::MULTIPOINT_INTER_BYTE_MS;
             t.kw2_delay_ms = 25;
             t.first_request_ms = 20;
+            t.reply_to_request_ms = consts::MULTIPOINT_REPLY_TO_REQUEST_MS;
             t.tester_present_ms = 3000;
             t.kw2_timeout_ms = 300;
             t.request_to_reply_timeout_ms = 300;
+            t.on_error_ms = consts::MULTIPOINT_ON_ERROR_MS;
         }
         t
     }

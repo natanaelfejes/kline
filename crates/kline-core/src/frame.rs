@@ -149,8 +149,13 @@ impl Framing {
                     Ok(ReplyNeed::Bytes(first as usize))
                 }
             }
-            // RE: IOTBD32V3 worker: (fmt & 0x3F) + 3 (tgt, src, data, cs). We also handle the
-            // separate length byte, which DDT2000's reader does not.
+            // RE: IOTBD32V3 worker FUN_100015a0 (cmd 0x404): (fmt & 0x3F) + 3 (tgt, src, data,
+            // cs); fmt & 0x3F == 0: read `tgt src len`, then len + 1. KWP2000Diag4 0x2305d230
+            // parses both forms too. Only IOTBD32V3's fast-init reader (FUN_10001290) reads
+            // (fmt & 0x3F) + 3 alone; we accept both forms there as well.
+            // `fmt & 0xC0 == 0x80` is ours, stricter than DDT2000 (0x2305d230 checks only the
+            // tool and ECU address bytes): any other address mode has a different header
+            // layout, and a Renault ECU answers a physically addressed request physically.
             Framing::Kwp(_) => {
                 if first & FMT_ADDR_MASK != FMT_PHYSICAL {
                     return Err(FrameError::UnsupportedFormat(first));

@@ -263,13 +263,41 @@ fn keyword_mismatch_rejected_when_configured() {
 }
 
 #[test]
-fn k_line_inactive_releases_the_line() {
+fn k_line_inactive_releases_the_line_when_strict() {
+    let mut cfg = sirius32();
+    cfg.strict_break_loopback = true;
     let mut s = start_bit(false);
     s.extend([(brk(false), done()), (dtr(true), done())]);
     assert_eq!(
-        run_five_baud(&sirius32(), &s),
+        run_five_baud(&cfg, &s),
         Step::Failed(LinkError::KLineInactive)
     );
+}
+
+#[test]
+fn missing_break_loopback_is_reported_not_fatal_by_default() {
+    // Hydrogen final review: a POSIX tty (macOS cfmakeraw sets IGNBRK) may deliver nothing for
+    // the start-bit break; DDT2000 sees it as EV_BREAK. Default: go on and report it.
+    let cfg = sirius32();
+    assert!(!cfg.strict_break_loopback);
+    let mut s = start_bit(false);
+    s.extend(up_to_keywords(0x7A, 400, ok(&[0x55, 0xD0, 0x8F])).split_off(5));
+    s.extend([
+        (sleep(25), done()),
+        (write(&[0x70], 0), done()),
+        (read(2, 400), ok(&[0x70, 0x85])),
+        (sleep(20), done()),
+    ]);
+    let Step::Done(o) = run_five_baud(&cfg, &s) else {
+        panic!("init must go on without the loopback")
+    };
+    assert_eq!(o.break_loopback_seen(), Some(false));
+    assert_eq!(o.keywords(), (0xD0, 0x8F));
+    // Seen: Some(true); fast init: None.
+    let Step::Done(o) = run_five_baud(&cfg, &kwp_five_baud(0x7A, 0x85)) else {
+        panic!()
+    };
+    assert_eq!(o.break_loopback_seen(), Some(true));
 }
 
 #[test]

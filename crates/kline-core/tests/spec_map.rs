@@ -54,10 +54,12 @@ fn multipoint_declared_and_effective_timing() {
             kw2_delay_ms: 25,
             first_request_ms: 20,
             inter_byte_ms: 7,
-            reply_to_request_ms: 6,
+            // RE: KWP2000Diag4 0x2305a370 Multipoint branch: ReplyToRequest 5 and OnError 300
+            // are fixed too (Hydrogen final review, checked in the decompiled code).
+            reply_to_request_ms: 5,
             request_to_reply_timeout_ms: 300,
             tester_present_ms: 3000,
-            on_error_ms: 350,
+            on_error_ms: 300,
             kw2_timeout_ms: 300,
         }
     );

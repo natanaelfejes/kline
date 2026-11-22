@@ -31,6 +31,7 @@ pub struct InitOutcome {
     kw2: u8,
     address_complement: Option<u8>,
     keywords_match: Option<bool>,
+    break_loopback_seen: Option<bool>,
 }
 
 impl InitOutcome {
@@ -72,6 +73,13 @@ impl InitOutcome {
     /// Some(true/false) when the config has expected key bytes.
     pub fn keywords_match(&self) -> Option<bool> {
         self.keywords_match
+    }
+
+    /// 5-baud init: whether the break loopback check saw the start bit on RX (None for fast
+    /// init). `Some(false)` means the init went on without it
+    /// ([`LinkConfig::strict_break_loopback`] off); the caller should warn.
+    pub fn break_loopback_seen(&self) -> Option<bool> {
+        self.break_loopback_seen
     }
 }
 
@@ -150,6 +158,7 @@ pub struct FiveBaudInit {
     handshake: bool,
     seq: Seq,
     state: FbState,
+    loopback: Option<bool>,
 }
 
 impl FiveBaudInit {
@@ -170,6 +179,7 @@ impl FiveBaudInit {
             handshake,
             seq: Seq::default(),
             state: FbState::StartBit,
+            loopback: None,
         })
     }
 
@@ -230,13 +240,20 @@ impl FiveBaudInit {
             .unwrap_or_else(|| self.t.kw2_read_window_ms());
         let state = core::mem::replace(&mut self.state, FbState::Finished);
         match (state, ev) {
-            (FbState::StartBit, Event::BreakLoopbackSeen(false)) => {
+            (FbState::StartBit, Event::BreakLoopbackSeen(false))
+                if self.cfg.strict_break_loopback =>
+            {
                 self.seq.push(Action::SetBreak(false));
                 self.seq.push(Action::SetDtr(true));
                 self.state = FbState::Cleanup(LinkError::KLineInactive);
                 self.next()
             }
-            (FbState::StartBit, Event::BreakLoopbackSeen(true)) => {
+            // Not strict (default): DDT2000 detects the start bit with the driver's EV_BREAK
+            // event (RE: IOTBD32V3 FUN_10001380: SetCommMask(EV_BREAK), WaitCommEvent, then
+            // 0x3F0 if no event). We infer it from RX bytes, which a POSIX tty may not deliver
+            // for a break (IGNBRK, driver), so a missing loopback is reported, not fatal.
+            (FbState::StartBit, Event::BreakLoopbackSeen(seen)) => {
+                self.loopback = Some(seen);
                 for i in 0..8 {
                     let one = (self.address_byte >> i) & 1 == 1;
                     self.seq.push(Action::SetBreak(!one));
@@ -337,6 +354,7 @@ impl FiveBaudInit {
             kw2,
             address_complement,
             keywords_match,
+            break_loopback_seen: self.loopback,
         }
     }
 }
@@ -460,6 +478,7 @@ impl FastInit {
                         kw2: kw.1,
                         address_complement: None,
                         keywords_match: m,
+                        break_loopback_seen: None,
                     };
                     self.seq.sleep(self.t.first_request_ms);
                     match self.seq.emit() {

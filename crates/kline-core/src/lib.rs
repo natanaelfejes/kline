@@ -1,4 +1,4 @@
-//! Sans-IO K-line protocol engine for Renault K-line ECUs (tested target: Clio II), and the safety policy.
+//! Sans-IO K-line protocol engine for Renault K-line ECUs (target vehicle: Clio II), and the safety policy.
 //!
 //! `no_std` + `alloc`. No serial port code: the machines emit [`io::Action`]s and consume
 //! [`io::Event`]s; a transport driver (CLI, simulator, ESP32) performs them. Time is passed in
