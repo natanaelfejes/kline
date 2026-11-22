@@ -1987,7 +1987,7 @@ fn selftest_on_a_port_that_is_not_a_kkl_cable_says_the_verdicts_mean_nothing() {
     assert_eq!(r.code, 0, "{}", r.stderr);
     assert!(
         r.stdout.contains(
-            "this port is not a KKL cable (no FTDI USB id: simulator, pty or another adapter): timing verdicts below are not meaningful"
+            "this port is not a known FTDI KKL cable (no USB id: simulator, pty or a built-in port): timing verdicts below are not meaningful"
         ),
         "{}",
         r.stdout
@@ -2009,7 +2009,50 @@ fn selftest_on_a_port_that_is_not_a_kkl_cable_says_the_verdicts_mean_nothing() {
         },
     );
     assert_eq!(r.code, 0);
-    assert!(!r.stdout.contains("not a KKL cable"), "{}", r.stdout);
+    assert!(
+        !r.stdout.contains("not a known FTDI KKL cable"),
+        "{}",
+        r.stdout
+    );
+    // Code review L8: a USB adapter of another make (CH340) may be a KKL cable: the host
+    // timing verdicts and the fast-init cause still mean something.
+    let mut ch340 = ftdi_port("virtual");
+    ch340.usb = Some((0x1a86, 0x7523));
+    ch340.manufacturer = None;
+    ch340.product = Some("USB Serial".into());
+    let r = run_line_port(
+        VirtualLine::with_ecu(sirius_ecu()),
+        "virtual",
+        &["--json", "selftest"],
+        Opts {
+            ports: vec![ch340.clone()],
+            ..Opts::default()
+        },
+    );
+    let s = &r.event("selftest")[0];
+    assert_eq!(s["kkl_cable"], false, "{s}");
+    assert_eq!(s["timing_meaningful"], true, "{s}");
+    assert_eq!(
+        s["fast_init_cause"].is_string(),
+        s["break_jitter"]["fast_init_ok"] == false,
+        "{s}"
+    );
+    let r = run_line_port(
+        VirtualLine::with_ecu(sirius_ecu()),
+        "virtual",
+        &["selftest"],
+        Opts {
+            ports: vec![ch340],
+            ..Opts::default()
+        },
+    );
+    assert!(
+        r.stdout
+            .contains("this port is not a known FTDI KKL cable (usb 1a86:7523)"),
+        "{}",
+        r.stdout
+    );
+    assert!(!r.stdout.contains("not meaningful"), "{}", r.stdout);
 }
 
 #[test]

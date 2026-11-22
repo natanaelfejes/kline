@@ -834,18 +834,25 @@ pub fn selftest(ctx: &mut Ctx, a: &SelftestArgs) -> Result<(), CliError> {
             ports::is_candidate(u) || u.usb.is_some_and(|v| v.0 == ports::FTDI_VID)
         }),
     };
-    let not_kkl_human = if kkl {
-        String::new()
-    } else {
-        format!(
-            "\nthis port is not a KKL cable ({}): timing verdicts below are not meaningful",
-            match &spec {
-                PortSpec::Sim { .. } => "simulator/pty",
-                PortSpec::Serial(_) => "no FTDI USB id: simulator, pty or another adapter",
-            }
-        )
+    // A USB serial adapter of another make (CH340, PL2303) can be a KKL cable too: its timing
+    // verdicts are about this host and adapter and keep their meaning (code review L8). Only a
+    // port without a USB id (simulator, pty, built-in port) has none.
+    let usb_id = usb.as_ref().and_then(|u| u.usb);
+    let meaningful = match &spec {
+        PortSpec::Sim { .. } => false,
+        PortSpec::Serial(_) => kkl || usb_id.is_some(),
     };
-    let fast_init_cause = crate::selftest::fast_init_cause(&j).filter(|_| kkl);
+    let not_kkl_human = match (kkl, meaningful, &spec) {
+        (true, _, _) => String::new(),
+        (false, _, PortSpec::Sim { .. }) => "\nthis port is not a known FTDI KKL cable (simulator/pty): timing verdicts below are not meaningful".to_string(),
+        (false, true, _) => format!(
+            "\nthis port is not a known FTDI KKL cable (usb {:04x}:{:04x}): the verdicts below are for this host and adapter; whether it drives a K line like the FTDI cable is NOT VERIFIED",
+            usb_id.map(|v| v.0).unwrap_or_default(),
+            usb_id.map(|v| v.1).unwrap_or_default()
+        ),
+        (false, false, _) => "\nthis port is not a known FTDI KKL cable (no USB id: simulator, pty or a built-in port): timing verdicts below are not meaningful".to_string(),
+    };
+    let fast_init_cause = crate::selftest::fast_init_cause(&j).filter(|_| meaningful);
     let fast_init_human = fast_init_cause
         .as_ref()
         .map(|c| format!(": {c}"))
@@ -853,7 +860,7 @@ pub fn selftest(ctx: &mut Ctx, a: &SelftestArgs) -> Result<(), CliError> {
     ctx.out.emit(
         json!({"event": "selftest", "port": path,
                "fast_init_cause": fast_init_cause,
-               "kkl_cable": kkl, "timing_meaningful": kkl,
+               "kkl_cable": kkl, "timing_meaningful": meaningful,
                "usb": usb.as_ref().map(|u| u.to_json()),
                "baud_requested": baud, "baud_reported": reported,
                "baud_reported_source": baud_source,
