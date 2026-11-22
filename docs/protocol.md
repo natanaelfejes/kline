@@ -80,7 +80,9 @@ Common part (RE: IOTBD32V3 5-baud routine):
    on, bit 1 = break off.
 5. Break off, wait 100 ms (stop bit; reading starts in the middle of it).
 6. DTR high. **Flush RX** (break residue and the echo of the bits).
-7. Read 3 bytes `55 KW1 KW2` within `kw2_timeout_ms + 100`. Fewer: error **no keywords**.
+7. Read 3 bytes `55 KW1 KW2` within `kw2_timeout_ms + 100` (`LinkConfig::kw_window_ms`
+   overrides this window for both 5-baud reads, ours, default off; NOT VERIFIED whether any
+   ECU's W1 needs it). Fewer: error **no keywords**.
    The sync byte and the key bytes are reported, not checked (RE: IOTBD32V3 does not check
    them). With `reject_keyword_mismatch` (ours, default off) a mismatch with the definition's
    key bytes fails the init.
@@ -91,8 +93,16 @@ Then it depends on the transport flag DDT2000 sets (RE: IOTBD32V3 worker; the ne
 - **ISO8 (Safir):** no handshake. Wait `first_request_ms`. Done.
 - **KWP 5-baud (Sirius 32, BMT), any variant:** wait `kw2_delay_ms`, send ~KW2
   (one byte, 0x70 for KW2 0x8F), read 2 bytes within the same window: the echo of ~KW2 (must
-  match, else **collision**) and ~address (logged, **not** validated; fewer than 2 bytes is
-  error **no address complement**). Wait `first_request_ms`. Done.
+  match, else **collision**; no byte at all is also **collision**, RE: IOTBD32V3
+  FUN_100014f0 returns 0x3ED when the echo count is 0) and ~address (logged, **not**
+  validated; echo but no ~address is error **no address complement**). Wait
+  `first_request_ms`. Done.
+
+Addresses with bit 7 set are refused by both init machines (`AliasedAddress`): such a byte is
+the Multipoint wake byte of `address & 0x7F` (0xA6 wakes the BMT), so the ECU that answers
+could differ from the one the policy checks (security review M2 F3a). The init result
+(`InitOutcome`) is opaque, carries the config, init kind and target (derived from the
+bit-banged byte, or the StartCommunication header target), and is consumed by `Session::new`.
 
 Example, Sirius 32 single ECU (as tested in `tests/init_traces.rs`): bits of 0x7A, read
 `55 D0 8F`, wait 25 ms, send `70`, read `70 xx` (xx logged), wait 20 ms.
@@ -127,7 +137,9 @@ SingleEcu, then MultiEcu, then FastInit; the same for the BMT.
 RE: IOTBD32V3 fast init: (ours) idle 300 ms, DTR high, 1 ms, break 25 ms, break off 25 ms,
 then the StartCommunication exchange below with payload `81`. With KW1 still unknown, the
 length goes in the format byte (RE: KWP2000Diag4 LenInFmt default): `81 7A F1 81 6D` for the
-Sirius. The reply must be positive `C1 KW1 KW2`; anything else is an error. DDT2000's reader
+Sirius. The reply must be positive `C1 KW1 KW2`; anything else is an error. Then wait
+`first_request_ms` (RE: IOTBD32V3 FUN_100015a0 sleeps FirstRequestDelay after
+StartCommunication), like the 5-baud init. DDT2000's reader
 only handles a length in the format byte; we also accept a separate length byte.
 
 ## Framing
@@ -177,8 +189,10 @@ Payloads returned to callers start at the response SID.
 
 - TesterPresent (`36` ISO8, `3E` KWP) is due when the line has been idle for
   `tester_present_ms` since the last exchange. Right after a 5-baud init it is due at once
-  (the first frame DDT2000 sends is TP unless a request is queued); after a fast init after
-  `tester_present_ms - first_request_ms` (RE: IOTBD32V3 worker). The caller polls
+  (the first frame DDT2000 sends is TP unless a request is queued); after a fast init
+  `tester_present_ms - first_request_ms` after the init finished, i.e. `tester_present_ms`
+  after StartCommunication (RE: IOTBD32V3 worker: TP-FR, then FR sleep). No extra gap is
+  owed before the first request after either init: both waited `first_request_ms`. The caller polls
   `tester_present_due(now)` and starts it.
 - TP and Stop replies are read when they come and are optional. DDT2000 skips reading them in
   Multipoint (RE: IOTBD32V3 Multicast flag) and discards them otherwise; we read with the
@@ -200,32 +214,75 @@ or `ReadTimeout(partial)` with fewer for `Read`. Any other event fails the machi
 
 ## Safety
 
-Enforced in `clio-core` (SAFETY.md rule 2 and 3). The session needs a `Permit` from
-`safety::check` before an exchange can be built, so nothing reaches `Write` without passing
-the policy. Decisions use the exact payload bytes, never request names.
+Enforced in `clio-core` (SAFETY.md rule 2 and 3; owner-approved policy v2 and owner decision
+2026-11-22). The core writes only frames it built itself: `Action::Write` carries a
+crate-private `Frame` (bytes readable, no public constructor, not `Clone`), and every request
+frame comes from a crate-private `Permit`. Decisions use the exact payload bytes and the
+target taken from the init that actually ran, never request names.
 
-Allowed (everything else is `Denied`):
+### Tiers
 
-| Protocol | Payloads |
-|---|---|
-| KWP | `81`, `82`; `3E [x]`; `10 81` (default) and `10 A0` (Renault diagnostic session, Sirius 32 `Start Diagnostic Session`; orchestrator decision 2026-11-22); `1A [x]`; `17 ..`, `18 ..` (up to 4 bytes); `21 [x]` |
-| ISO8 | `21 [x]`; `33 50`..`33 54`; `36` and `3F` as single bytes (TP and Stop) |
+| Tier | Requests (exact bytes) | How |
+|---|---|---|
+| 0 Read | KWP: `3E [x]`, `10 81`, `10 A0`, `1A xx`, `21 xx` (exactly 2 bytes, BMT `21 A4` transponder *status* included), `17`/`18` + 1-3 bytes. ISO8 (Safir): `21`, `33 50`, `33 51`, `33 52`, `33 54` (exactly what Safir_1/Safir_2 contain) | `Session::request`; autonomous use OK (CLI, `--json`, MCP). Read-only scan via `ScanPlan` (below) |
+| 1 Service | KWP: `14 xx xx` clear DTC; `30 lid` + 1-4 bytes output control; `11 FF` adaptation reset; `32 xx` + 0-2 bytes stop function; Sirius `31 A0 A0` injector inhibition (warning `StopsEngine`); BMT `31 C7 00 00 00` / `31 C8 00 00 00` remote learning, BMT actuator `31 out param count` with `out` 0xA0..=0xB3 | human `Approval` per request |
+| 2 Config write | BMT `3B D2 index value` (index 0..=13 except 2, value 0/1); other KWP ECUs `3B lid` + 1-4 bytes | human `Approval`, plus in the same session: a positive backup read (`21 A1` for BMT `3B D2`, else `21 lid`) and a positive `21 80` whose exact reply the caller says it chose the ECU definition from (BMT config indices differ between BMT_X65_ph1_p and BMT_SAGEM) |
+| 3 Expert | any other request that is not forbidden (undocumented service, identifier, parameters or length) | human *expert* `Approval` (10-character code), `RiskInfo` says "unknown effect" |
+| forbidden | see below | never, not even in expert mode |
 
-Denied in particular: any other `10 xx` (0x85/0x86 programming etc.), 0x11, 0x14 (clear
-DTC), 0x20, 0x27, 0x2E, 0x2F, 0x30 (output control), 0x31 (all routines, including Sirius
-`31 A2 01 00 00` OBDFC status), 0x32, 0x34-0x37 on KWP, 0x3B, 0x40, 0x41, 0x45, 0x46, 0x61,
-0xFF, empty payloads, longer variants of allowed reads, and **BMT `21 A4`** (transponder state,
-rule 3; `21 A4` on the Sirius is an ordinary data frame and is allowed).
+**Forbidden always** (`DenyReason::Immobilizer`, `Forbidden`, `ProtocolReserved`, `Empty`):
 
-The only exception: BMT (`0x26`, KWP) routines `31 C7 00 00 00` (erase all remotes, learn
-remote 1) and `31 C8 00 00 00` (learn remote 2), via `Session::request_approved` with an
-`Approval`. `Approval` is not `Clone`/`Copy`/`Default`/deserializable and is consumed by use.
-Its only constructor is `Approval::from_typed_confirmation(routine, typed)`, which needs the
-exact phrase from `ApprovedRoutine::confirmation_phrase()`.
+- BMT (any protocol claim): `30`/`31`/`32` with byte 2 in 0xC0..=0xC8 except the two exact
+  remote-learning routines (C0-C3, C5, C6 are the immobilizer functions; catalogue 9.1: all
+  of C0-C8 are immobilizer related); every `2E`/`2F`; every `3B` except `3B D2`; `3B D2 02 ..`
+  (AP1CLE, key related); `21 A4` with anything after it.
+- Sirius (KWP, not BMT): `31 A0 A3 ..` (reset of the backed-up memory, may touch the
+  "verrou logiciel" area); `2E`/`2F`/`3B` on `A0`, `A2`, `AE`, `BD` (frames carrying
+  immobilizer / verrou fields, catalogue 4.4).
+- `27` security access (any protocol), `34`-`37` (KWP; ISO8 `34`, `35`, `37`), any
+  `10 xx` other than `10 81` / `10 A0` (e.g. `10 85`, `10 86`, `10 B0`, `10 C0`).
+- Link frames `81`, `82` (KWP) and `36`, `3F` (ISO8) as requests: only the init machines and
+  `Session::tester_present` / `Session::stop` send them. ISO8 `36` (keep-alive) and `3F`
+  (stop) are protocol-required (RE: KWP2000Diag4 ISO8Ecu init) although no Safir definition
+  lists them.
 
-CLI usage (only in interactive mode, never with `--json`, never from MCP, never in tests against
-a real port): print what the routine does and its phrase, read one line from the terminal,
-pass it to `from_typed_confirmation`, and hand the `Approval` to `request_approved`.
+Every non-read request has a machine-readable `RiskInfo { tier, what_it_changes,
+what_can_go_wrong, reversible, prerequisites, warnings }` (`safety::assess`), from the
+definitions and the capability catalogue. Examples: clear DTC "erases the stored fault
+codes", `reversible: false`, `ErasesFaultMemory`; BMT `3B D2` "rewrites one BMT configuration
+option", `reversible: true` (write the old value from the `21 A1` backup), `EepromWrite`.
+
+### Approvals (feature `approved-routines`)
+
+The feature is **off by default** (`tests/exploits.rs` checks the resolved features).
+Without it no approval type or challenge method exists, so a library user, an MCP server or a
+`--json` binary can only send Tier 0. AI/MCP/`--json` callers *prepare* non-read requests with
+`safety::assess` / `safety::tier_of`: print the `RiskInfo` and the exact CLI command for a
+human, never execute.
+
+Only the interactive `clio` CLI may enable the feature. It must read the confirmation from
+`/dev/tty` (not stdin, so a pipe cannot answer) and never offer approvals with `--json`. Any
+future `clio-mcp` crate must depend on `clio-core` without it; a CI check of
+`cargo tree -e features -i clio-core` for that crate is to be added when it exists.
+
+Flow: `Session::service_challenge(payload)` / `config_write_challenge(payload,
+identification)` / `expert_challenge(payload)` returns an `ApprovalChallenge` with the exact
+payload, target, tier, `RiskInfo` and a random code (OS randomness via `getrandom`, 6
+characters, 10 for expert). The CLI shows all of it and the warnings verbatim, reads a line
+from `/dev/tty`, and calls `Approval::confirm(challenge, typed)`. `Session::request_approved(
+payload, approval, now)` sends only if the approval was made from this session's latest
+challenge (random per-session nonce and per-request id), for this target, these exact bytes,
+this tier and this `RiskInfo`, and Tier 2 preconditions still hold. The approval is consumed
+and the challenge closed whatever happens. `Session`, the init machines, `InitOutcome`,
+`Action` and `Frame` are not `Clone`, so nothing can be replayed by copying (compile-fail
+doctests in `lib.rs`).
+
+### Read-only scan (`scan::ScanPlan`)
+
+Only `21 xx` or `1A xx`, exactly 2 bytes, over a range; one request at a time (the result must
+be reported before the next), at least 200 ms between request starts; stops after 3 missing
+replies in total or at the first security NRC (0x33, 0x35, 0x36). Run only as an explicit CLI
+command, every request and reply logged. Never scans `30`/`31`/`3B` or anything else.
 
 ## Not verified (needs the car)
 
@@ -238,3 +295,7 @@ pass it to `from_typed_confirmation`, and hand the `Approval` to `request_approv
 - Whether Safir answers ISO8 `36`; meaning of ISO8 status codes.
 - The 5000 ms / 10x responsePending bounds; DTR effect on the KKL cable.
 - Fast init on 0x7A.
+- Whether any ECU needs a wider keyword window than KW2Timeout + 100 (`kw_window_ms`).
+- That BMT `3B` identifiers other than `D2`, BMT `2E`/`2F`, and Sirius `2E`/`2F`/`3B` on `A0`,
+  `A2`, `AE`, `BD` actually touch immobilizer data: refused as a precaution, not proven.
+- Whether `21 A4 xx` has a side effect on the BMT (refused as a precaution, like `21 A1 xx`).
