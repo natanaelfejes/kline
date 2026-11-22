@@ -961,11 +961,24 @@ fn read_one(
     payload: &[u8],
     names: &[String],
 ) -> Result<Vec<u8>, CliError> {
-    let t_ms = o.link.now_ms();
-    let r = o
-        .link
-        .request(&mut o.session, payload)
-        .map_err(|e| e.to_cli())?;
+    let mut t_ms = o.link.now_ms();
+    let r = match o.link.request(&mut o.session, payload) {
+        // One retry after a damaged reply (checksum, short frame), like a live cycle: noise
+        // on the line should not end a one-shot read (rehearsal item 14).
+        Err(e) if is_frame_error(&e) => {
+            let wait = kline_core::RetryPolicy::default().cycle_retry_ms;
+            let m = e.to_cli().message;
+            ctx.out.emit(
+                json!({"event": "read_retry", "request": hex(payload), "message": m, "wait_ms": wait}),
+                format!("{}: {m}; retrying once in {wait} ms", hex_sp(payload)),
+            );
+            idle(ctx, o, u64::from(wait))?;
+            t_ms = o.link.now_ms();
+            o.link.request(&mut o.session, payload)
+        }
+        r => r,
+    }
+    .map_err(|e| e.to_cli())?;
     let reply = match link::positive(&r) {
         Ok(p) => p.to_vec(),
         Err(e) => {
@@ -1108,6 +1121,16 @@ fn alternatives(o: &Open, payload: &[u8], reply: &[u8]) -> (Vec<Json>, String) {
         human.push_str(&l);
     }
     (json_out, human)
+}
+
+/// A reply that arrived damaged: bad checksum or other frame error, or cut short.
+fn is_frame_error(e: &link::ExchangeError) -> bool {
+    matches!(
+        e,
+        link::ExchangeError::Session(kline_core::session::SessionError::Link(
+            kline_core::LinkError::Frame(_) | kline_core::LinkError::IncompleteReply { .. }
+        ))
+    )
 }
 
 /// Refuse a non-read before any init (kline-core refuses again when it is sent).

@@ -1947,3 +1947,40 @@ fn dtc_counts_present_and_memorized_and_shows_the_clear_plan_only_on_request() {
     );
     assert!(s["clear_plan"].is_object(), "{s}");
 }
+
+#[test]
+fn read_retries_once_after_a_bad_checksum_or_a_short_frame() {
+    let sx = xml("sirius_cli.xml");
+    for fault in [ReplyFault::BadChecksum, ReplyFault::DropBytes { count: 2 }] {
+        let ecu = sirius_ecu().with_fault(FaultRule::on(&[0x21, 0xA9], fault).once());
+        let (r, j) = run(ecu, &["read", "--xml", &sx, "21A9"]);
+        assert_eq!(r.code, 0, "{fault:?}: {}\n{}", r.stdout, r.stderr);
+        assert!(r.stdout.contains("retrying once in 400 ms"), "{}", r.stdout);
+        assert!(
+            r.stdout.contains("Engine speed     850 rpm"),
+            "{}",
+            r.stdout
+        );
+        j.assert_no_writes();
+    }
+    let ecu = sirius_ecu().with_fault(FaultRule::on(&[0x21, 0xA9], ReplyFault::BadChecksum).once());
+    let (r, _) = run(ecu, &["--json", "read", "--xml", &sx, "21A9"]);
+    assert_eq!(r.code, 0);
+    let rr = &r.event("read_retry")[0];
+    assert_eq!(rr["request"], "21A9");
+    assert!(rr["message"].as_str().unwrap().contains("checksum"), "{rr}");
+    // Still bad on the retry: exit 5, only one retry.
+    let ecu = sirius_ecu().with_fault(FaultRule::on(&[0x21, 0xA9], ReplyFault::BadChecksum));
+    let (r, _) = run(ecu, &["--trace", "read", "--xml", &sx, "21A9"]);
+    assert_eq!(r.code, 5, "{}", r.stderr);
+    assert_eq!(
+        r.stderr.matches("TX 82 7A F1 21 A9").count(),
+        2,
+        "{}",
+        r.stderr
+    );
+    // A missing reply is not retried (not a frame error).
+    let ecu = sirius_ecu().with_fault(FaultRule::on(&[0x21, 0xA9], ReplyFault::NoReply).once());
+    let (r, _) = run(ecu, &["read", "--xml", &sx, "21A9"]);
+    assert_eq!(r.code, 5);
+}
