@@ -56,23 +56,15 @@ struct PrepareArgs {
     /// `kline exec` command carries the resulting bytes.
     #[arg(long = "set", value_name = "ITEM=VALUE")]
     set: Vec<String>,
-}
-
-/// Quote one shell word if needed.
-fn sh(w: &str) -> String {
-    if !w.is_empty()
-        && w.chars()
-            .all(|c| c.is_ascii_alphanumeric() || "-_./:=,@+".contains(c))
-    {
-        w.to_string()
-    } else {
-        format!("'{}'", w.replace('\'', "'\\''"))
-    }
+    /// `--hold/--watch` for the printed `kline exec` command (the watch read is checked here).
+    #[command(flatten)]
+    hold: cmd::HoldArgs,
 }
 
 fn prepare(ctx: &mut Ctx, a: &PrepareArgs) -> Result<(), CliError> {
     let ecu = Ecu::resolve(&a.link.ecu, &ctx.g.defs_dir())?;
     let asx = cmd::assess(&ecu, &a.request, &a.set)?;
+    let watch = a.hold.watch_read(&ecu)?;
     let mut j = cmd::assessment_json(&asx);
     j["event"] = json!("prepare");
     let mut words: Vec<String> = vec!["kline".into()];
@@ -80,7 +72,8 @@ fn prepare(ctx: &mut Ctx, a: &PrepareArgs) -> Result<(), CliError> {
     words.push("exec".into());
     words.extend(a.link.to_cli());
     words.push(hex(&asx.payload));
-    let command = words.iter().map(|w| sh(w)).collect::<Vec<_>>().join(" ");
+    words.extend(a.hold.to_cli(watch.as_ref()));
+    let command = kline_host::shell_join(&words);
     match &asx.risk {
         Ok(r) if r.tier == Tier::Read => {
             j["note"] = json!("this is a read: kline-agent can run it with `read`");

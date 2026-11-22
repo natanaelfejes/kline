@@ -177,3 +177,70 @@ fn real_bmt_reads_show_flag_meanings_and_the_open_definition_choice() {
         eprintln!("{}", r.stdout);
     }
 }
+
+/// The car command of the remote learning (docs/cli.md) against the real BMT definition: one
+/// 31 C7, then only 21 A3 every 500 ms, the remote press shown as TIR RF RECU/VAL/OK 0 -> 1
+/// with their meanings, then Stop (final critique F01).
+#[test]
+fn real_bmt_remote_learning_hold_and_watch() {
+    let Some(d) = defs_dir() else { return };
+    let dir = std::path::PathBuf::from(&d);
+    let sc = kline_sim::scenario::Scenario::new()
+        .number("TIR RF RECU", 0.0)
+        .number("TIR RF VAL", 0.0)
+        .number("TIR RF OK", 0.0);
+    let c7 = [0x31, 0xC7, 0x00, 0x00, 0x00];
+    let mut ecu = real_bmt(&dir, "BMT_X65_ph1_p.xml", sc);
+    for item in ["TIR RF RECU", "TIR RF VAL", "TIR RF OK"] {
+        ecu = ecu.with_change_after(&c7, 3000, item, kline_spec::Value::Number(1.0));
+    }
+    let j = ecu.journal();
+    let r = run_line_with(
+        kline_sim::line::VirtualLine::with_ecu(ecu),
+        &[
+            "--trace",
+            "--defs",
+            &d,
+            "exec",
+            "--ecu",
+            "bmt",
+            "31C7000000",
+            "--hold",
+            "30",
+            "--watch",
+            "21A3",
+        ],
+        Opts {
+            interactive: true,
+            human: Human::TypesShownCode,
+            ..Opts::default()
+        },
+    );
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    for needle in [
+        "holding the session for 30 s",
+        "TIR RF RECU 0 -> 1  (1 = a remote frame was received)",
+        "TIR RF VAL 0 -> 1  (1 = the remote frame is valid, well-formed)",
+        "TIR RF OK 0 -> 1  (1 = remote accepted, a learned remote)",
+        "hold ended after 30 s",
+    ] {
+        assert!(
+            r.stdout.contains(needle),
+            "missing {needle:?} in\n{}",
+            r.stdout
+        );
+    }
+    let tx = tx_payloads(&r.stderr);
+    let i = tx.iter().position(|p| p == &c7).unwrap();
+    let rest = &tx[i + 1..];
+    assert_eq!(rest.last(), Some(&vec![0x82]));
+    assert!(rest[..rest.len() - 1]
+        .iter()
+        .all(|p| p == &vec![0x21, 0xA3]));
+    let w = j.writes();
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert_eq!(w[0].payload, c7.to_vec());
+    if std::env::var_os("KLINE_SHOW").is_some() {
+        eprintln!("{}", r.stdout);
+    }
+}

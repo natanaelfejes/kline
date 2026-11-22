@@ -17,8 +17,8 @@ use std::time::Duration;
 use clap::{Args, Parser, Subcommand};
 use kline_core::safety::{self, Approval, Tier};
 use kline_host::cmd::{
-    self, Ctx, DtcArgs, Env, GlobalArgs, LinkArgs, LiveArgs, ReadArgs, ReplayArgs, RiskArgs,
-    ScanArgs, SelftestArgs, SetupArgs,
+    self, Ctx, DtcArgs, Env, GlobalArgs, HoldArgs, LinkArgs, LiveArgs, ReadArgs, ReplayArgs,
+    RiskArgs, ScanArgs, SelftestArgs, SetupArgs,
 };
 use kline_host::defs::{self, Ecu};
 use kline_host::error::{exit, CliError};
@@ -101,11 +101,14 @@ pub struct ExecArgs {
     pub set: Vec<String>,
     /// After the request, offer this one (name or hex) to end an actuator test: it gets its
     /// own RiskInfo and confirmation code, and typing that code sends it.
-    #[arg(long, value_name = "REQUEST")]
+    #[arg(long, value_name = "REQUEST", conflicts_with = "hold")]
     pub stop: Option<String>,
     /// `--set` for the --stop request.
     #[arg(long = "stop-set", value_name = "ITEM=VALUE", requires = "stop")]
     pub stop_set: Vec<String>,
+    /// --hold SECONDS / --watch REQUEST / --watch-interval MS (not with --stop).
+    #[command(flatten)]
+    pub hold: HoldArgs,
     /// Seconds to wait for the confirmation code (TesterPresent keeps the session open).
     #[arg(long, default_value_t = 120)]
     pub confirm_timeout: u64,
@@ -274,6 +277,7 @@ pub fn clear_dtc(
         set: Vec::new(),
         stop: None,
         stop_set: Vec::new(),
+        hold: HoldArgs::default(),
         confirm_timeout: a.confirm_timeout,
     };
     exec(ctx, &e, interactive, tty)
@@ -315,6 +319,10 @@ pub fn exec(
         }
         None => None,
     };
+    // --watch is checked before anything is opened: a Tier 0 read only (exit 7 otherwise).
+    let watch = a.hold.watch_read(&ecu)?;
+    // Example read for a lost reply (F06): what shows the state this request changes.
+    let state_read = state_read_hint(&ecu, &a.link, &asx.payload);
     // Any non-read `3B D2 ..` is a configuration write of the BMT whatever its tier (also the
     // Expert indexes, re-review N2): the definition choice decides what the index means.
     let is_config_write = |p: &[u8], r: &safety::RiskInfo| {
@@ -349,7 +357,7 @@ pub fn exec(
         } else {
             None
         };
-        let r = approve_and_send(
+        let sent = approve_and_send(
             ctx,
             o,
             prompt.as_mut(),
@@ -359,16 +367,39 @@ pub fn exec(
             identification.as_deref(),
             timeout_ms,
             "send exactly this request once",
-        )?;
-        let reply = link::positive(&r);
-        ctx.out.emit(
-            json!({}),
-            match &reply {
-                Ok(p) => format!("sent {}: positive reply {}", hex_sp(&payload), hex_sp(p)),
-                Err(e) => format!("sent {}: {}", hex_sp(&payload), e.message),
-            },
+            &state_read,
         );
-        let main = reply.map(drop);
+        let main = match sent {
+            Ok(r) => {
+                let reply = link::positive(&r);
+                ctx.out.emit(
+                    json!({}),
+                    match &reply {
+                        Ok(p) => {
+                            format!("sent {}: positive reply {}", hex_sp(&payload), hex_sp(p))
+                        }
+                        Err(e) => format!("sent {}: {}", hex_sp(&payload), e.message),
+                    },
+                );
+                reply.map(drop)
+            }
+            // The request went out but its reply was lost: an actuator test may be running,
+            // so the stop is still offered (below); the message says so first.
+            Err(e) if e.code == exit::SENT_REPLY_LOST && stop.is_some() => {
+                ctx.out.emit(json!({}), &e.message);
+                Err(e)
+            }
+            Err(e) => return Err(e),
+        };
+        // F01: hold the session after a positive reply only; never send the request again.
+        if let (Ok(()), Some(secs)) = (&main, a.hold.hold) {
+            hold(
+                ctx,
+                o,
+                secs.saturating_mul(1000),
+                watch.as_ref().map(|w| (w, a.hold.watch_interval)),
+            )?;
+        }
         let Some((s, srisk)) = &stop else {
             return main;
         };
@@ -388,6 +419,7 @@ pub fn exec(
                 None,
                 timeout_ms,
                 "send the stop request now",
+                &state_read,
             )
         };
         match &stopped {
@@ -398,6 +430,7 @@ pub fn exec(
                     Err(e) => format!("stop {}: {}", hex_sp(&s.payload), e.message),
                 },
             ),
+            Err(e) if e.code == exit::SENT_REPLY_LOST => ctx.out.emit(json!({}), &e.message),
             Err(e) => ctx.out.emit(
                 json!({}),
                 format!(
@@ -424,6 +457,7 @@ fn approve_and_send(
     identification: Option<&[u8]>,
     timeout_ms: u64,
     action: &str,
+    state_read: &str,
 ) -> Result<kline_core::session::SessionOutcome, CliError> {
     let challenge = match tier {
         Tier::Service => o.session.service_challenge(payload),
@@ -491,7 +525,186 @@ fn approve_and_send(
         .session
         .request_approved(payload, approval, o.link.now_ms())
         .map_err(|e| CliError::session(&e))?;
-    o.link.run(&mut o.session, first).map_err(|e| e.to_cli())
+    let written = o.link.frames_written();
+    o.link.run(&mut o.session, first).map_err(|e| {
+        if o.link.frames_written() > written {
+            reply_lost(ctx, payload, &e.to_cli().message, state_read)
+        } else {
+            e.to_cli()
+        }
+    })
+}
+
+/// Final critique F06: the approved request reached the line but its reply was lost, damaged
+/// or timed out. Its effect is unknown; it must not be repeated before the state is read.
+fn reply_lost(ctx: &Ctx, payload: &[u8], cause: &str, state_read: &str) -> CliError {
+    let message = format!(
+        "the request {} WAS SENT to the ECU; its reply was not received correctly ({cause}); do NOT repeat it blindly: first read the state (e.g. {state_read})",
+        hex_sp(payload)
+    );
+    ctx.out.emit(
+        json!({"event": "approved_reply_lost", "request": hex(payload), "request_sent": true,
+               "cause": cause}),
+        "",
+    );
+    CliError::new(exit::SENT_REPLY_LOST, "sent_reply_lost", message)
+}
+
+/// The `kline read` that shows what `payload` changes, for the F06 message: BMT `21 A3`
+/// (remote state) for its routines, `21 A1` (configuration) for `3B D2`; otherwise the read of
+/// the same identifier for a `3B lid`, else a placeholder.
+fn state_read_hint(ecu: &Ecu, link: &LinkArgs, payload: &[u8]) -> String {
+    let bmt = ecu
+        .target()
+        .is_ok_and(|t| safety::is_immobilizer_ecu(&ecu.guard(), &t));
+    let read = match payload {
+        [0x31, ..] if bmt => hex(&cmd::REMOTE_LEARNING_WATCH),
+        [0x3B, 0xD2, ..] if bmt => hex(&[0x21, 0xA1]),
+        [0x3B, lid, ..] => hex(&[0x21, *lid]),
+        _ => "<the frame that shows what this request changes>".to_string(),
+    };
+    let mut words: Vec<String> = vec!["kline".into(), "read".into()];
+    words.extend(link.ecu.to_cli());
+    words.push(read);
+    words.join(" ")
+}
+
+/// F01: keep the session open for `hold_ms` after the approved request: TesterPresent when the
+/// line idles for the definition's TesterPresent delay, and with `watch` only that Tier 0 read
+/// (through `Session::request`) every `interval` ms, printing the items that changed. Ctrl-C
+/// ends it; the caller (`with_session`) then sends Stop. Nothing else is sent.
+fn hold(
+    ctx: &mut Ctx,
+    o: &mut cmd::Open,
+    hold_ms: u64,
+    watch: Option<(&defs::Resolved, u64)>,
+) -> Result<(), CliError> {
+    let start = o.link.now_ms();
+    let end = start.saturating_add(hold_ms);
+    ctx.out.emit(
+        json!({"event": "hold", "ms": hold_ms, "watch": watch.map(|(w, _)| hex(&w.payload)),
+               "interval_ms": watch.map(|(_, i)| i)}),
+        format!(
+            "holding the session for {} s: {}; Ctrl-C ends it (Stop is sent); the request is not sent again",
+            hold_ms / 1000,
+            match watch {
+                Some((w, i)) => format!(
+                    "reading only {} every {i} ms, printing what changed",
+                    hex_sp(&w.payload)
+                ),
+                None => "TesterPresent only".to_string(),
+            }
+        ),
+    );
+    let mut last: std::collections::HashMap<String, String> = Default::default();
+    let mut next_read = start;
+    let mut reads = 0u64;
+    loop {
+        if ctx.stopped() {
+            return Ok(());
+        }
+        let now = o.link.now_ms();
+        if now >= end {
+            break;
+        }
+        if let Some((w, interval)) = watch {
+            if now >= next_read {
+                next_read = (next_read + interval).max(now + 1);
+                watch_once(ctx, o, w, now - start, reads == 0, &mut last)?;
+                reads += 1;
+                continue;
+            }
+        }
+        o.link.keepalive(&mut o.session).map_err(|e| e.to_cli())?;
+        let now = o.link.now_ms();
+        let wake = if watch.is_some() {
+            next_read.min(end)
+        } else {
+            end
+        };
+        if wake > now {
+            // Wake at least every 100 ms to notice Ctrl-C (as `live`).
+            o.link.sleep_ms((wake - now).min(100) as u32);
+        }
+    }
+    ctx.out.emit(
+        json!({"event": "hold_end", "reads": reads}),
+        format!("hold ended after {} s", hold_ms / 1000),
+    );
+    Ok(())
+}
+
+/// One `--watch` read: the first one prints every item (with the known flag meanings), later
+/// ones only the items whose value changed. A failed read is printed and the hold goes on.
+fn watch_once(
+    ctx: &mut Ctx,
+    o: &mut cmd::Open,
+    w: &defs::Resolved,
+    t_ms: u64,
+    first: bool,
+    last: &mut std::collections::HashMap<String, String>,
+) -> Result<(), CliError> {
+    let head = format!("+{t_ms} ms {}", hex_sp(&w.payload));
+    let r = match o.link.request(&mut o.session, &w.payload) {
+        Ok(r) => r,
+        Err(e) if e.is_link() => {
+            let m = e.to_cli().message;
+            ctx.out.emit(
+                json!({"event": "watch_error", "t_ms": t_ms, "request": hex(&w.payload), "message": m}),
+                format!("{head}: {m} (watch goes on)"),
+            );
+            return Ok(());
+        }
+        Err(e) => return Err(e.to_cli()),
+    };
+    let reply = match link::positive(&r) {
+        Ok(p) => p,
+        Err(e) => {
+            ctx.out.emit(
+                json!({"event": "watch_error", "t_ms": t_ms, "request": hex(&w.payload), "message": e.message}),
+                format!("{head}: {}", e.message),
+            );
+            return Ok(());
+        }
+    };
+    let decoded = defs::decode_reply(o.ecu.def(), &w.payload, reply);
+    let mut changes: Vec<String> = Vec::new();
+    for i in decoded
+        .iter()
+        .filter_map(|(_, r)| r.as_ref().ok())
+        .flatten()
+    {
+        let mut text = i.display.as_deref().unwrap_or("-").to_string();
+        if let Some(u) = i.unit.as_deref().filter(|u| !u.is_empty()) {
+            text.push(' ');
+            text.push_str(u);
+        }
+        let name = i.name.trim().to_string();
+        if let Some(prev) = last.insert(name.clone(), text.clone()) {
+            if prev != text {
+                let mut c = format!("{name} {prev} -> {text}");
+                if let Some(m) = defs::flag_meaning(i) {
+                    c.push_str(&format!("  ({m})"));
+                }
+                changes.push(c);
+            }
+        }
+    }
+    let human = if first {
+        format!("{head}\n{}", defs::decoded_human(&decoded))
+    } else {
+        changes
+            .iter()
+            .map(|c| format!("{head}  {c}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    ctx.out.emit(
+        json!({"event": "watch", "t_ms": t_ms, "request": hex(&w.payload), "reply": hex(reply),
+               "changed": changes, "decoded": defs::decoded_json(&decoded)}),
+        human,
+    );
+    Ok(())
 }
 
 /// Tier 2 preconditions in this session: `21 80` identification with an unambiguous

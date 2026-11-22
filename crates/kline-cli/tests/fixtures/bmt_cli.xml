@@ -19,6 +19,7 @@
 <Data Name="Part number"><Bytes count="6" ascii="1"/></Data>
 <Data Name="Board type"><Bits><List><Item Value="3" Text="type C"/></List></Bits></Data>
 <Data Name="Remote frame received"><Bits count="1"><List><Item Value="0" Text="no"/><Item Value="1" Text="yes"/></List></Bits></Data>
+<Data Name="TIR RF RECU"><Bits count="1"><Scaled/></Bits></Data>
 <Data Name="Remote count"><Bits count="4"><Scaled/></Bits></Data>
 <Data Name="Door switch fault"><Bits count="1"><List><Item Value="0" Text="absent"/><Item Value="1" Text="present"/></List></Bits></Data>
 <Data Name="Option A"><Bits count="1"><Scaled/></Bits></Data>
@@ -36,6 +37,7 @@
 <Sent><SentBytes>21A3</SentBytes></Sent>
 <Received MinBytes="4">
 <DataItem Name="Remote frame received" Ref="1" FirstByte="3" BitOffset="7"/>
+<DataItem Name="TIR RF RECU" Ref="1" FirstByte="3" BitOffset="6"/>
 <DataItem Name="Remote count" Ref="1" FirstByte="4"/>
 </Received>
 </Request>
@@ -49,6 +51,10 @@
 </Request>
 <Request Name="Erase remotes and learn remote key 1">
 <Sent><SentBytes>31C7000000</SentBytes></Sent>
+<Received MinBytes="1"></Received>
+</Request>
+<Request Name="Learn remote key 2">
+<Sent><SentBytes>31C8000000</SentBytes></Sent>
 <Received MinBytes="1"></Received>
 </Request>
 <Request Name="Clear faults">

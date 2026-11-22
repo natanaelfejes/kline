@@ -35,6 +35,9 @@ pub mod exit {
     pub const CAPTURE: u8 = 11;
     /// `scan` stopped early (3 missing replies or a security NRC).
     pub const SCAN_STOPPED: u8 = 12;
+    /// An approved request WAS written to the line but its reply was lost, damaged or timed
+    /// out: its effect is unknown; read the state before anything else (final critique F06).
+    pub const SENT_REPLY_LOST: u8 = 13;
 }
 
 #[derive(Debug, Clone)]

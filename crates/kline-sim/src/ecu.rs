@@ -222,6 +222,17 @@ impl FaultRule {
     }
 }
 
+/// A scheduled scenario change ([`SpecEcu::with_change_after`]).
+#[derive(Debug, Clone)]
+struct ScenarioChange {
+    on: Vec<u8>,
+    delay_ms: u64,
+    data: String,
+    value: kline_spec::Value,
+    armed_at: Option<u64>,
+    done: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
     Asleep,
@@ -239,6 +250,7 @@ pub struct SpecEcu {
     journal: Journal,
     init_fault: Option<InitFault>,
     faults: Vec<FaultRule>,
+    changes: Vec<ScenarioChange>,
     state: State,
     asm: Assembler,
     last_rx_byte: u64,
@@ -267,6 +279,7 @@ impl SpecEcu {
             journal: Journal::new(),
             init_fault: None,
             faults: Vec::new(),
+            changes: Vec::new(),
             state: State::Asleep,
             asm: Assembler::default(),
             last_rx_byte: 0,
@@ -284,6 +297,51 @@ impl SpecEcu {
     pub fn with_fault(mut self, rule: FaultRule) -> SpecEcu {
         self.faults.push(rule);
         self
+    }
+
+    /// Change scenario value `data` to `value` `delay_ms` after the ECU first receives a
+    /// request starting with `on` (e.g. a remote pressed 2 s after `31 C7`: `21 A3` then
+    /// reports the frame). Checked against the definition when it applies; an invalid value
+    /// is a journal note and the old value stays.
+    pub fn with_change_after(
+        mut self,
+        on: &[u8],
+        delay_ms: u64,
+        data: &str,
+        value: kline_spec::Value,
+    ) -> SpecEcu {
+        self.changes.push(ScenarioChange {
+            on: on.to_vec(),
+            delay_ms,
+            data: data.to_string(),
+            value,
+            armed_at: None,
+            done: false,
+        });
+        self
+    }
+
+    /// Arm the changes `payload` triggers and apply the ones that are due at `t`.
+    fn apply_changes(&mut self, t: u64, payload: &[u8]) {
+        for c in &mut self.changes {
+            if c.armed_at.is_none() && payload.starts_with(&c.on) {
+                c.armed_at = Some(t);
+            }
+        }
+        for i in 0..self.changes.len() {
+            let c = &self.changes[i];
+            if c.done || c.armed_at.is_none_or(|a| t < a + c.delay_ms) {
+                continue;
+            }
+            let next = self.scenario.clone().set(&c.data, c.value.clone());
+            match next.check(&self.def) {
+                Ok(()) => self.scenario = next,
+                Err(e) => self
+                    .journal
+                    .note(t, format!("scenario change {} refused: {e}", c.data)),
+            }
+            self.changes[i].done = true;
+        }
     }
 
     /// Shared handle on the write log / violations / notes.
@@ -318,6 +376,7 @@ impl SpecEcu {
     /// The reply payload for a request, or None for no reply. Also returns whether the ECU
     /// falls asleep after it.
     fn answer(&mut self, t: u64, payload: &[u8]) -> (Option<Vec<u8>>, bool) {
+        self.apply_changes(t, payload);
         let iso8 = self.profile.protocol == EcuProtocol::Iso8;
         let sid = payload[0];
         let matches: Vec<&kline_spec::Request> = self

@@ -39,6 +39,27 @@ pub fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02X}")).collect()
 }
 
+/// One shell word, quoted only when needed (for printed command lines).
+pub fn shell_word(w: &str) -> String {
+    if !w.is_empty()
+        && w.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./:=,@+".contains(c))
+    {
+        w.to_string()
+    } else {
+        format!("'{}'", w.replace('\'', "'\\''"))
+    }
+}
+
+/// Words joined as one shell command line ([`shell_word`]).
+pub fn shell_join(words: &[String]) -> String {
+    words
+        .iter()
+        .map(|w| shell_word(w))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Uppercase hex with spaces (`21 A9`).
 pub fn hex_sp(b: &[u8]) -> String {
     b.iter()

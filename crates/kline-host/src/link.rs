@@ -147,6 +147,8 @@ pub struct Link {
     trace: Tracer,
     cap: Option<Capture>,
     marker: Option<(Kind, Vec<u8>)>,
+    /// Frames the transport accepted ([`Link::frames_written`]).
+    frames_written: u64,
 }
 
 impl Link {
@@ -156,11 +158,19 @@ impl Link {
             trace,
             cap,
             marker: None,
+            frames_written: 0,
         }
     }
 
     pub fn now_ms(&self) -> u64 {
         self.t.now_ms()
+    }
+
+    /// Number of frames the transport accepted so far. A caller compares it around an
+    /// exchange to know whether the request reached the line (final critique F06: a lost reply
+    /// after an approved request must say that the request WAS sent).
+    pub fn frames_written(&self) -> u64 {
+        self.frames_written
     }
 
     /// Set the modem lines right after the port is opened, before the first init. DTR is
@@ -251,6 +261,7 @@ impl Link {
                     ),
                 );
                 self.t.write(frame.bytes(), *inter_byte_ms)?;
+                self.frames_written += 1;
                 self.record(t0, Dir::Tx, None, frame.bytes());
                 Event::Done
             }

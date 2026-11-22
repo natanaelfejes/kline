@@ -213,6 +213,93 @@ impl Transport for CtrlCAtInit {
     }
 }
 
+/// Ctrl-C `delay_ms` after the first written frame that contains `pattern` (checked on every
+/// transport call, virtual clock).
+pub struct CtrlCAfterTx {
+    pub inner: Box<dyn Transport>,
+    pub stop: Arc<std::sync::atomic::AtomicBool>,
+    pub pattern: Vec<u8>,
+    pub delay_ms: u64,
+    pub seen_at: Option<u64>,
+}
+
+impl CtrlCAfterTx {
+    fn tick(&self) {
+        if self
+            .seen_at
+            .is_some_and(|t| self.inner.now_ms() >= t + self.delay_ms)
+        {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+impl Transport for CtrlCAfterTx {
+    fn now_ms(&self) -> u64 {
+        self.tick();
+        self.inner.now_ms()
+    }
+    fn now_us(&self) -> u64 {
+        self.inner.now_us()
+    }
+    fn set_dtr(&mut self, on: bool) -> io::Result<()> {
+        self.inner.set_dtr(on)
+    }
+    fn set_rts(&mut self, on: bool) -> io::Result<()> {
+        self.inner.set_rts(on)
+    }
+    fn set_break(&mut self, on: bool) -> io::Result<()> {
+        self.inner.set_break(on)
+    }
+    fn break_loopback_seen(&mut self) -> io::Result<bool> {
+        self.inner.break_loopback_seen()
+    }
+    fn sleep_ms(&mut self, ms: u32) {
+        self.inner.sleep_ms(ms);
+        self.tick();
+    }
+    fn flush_rx(&mut self) -> io::Result<()> {
+        self.inner.flush_rx()
+    }
+    fn write(&mut self, bytes: &[u8], inter_byte_ms: u32) -> io::Result<()> {
+        if self.seen_at.is_none()
+            && bytes
+                .windows(self.pattern.len().max(1))
+                .any(|w| w == self.pattern.as_slice())
+        {
+            self.seen_at = Some(self.inner.now_ms());
+        }
+        self.inner.write(bytes, inter_byte_ms)
+    }
+    fn read(&mut self, count: usize, timeout_ms: u32) -> io::Result<Vec<u8>> {
+        self.inner.read(count, timeout_ms)
+    }
+    fn baud_rate(&self) -> Option<u32> {
+        self.inner.baud_rate()
+    }
+    fn set_init_guard(&mut self, on: bool) {
+        self.inner.set_init_guard(on)
+    }
+}
+
+/// Payloads of the KWP frames (length in the format byte, 3-byte header) on the `TX` lines
+/// of a `--trace` output, in order. Init bytes (single bytes) are skipped.
+pub fn tx_payloads(trace: &str) -> Vec<Vec<u8>> {
+    trace
+        .lines()
+        .filter_map(|l| l.split_once("TX ").map(|(_, r)| r))
+        .filter_map(|r| {
+            let hex = r.split('(').next().unwrap_or("");
+            let b: Vec<u8> = hex
+                .split_whitespace()
+                .map(|h| u8::from_str_radix(h, 16).ok())
+                .collect::<Option<_>>()?;
+            let len = usize::from(*b.first()? & 0x3F);
+            (b[0] & 0x80 != 0 && len > 0 && b.len() == len + 4).then(|| b[3..3 + len].to_vec())
+        })
+        .collect()
+}
+
 /// Like [`run`] on a line that never reports the break loopback.
 pub fn run_blind_break(ecu: SpecEcu, args: &[&str]) -> (Run, Journal) {
     let j = ecu.journal();
@@ -324,6 +411,9 @@ pub struct Opts {
     pub ctrl_c: bool,
     /// What the port listing returns (default: nothing).
     pub ports: Vec<kline_host::ports::PortInfo>,
+    /// Ctrl-C pressed this many ms after the first write that contains these bytes
+    /// ([`CtrlCAfterTx`]).
+    pub ctrl_c_after_tx: Option<(Vec<u8>, u64)>,
 }
 
 impl Default for Opts {
@@ -335,6 +425,7 @@ impl Default for Opts {
             clock_late_us: 0,
             ctrl_c: false,
             ports: Vec::new(),
+            ctrl_c_after_tx: None,
         }
     }
 }
@@ -401,6 +492,8 @@ fn run_line_inner(line: VirtualLine, port: &str, args: &[&str], o: Opts, blind: 
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop2 = stop.clone();
     let ports = o.ports.clone();
+    let ctrl_c_after_tx = o.ctrl_c_after_tx.clone();
+    let stop3 = stop.clone();
     let sys_root = o
         .sys_root
         .clone()
@@ -416,6 +509,16 @@ fn run_line_inner(line: VirtualLine, port: &str, args: &[&str], o: Opts, blind: 
                     Box::new(BlindBreak(Virtual(l))) as Box<dyn Transport>
                 } else {
                     Box::new(Virtual(l)) as Box<dyn Transport>
+                };
+                let t = match &ctrl_c_after_tx {
+                    Some((pattern, delay_ms)) => Box::new(CtrlCAfterTx {
+                        inner: t,
+                        stop: stop3.clone(),
+                        pattern: pattern.clone(),
+                        delay_ms: *delay_ms,
+                        seen_at: None,
+                    }) as Box<dyn Transport>,
+                    None => t,
                 };
                 if ctrl_c {
                     Ok(Box::new(CtrlCAtInit {

@@ -220,6 +220,82 @@ pub struct RiskArgs {
     /// Set a sent data item of the named request (repeatable), see `read --set`.
     #[arg(long = "set", value_name = "ITEM=VALUE")]
     pub set: Vec<String>,
+    #[command(flatten)]
+    pub hold: HoldArgs,
+}
+
+/// `exec --hold/--watch` (final critique F01): keep the session open after the approved
+/// request so its effect (BMT learning window) can be watched in the same session. `risk`
+/// takes the same options to print the exact `kline exec` command.
+#[derive(Debug, Clone, Default, Args)]
+pub struct HoldArgs {
+    /// After a positive reply, keep the session open this many seconds (1-60): TesterPresent
+    /// at the definition's period and nothing else (except --watch), then Stop. Ctrl-C ends it
+    /// early (Stop is sent). The approved request is never sent again.
+    #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..=60))]
+    pub hold: Option<u64>,
+    /// While holding, send only this Tier 0 read (name or hex, e.g. 21A3) every
+    /// --watch-interval ms and print the decoded items that changed.
+    #[arg(long, value_name = "REQUEST", requires = "hold")]
+    pub watch: Option<String>,
+    /// Period of the --watch read in ms (at least the definition's P3 gap).
+    #[arg(long, value_name = "MS", default_value_t = HOLD_WATCH_INTERVAL_MS, requires = "watch")]
+    pub watch_interval: u64,
+}
+
+/// Default `--watch-interval`: 2 reads per second, DDT2000's screen refresh order of magnitude
+/// (final critique F01 asked for `--rate 2`).
+pub const HOLD_WATCH_INTERVAL_MS: u64 = 500;
+/// The hold `risk` suggests for the BMT remote learning: the Technical Note's learning window
+/// is about 10 s; 30 s leaves time to press the remote and see the result.
+pub const REMOTE_LEARNING_HOLD_S: u64 = 30;
+/// The read `risk` suggests to watch the remote learning: BMT `21 A3` ("ETATS TIR": TIR RF
+/// RECU/VAL/OK, APPTIR, CODIRAPP1/2), docs/cli.md.
+pub const REMOTE_LEARNING_WATCH: [u8; 2] = [0x21, 0xA3];
+
+impl HoldArgs {
+    /// The options as command words (`--hold N --watch HEX [--watch-interval MS]`), with the
+    /// watch read as its resolved hex.
+    pub fn to_cli(&self, watch: Option<&defs::Resolved>) -> Vec<String> {
+        let mut v = Vec::new();
+        if let Some(h) = self.hold {
+            v.extend(["--hold".into(), h.to_string()]);
+        }
+        if let Some(w) = watch {
+            v.extend(["--watch".into(), hex(&w.payload)]);
+            if self.watch_interval != HOLD_WATCH_INTERVAL_MS {
+                v.extend(["--watch-interval".into(), self.watch_interval.to_string()]);
+            }
+        }
+        v
+    }
+
+    /// Check `--watch` before anything is opened: it must be a Tier 0 read of this ECU (else
+    /// refused, exit 7) and the interval at least the definition's P3 gap (else exit 2).
+    pub fn watch_read(&self, ecu: &Ecu) -> Result<Option<defs::Resolved>, CliError> {
+        let Some(w) = &self.watch else {
+            return Ok(None);
+        };
+        let r = defs::resolve_request(ecu.def(), w)?;
+        let target = ecu.target()?;
+        let risk = safety::assess_in(&ecu.guard(), &target, &r.payload)
+            .map_err(|d| CliError::denied(&d))?;
+        if risk.tier != Tier::Read {
+            return Err(CliError::refused(format!(
+                "--watch {} is not a Tier 0 read ({}): only a read may be repeated while holding; nothing was sent",
+                hex_sp(&r.payload),
+                tier_name(risk.tier)
+            )));
+        }
+        let p3 = u64::from(ecu.link_config()?.effective_timing().reply_to_request_ms);
+        if self.watch_interval < p3 {
+            return Err(CliError::usage(format!(
+                "--watch-interval {} ms is below the definition's P3 gap ({p3} ms)",
+                self.watch_interval
+            )));
+        }
+        Ok(Some(r))
+    }
 }
 
 #[derive(Debug, Clone, Args)]
@@ -2033,10 +2109,64 @@ pub fn assessment_human(a: &Assessment) -> String {
 pub fn risk(ctx: &mut Ctx, a: &RiskArgs) -> Result<(), CliError> {
     let ecu = Ecu::resolve(&a.ecu, &ctx.g.defs_dir())?;
     let asx = assess(&ecu, &a.request, &a.set)?;
+    let watch = a.hold.watch_read(&ecu)?;
     let mut j = assessment_json(&asx);
     j["event"] = json!("risk");
-    ctx.out.emit(j, assessment_human(&asx));
+    let mut human = assessment_human(&asx);
+    if let Some((command, suggested)) =
+        exec_command(ctx, &ecu, &a.ecu, &asx, &a.hold, watch.as_ref())?
+    {
+        j["command"] = json!(command);
+        human.push_str(&format!(
+            "\n{}: {command}",
+            if suggested {
+                "command (remote learning: hold the session and watch 21 A3 for the learning window)"
+            } else {
+                "command"
+            }
+        ));
+    }
+    ctx.out.emit(j, human);
     asx.risk.map(drop)
+}
+
+/// The exact `kline exec` command for an allowed non-read (None for a read or a refusal), and
+/// whether --hold/--watch were added because the request is the BMT remote learning and none
+/// were given.
+pub fn exec_command(
+    ctx: &Ctx,
+    ecu: &Ecu,
+    ecu_args: &EcuArgs,
+    asx: &Assessment,
+    hold: &HoldArgs,
+    watch: Option<&defs::Resolved>,
+) -> Result<Option<(String, bool)>, CliError> {
+    match &asx.risk {
+        Ok(r) if r.tier != Tier::Read => {}
+        _ => return Ok(None),
+    }
+    let mut words: Vec<String> = vec!["kline".into()];
+    words.extend(ctx.g.port_cli());
+    words.push("exec".into());
+    words.extend(ecu_args.to_cli());
+    words.push(hex(&asx.payload));
+    let remote_learning = safety::is_immobilizer_ecu(&ecu.guard(), &asx.target)
+        && safety::BMT_REMOTE_LEARNING
+            .iter()
+            .any(|p| p.as_slice() == asx.payload);
+    let suggested = remote_learning && hold.hold.is_none();
+    if suggested {
+        let h = HoldArgs {
+            hold: Some(REMOTE_LEARNING_HOLD_S),
+            watch: Some(hex(&REMOTE_LEARNING_WATCH)),
+            watch_interval: HOLD_WATCH_INTERVAL_MS,
+        };
+        let w = h.watch_read(ecu)?;
+        words.extend(h.to_cli(w.as_ref()));
+    } else {
+        words.extend(hold.to_cli(watch));
+    }
+    Ok(Some((crate::shell_join(&words), suggested)))
 }
 
 // ---- replay ----
