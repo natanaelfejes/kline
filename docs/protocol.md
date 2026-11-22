@@ -256,7 +256,10 @@ Checksum: 8-bit sum of all preceding bytes, both framings (RE: KWP2000Diag4 buil
 RE: KWP2000Diag4 ISO8 builder and parser: `[N][data..][cs]`, `N = len(data) + 1`,
 no addresses. `33 50` -> `03 33 50 86`; TesterPresent `36` -> `02 36 38`; Stop `3F` -> `02 3F 41`.
 Reply checks: at least 3 bytes, `N` = byte count - 1, checksum. A one-byte payload 0x15, 0x37,
-0x38 or 0x39 is a status reply (`Reply::Iso8Status`, meaning unknown).
+0x38 or 0x39 is a status reply (`Reply::Iso8Status`), named after DDT2000's errors.xml
+(2022-2025, `iso8code`; `frame::iso8_status_name`): `37` requestUnknown, `38` receiveError,
+`39` and `15` invalidRequest. kline reports it as an error with that name (exit 5; JSON
+`iso8_status` plus `name` in `replay`).
 
 ### KWP2000 (ISO 14230)
 
@@ -457,7 +460,8 @@ command, every request and reply logged. Never scans `30`/`31`/`3B` or anything 
 - The ~address value the ECUs return; whether `55 D0 8F` arrives as expected.
 - Break loopback detection on the FTDI cable under macOS.
 - Whether the ECUs answer TesterPresent and Stop, and whether 0x78 ever occurs.
-- Whether Safir answers ISO8 `36`; meaning of ISO8 status codes.
+- Whether Safir answers ISO8 `36`, and whether it sends the ISO8 status codes (their meaning
+  is now known from DDT2000's errors.xml).
 - The 5000 ms / 10x responsePending bounds; DTR effect on the KKL cable.
 - Fast init on 0x7A.
 - Whether any ECU needs a wider keyword window than KW2Timeout + 100 (`kw_window_ms`).

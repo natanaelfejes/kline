@@ -263,6 +263,18 @@ pub const NRC_RESPONSE_PENDING: u8 = 0x78;
 /// ISO8 3-byte status replies `[02][code][cs]`. RE: KWP2000Diag4 ISO8 parser.
 pub const ISO8_STATUS_CODES: [u8; 4] = [0x15, 0x37, 0x38, 0x39];
 
+/// DDT2000's meaning of an ISO8 status byte (errors.xml 2022-2025 `E_ISO8_37/38/39/15`,
+/// `iso8code`; DDT2000 gives 0x15 and 0x39 the same text). Whether the Safir sends them is
+/// NOT VERIFIED.
+pub fn iso8_status_name(code: u8) -> &'static str {
+    match code {
+        0x37 => "requestUnknown",
+        0x38 => "receiveError",
+        0x39 | 0x15 => "invalidRequest",
+        _ => "unknown",
+    }
+}
+
 /// A reply payload, classified.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reply {
@@ -272,7 +284,7 @@ pub enum Reply {
     Negative { sid: u8, nrc: u8 },
     /// `7F SID 78`: the ECU needs more time; keep reading.
     ResponsePending { sid: u8 },
-    /// ISO8 single-byte status reply (0x15, 0x37, 0x38, 0x39); meaning unknown.
+    /// ISO8 single-byte status reply (0x15, 0x37, 0x38, 0x39); named by [`iso8_status_name`].
     Iso8Status(u8),
 }
 

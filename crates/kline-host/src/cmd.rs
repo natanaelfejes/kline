@@ -2158,7 +2158,8 @@ fn emit_exchange(ctx: &Ctx, ecu: Option<&Ecu>, x: &Exchange) {
                 json!({"negative": {"sid": format!("{sid:02X}"), "nrc": format!("{nrc:02X}")}})
             }
             Ok(Reply::ResponsePending { sid }) => json!({"pending": format!("{sid:02X}")}),
-            Ok(Reply::Iso8Status(s)) => json!({"iso8_status": format!("{s:02X}")}),
+            Ok(Reply::Iso8Status(s)) => json!({"iso8_status": format!("{s:02X}"),
+                                                "name": kline_core::frame::iso8_status_name(*s)}),
             Err(e) => json!({"error": e}),
         })
         .collect();
@@ -2167,6 +2168,10 @@ fn emit_exchange(ctx: &Ctx, ecu: Option<&Ecu>, x: &Exchange) {
         .iter()
         .map(|r| match r {
             Ok(Reply::Positive(p)) => hex_sp(p),
+            Ok(Reply::Iso8Status(s)) => format!(
+                "ISO8 status {s:02X} ({})",
+                kline_core::frame::iso8_status_name(*s)
+            ),
             Ok(other) => format!("{other:?}"),
             Err(e) => format!("error: {e}"),
         })

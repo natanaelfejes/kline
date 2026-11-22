@@ -233,6 +233,25 @@ fn classify_replies() {
     );
 }
 
+/// Step 7b FIX-3: the ISO8 status bytes have DDT2000's meanings (errors.xml 2022-2025).
+#[test]
+fn iso8_status_bytes_are_named() {
+    use kline_core::frame::iso8_status_name;
+    for (code, name) in [
+        (0x37u8, "requestUnknown"),
+        (0x38, "receiveError"),
+        (0x39, "invalidRequest"),
+        (0x15, "invalidRequest"),
+    ] {
+        assert_eq!(
+            Reply::classify(&Framing::Iso8, &[code]),
+            Ok(Reply::Iso8Status(code))
+        );
+        assert_eq!(iso8_status_name(code), name, "{code:02X}");
+    }
+    assert_eq!(iso8_status_name(0x40), "unknown");
+}
+
 #[test]
 fn echo_stripping() {
     let sent = [0x82, 0x26, 0xF1, 0x21, 0xA3, 0x5D];

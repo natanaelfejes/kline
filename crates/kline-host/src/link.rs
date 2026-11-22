@@ -520,6 +520,14 @@ pub fn positive(o: &SessionOutcome) -> Result<&[u8], CliError> {
                 nrc_name(*nrc)
             ),
         )),
+        SessionOutcome::Reply(Reply::Iso8Status(code)) => Err(CliError::new(
+            crate::error::exit::COMM,
+            "comm",
+            format!(
+                "ECU answered with ISO8 status {code:02X} ({})",
+                kline_core::frame::iso8_status_name(*code)
+            ),
+        )),
         other => Err(CliError::new(
             crate::error::exit::COMM,
             "comm",
@@ -576,5 +584,16 @@ mod nrc_tests {
         ] {
             assert_eq!(nrc_name(nrc), name, "{nrc:02X}");
         }
+    }
+
+    /// Step 7b FIX-3: an ISO8 status reply is reported with its name, not as an unexpected
+    /// outcome.
+    #[test]
+    fn iso8_status_reply_is_named() {
+        let e = super::positive(&kline_core::session::SessionOutcome::Reply(
+            kline_core::frame::Reply::Iso8Status(0x37),
+        ))
+        .unwrap_err();
+        assert!(e.message.contains("37 (requestUnknown)"), "{}", e.message);
     }
 }
