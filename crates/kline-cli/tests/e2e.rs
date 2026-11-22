@@ -1624,7 +1624,11 @@ fn missing_definitions_say_how_to_fix_it() {
         "kline setup --defs-from DIR",
         "--defs DIR",
         "KLINE_DDT_XML",
-        ".local/share/kline/ecus",
+        if cfg!(windows) {
+            "kline\\ecus"
+        } else {
+            ".local/share/kline/ecus"
+        },
     ] {
         assert!(
             r.stderr.contains(needle),
