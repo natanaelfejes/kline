@@ -73,6 +73,8 @@ the right definition file for your ECU and it speaks one of the protocols above.
 
 kline is not a generic OBD-II / EOBD code reader. It speaks the manufacturer diagnostic
 services that DDT2000 uses, as described by the definition file, not the generic EOBD PIDs.
+A generic OBD-II / EOBD mode over K-line (modes 01, 03 and 04, which work across brands) is
+planned after the first real-car tests.
 
 ## What is verified and what is not
 
@@ -254,6 +256,9 @@ definitions, which cover Renault-group ECUs. For another brand you would need:
   identifiers and names;
 - the brand's own protocol if it is not KWP2000 or ISO 9141 (for example, VAG's older KW1281 is
   not implemented).
+
+A generic OBD-II / EOBD mode (standard live data and fault codes on any K-line car from about
+2001 on) is planned. It is not there yet.
 
 ### Where do I get ECU definitions?
 

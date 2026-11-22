@@ -79,8 +79,8 @@ Unix only: after opening, kline clears `IGNBRK`, `BRKINT` and `PARMRK` with term
 `cfg(unix)` dependency), so a looped-back break reads as one `00` byte; macOS's `cfmakeraw` sets
 `IGNBRK`. On macOS the `tcsetattr` for this gets a placeholder 9600 and 10400 is set again with
 `IOSSIOSPEED` afterwards, as `serialport` does: `tcgetattr` reads back 10400 there and
-AppleUSBFTDI refuses it in `tcsetattr` with EINVAL (measured, FT232R, macOS 27; the bug in
-ab8de98/bff9da7). Windows has no such flag; whether the FTDI VCP driver delivers a looped-back break as a
+AppleUSBFTDI refuses it in `tcsetattr` with EINVAL (measured, FT232R, macOS 27; an
+earlier version hit exactly this). Windows has no such flag; whether the FTDI VCP driver delivers a looped-back break as a
 `00` byte is NOT VERIFIED (without it the 5-baud init warns, unless `--strict-loopback`).
 
 ## Permissions
@@ -131,7 +131,7 @@ system timer tick (`timeBeginPeriod(1)`, released when the port closes; the defa
 `kline selftest` measures this on the host before it opens any port (`selftest_timing`: 10 sleeps
 each of 1, 25 and 200 ms after one 300 ms warm-up, late min/mean/max and early count, against
 +-1 ms, +-1 ms and +-10 ms), so it reports even without a cable. Measured on this project's hosts
-(no cable, `kline selftest`, release build, commit ab8de98; one run each, so a snapshot, not a
+(no cable, `kline selftest`, release build; one run each, so a snapshot, not a
 guarantee):
 
 | Host | 1 ms max late | 25 ms max late | 200 ms max late | OS sleep lateness seen | learned tail |
@@ -140,7 +140,7 @@ guarantee):
 | macOS 27, M4 Pro | 0.6 ms | 0 ms | 0.4 ms | 5.0-5.8 ms | 11-12.5 ms |
 | Windows 11 ARM64 (Parallels VM on that Mac), `timeBeginPeriod(1)` granted | 0.1 ms | 0.07 ms | 0.01 ms | 3.6-6.2 ms | 9-14.5 ms |
 
-With the earlier fixed tail (commit 1caa4ad) 25 ms sleeps woke up to ~4.8 ms late on macOS and
+With an earlier fixed tail 25 ms sleeps woke up to ~4.8 ms late on macOS and
 ~1.65 ms late on the Windows VM (cause not investigated; timer coalescing is a guess), which is
 why the tail is adaptive. A spin cannot help when the thread itself is preempted (a loaded host or
 a VM whose vCPU is descheduled): run `selftest` and close heavy programs if it says
