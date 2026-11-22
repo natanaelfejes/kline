@@ -88,7 +88,15 @@ and SIGHUP alike (ctrlc `termination`): the first sets the stop flag, so `live`/
 StopCommunication and close the capture, and an init schedule stops before its next attempt or
 retry round (exit 4, `init stopped by Ctrl-C before the next attempt`). A second one releases K
 on the open cable (break off, DTR high; the port is reachable from the signal thread behind a
-mutex, `transport::release_k_line_now`) and exits at once with 130. Dropping the line while
+mutex, `transport::release_k_line_now`) and exits at once with 130. The release first marks
+the port released: from then on every port call of the main thread fails without touching the
+port, so it cannot assert break again before the exit (re-check R02). If the main thread is
+inside a port call (the lock is busy, e.g. a reply read), K is released at once through a
+second OS handle of the same port (`serialport` `try_clone`: a duplicated file descriptor or
+Windows handle; break-off and DTR are single ioctls the driver serializes), then once more
+under the port lock if it frees within 300 ms, which undoes a break-on that was in flight.
+Tested with a mock port only; NOT VERIFIED on AppleUSBFTDI that a break cleared through the
+duplicated descriptor reaches the line. Dropping the line while
 break is on (a panic or an early return mid-init) also clears break and raises DTR. SIGKILL
 cannot be caught: after one, replug the cable before the next command. Windows: `ctrlc`
 installs `SetConsoleCtrlHandler`, which covers Ctrl-C and Ctrl-Break the same way; closing the

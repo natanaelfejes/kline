@@ -167,6 +167,19 @@ pub trait SerialIo {
     fn baud_rate(&self) -> Option<u32> {
         None
     }
+    /// A second, independent handle on the same port that can only release K (break off, DTR
+    /// high), for [`release_k_line_now`] when the main thread is inside a port call. `None`:
+    /// the port has no such handle (the release then waits for the port lock).
+    fn emergency_handle(&self) -> Option<Box<dyn EmergencyRelease>> {
+        None
+    }
+}
+
+/// Releases K on a port through its own OS handle (a duplicate of the port's file descriptor
+/// or Windows handle), without the port's lock ([`SerialIo::emergency_handle`]).
+pub trait EmergencyRelease: Send {
+    /// Break off, then DTR high.
+    fn release(&mut self) -> io::Result<()>;
 }
 
 /// Upper bound on bytes drained in one flush (ours; a K line at 10400 baud cannot deliver more
@@ -330,10 +343,17 @@ impl<P: SerialIo, C: Clock> Drop for KklLine<P, C> {
 
 /// The port [`release_k_line_now`] releases: the one open K line of this process.
 type SharedPort = std::sync::Arc<std::sync::Mutex<dyn SerialIo + Send>>;
+type SharedHandle = std::sync::Arc<std::sync::Mutex<Box<dyn EmergencyRelease>>>;
 
-static EMERGENCY_PORT: std::sync::Mutex<
-    Option<std::sync::Weak<std::sync::Mutex<dyn SerialIo + Send>>>,
-> = std::sync::Mutex::new(None);
+/// What the release needs of the registered port: the port itself (weak: the line owns it),
+/// its abort flag and, if the port has one, its own emergency handle.
+struct Registration {
+    port: std::sync::Weak<std::sync::Mutex<dyn SerialIo + Send>>,
+    aborted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<SharedHandle>,
+}
+
+static EMERGENCY_PORT: std::sync::Mutex<Option<Registration>> = std::sync::Mutex::new(None);
 
 fn lock_ignore_poison<T: ?Sized>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -341,20 +361,42 @@ fn lock_ignore_poison<T: ?Sized>(m: &std::sync::Mutex<T>) -> std::sync::MutexGua
 
 /// A [`SerialIo`] that [`release_k_line_now`] can reach from another thread (the signal
 /// handler, final critique F05): the port sits behind a mutex and is registered while this
-/// value lives. Each call takes the (uncontended) lock once.
+/// value lives. Each call takes the (uncontended) lock once. Once released, every later call
+/// fails without touching the port (re-check R02).
 pub struct Released {
     port: SharedPort,
+    aborted: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Released {
     pub fn register<P: SerialIo + Send + 'static>(port: P) -> Released {
+        let handle = port
+            .emergency_handle()
+            .map(|h| std::sync::Arc::new(std::sync::Mutex::new(h)));
         let port: SharedPort = std::sync::Arc::new(std::sync::Mutex::new(port));
-        *lock_ignore_poison(&EMERGENCY_PORT) = Some(std::sync::Arc::downgrade(&port));
-        Released { port }
+        let aborted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        *lock_ignore_poison(&EMERGENCY_PORT) = Some(Registration {
+            port: std::sync::Arc::downgrade(&port),
+            aborted: aborted.clone(),
+            handle,
+        });
+        Released { port, aborted }
     }
 
-    fn with<R>(&self, f: impl FnOnce(&mut (dyn SerialIo + Send)) -> R) -> R {
-        f(&mut *lock_ignore_poison(&self.port))
+    /// Run `f` on the port under its lock, unless the emergency release has run: then fail
+    /// without touching it. The flag is read under the lock, so a call either completes before
+    /// the release takes the lock (and is undone by it) or is refused.
+    fn with<R>(
+        &self,
+        f: impl FnOnce(&mut (dyn SerialIo + Send)) -> io::Result<R>,
+    ) -> io::Result<R> {
+        let mut p = lock_ignore_poison(&self.port);
+        if self.aborted.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(io::Error::other(
+                "K line released after a second interrupt; the port is closed for this process",
+            ));
+        }
+        f(&mut *p)
     }
 }
 
@@ -363,7 +405,7 @@ impl Drop for Released {
         let mut slot = lock_ignore_poison(&EMERGENCY_PORT);
         let ours = slot
             .as_ref()
-            .and_then(std::sync::Weak::upgrade)
+            .and_then(|r| r.port.upgrade())
             .is_some_and(|p| std::sync::Arc::ptr_eq(&p, &self.port));
         if ours {
             *slot = None;
@@ -397,22 +439,47 @@ impl SerialIo for Released {
         self.with(|p| p.clear_input())
     }
     fn baud_rate(&self) -> Option<u32> {
-        self.with(|p| p.baud_rate())
+        self.with(|p| Ok(p.baud_rate())).ok().flatten()
     }
 }
 
+/// How long [`release_k_line_now`] waits for the main thread to finish its current port call
+/// (a write is bounded at about 200 ms, [`WRITE_TIMEOUT_MARGIN_MS`]). ours.
+pub const EMERGENCY_LOCK_WAIT_MS: u64 = 300;
+
 /// Clear break and raise DTR on the open K line, from any thread (a second Ctrl-C, just before
-/// the process exits without unwinding, final critique F05). Waits up to 300 ms for the main
-/// thread to finish its current port call (a write is bounded at about 200 ms). Returns whether
-/// a port was released.
+/// the process exits without unwinding, final critique F05). Returns whether K was released.
+///
+/// Re-check R02, the chosen design:
+/// 1. The port is marked released first. Every later port call of the main thread fails
+///    without touching the port (the flag is read under the port lock), so the main thread
+///    cannot assert break again between this release and `process::exit`.
+/// 2. `try_lock` on the port. Free: release under the lock and return.
+/// 3. Busy (the main thread is inside a port call, e.g. a reply read of up to 5 s after
+///    `7F xx 78`): release at once through the port's own emergency handle (a duplicated file
+///    descriptor or Windows handle of the same device; break-off and DTR are single ioctls the
+///    driver serializes, so a second handle is safe), then keep trying the lock for
+///    [`EMERGENCY_LOCK_WAIT_MS`] and release again under it, which undoes a break-on ioctl
+///    that was in flight when the handle released. A port without a handle only waits for the
+///    lock, as before.
 pub fn release_k_line_now() -> bool {
-    let Some(port) = lock_ignore_poison(&EMERGENCY_PORT)
-        .as_ref()
-        .and_then(std::sync::Weak::upgrade)
-    else {
-        return false;
+    let (port, aborted, handle) = {
+        let slot = lock_ignore_poison(&EMERGENCY_PORT);
+        let Some(r) = slot.as_ref() else {
+            return false;
+        };
+        let Some(port) = r.port.upgrade() else {
+            return false;
+        };
+        (port, r.aborted.clone(), r.handle.clone())
     };
-    let deadline = std::time::Instant::now() + Duration::from_millis(300);
+    aborted.store(true, std::sync::atomic::Ordering::SeqCst);
+    let release = |p: &mut (dyn SerialIo + Send)| {
+        let _ = p.set_break(false);
+        let _ = p.set_dtr(true);
+    };
+    let mut released = false;
+    let deadline = std::time::Instant::now() + Duration::from_millis(EMERGENCY_LOCK_WAIT_MS);
     loop {
         let guard = match port.try_lock() {
             Ok(g) => Some(g),
@@ -420,12 +487,16 @@ pub fn release_k_line_now() -> bool {
             Err(std::sync::TryLockError::WouldBlock) => None,
         };
         if let Some(mut p) = guard {
-            let _ = p.set_break(false);
-            let _ = p.set_dtr(true);
+            release(&mut *p);
             return true;
         }
+        if !released {
+            if let Some(h) = &handle {
+                released = lock_ignore_poison(h).release().is_ok();
+            }
+        }
         if std::time::Instant::now() >= deadline {
-            return false;
+            return released;
         }
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -870,6 +941,14 @@ impl SerialIo for SerialportIo {
             .map_err(io::Error::from)
     }
 
+    /// A duplicate of the port's file descriptor (Windows: handle), `serialport` `try_clone`.
+    fn emergency_handle(&self) -> Option<Box<dyn EmergencyRelease>> {
+        self.port
+            .try_clone()
+            .ok()
+            .map(|p| Box::new(ClonedPort(p)) as Box<dyn EmergencyRelease>)
+    }
+
     /// On macOS `serialport` 4.10 returns the value it was *asked* for, cached (serialport
     /// `TTYPort::baud_rate`), so the termios output speed is read back with `tcgetattr` instead:
     /// after `IOSSIOSPEED` it holds 10400 (measured, FT232R, macOS 27). That is the tty layer's
@@ -885,6 +964,20 @@ impl SerialIo for SerialportIo {
         {
             self.port.baud_rate().ok()
         }
+    }
+}
+
+/// [`EmergencyRelease`] through a cloned `serialport` handle.
+struct ClonedPort(Box<dyn serialport::SerialPort>);
+
+impl EmergencyRelease for ClonedPort {
+    fn release(&mut self) -> io::Result<()> {
+        let b = self.0.clear_break().map_err(io::Error::from);
+        let d = self
+            .0
+            .write_data_terminal_ready(true)
+            .map_err(io::Error::from);
+        b.and(d)
     }
 }
 
@@ -1669,48 +1762,144 @@ mod tests {
         assert!(m.0.borrow().calls.is_empty());
     }
 
+    /// The emergency port is one process-wide slot: its tests run one at a time.
+    static EMERGENCY_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A `Send` port that logs its calls; optionally with an emergency handle, and a read that
+    /// blocks (holding the port lock) for `read_ms`, signalling `entered` first.
+    #[derive(Clone, Default)]
+    struct SendMock {
+        log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        handle: bool,
+        read_ms: u64,
+        entered: Option<std::sync::mpsc::SyncSender<()>>,
+    }
+    struct MockHandle(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+    impl EmergencyRelease for MockHandle {
+        fn release(&mut self) -> io::Result<()> {
+            let mut l = self.0.lock().unwrap();
+            l.push("handle break false".into());
+            l.push("handle dtr true".into());
+            Ok(())
+        }
+    }
+    impl SendMock {
+        fn log(&self) -> Vec<String> {
+            self.log.lock().unwrap().clone()
+        }
+    }
+    impl SerialIo for SendMock {
+        fn set_break(&mut self, on: bool) -> io::Result<()> {
+            self.log.lock().unwrap().push(format!("break {on}"));
+            Ok(())
+        }
+        fn set_dtr(&mut self, on: bool) -> io::Result<()> {
+            self.log.lock().unwrap().push(format!("dtr {on}"));
+            Ok(())
+        }
+        fn set_rts(&mut self, _on: bool) -> io::Result<()> {
+            Ok(())
+        }
+        fn bytes_to_read(&mut self) -> io::Result<usize> {
+            Ok(0)
+        }
+        fn read_some(&mut self, _b: &mut [u8], _t: Duration) -> io::Result<usize> {
+            if let Some(e) = &self.entered {
+                let _ = e.send(());
+            }
+            std::thread::sleep(Duration::from_millis(self.read_ms));
+            Ok(0)
+        }
+        fn write_all(&mut self, b: &[u8]) -> io::Result<()> {
+            self.log.lock().unwrap().push(format!("write {b:02X?}"));
+            Ok(())
+        }
+        fn clear_input(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+        fn emergency_handle(&self) -> Option<Box<dyn EmergencyRelease>> {
+            self.handle
+                .then(|| Box::new(MockHandle(self.log.clone())) as Box<dyn EmergencyRelease>)
+        }
+    }
+
     #[test]
     fn emergency_release_clears_break_on_the_registered_port() {
         // Final critique F05 (second Ctrl-C): the signal thread releases K on the open port
         // before the process exits, without the main thread.
-        use std::sync::{Arc, Mutex};
-        #[derive(Clone, Default)]
-        struct SendMock(Arc<Mutex<Vec<String>>>);
-        impl SerialIo for SendMock {
-            fn set_break(&mut self, on: bool) -> io::Result<()> {
-                self.0.lock().unwrap().push(format!("break {on}"));
-                Ok(())
-            }
-            fn set_dtr(&mut self, on: bool) -> io::Result<()> {
-                self.0.lock().unwrap().push(format!("dtr {on}"));
-                Ok(())
-            }
-            fn set_rts(&mut self, _on: bool) -> io::Result<()> {
-                Ok(())
-            }
-            fn bytes_to_read(&mut self) -> io::Result<usize> {
-                Ok(0)
-            }
-            fn read_some(&mut self, _b: &mut [u8], _t: Duration) -> io::Result<usize> {
-                Ok(0)
-            }
-            fn write_all(&mut self, _b: &[u8]) -> io::Result<()> {
-                Ok(())
-            }
-            fn clear_input(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
+        let _serial = lock_ignore_poison(&EMERGENCY_TESTS);
         let m = SendMock::default();
         let mut p = Released::register(m.clone());
         p.set_break(true).unwrap();
         assert!(release_k_line_now());
-        assert_eq!(
-            *m.0.lock().unwrap(),
-            vec!["break true", "break false", "dtr true"]
-        );
+        assert_eq!(m.log(), vec!["break true", "break false", "dtr true"]);
         drop(p);
         assert!(!release_k_line_now(), "unregistered on drop");
+    }
+
+    #[test]
+    fn after_the_emergency_release_the_main_thread_cannot_touch_the_port() {
+        // Re-check R02: the release returned, the main thread's next step (the next 0 bit of
+        // the address byte) must not assert break again before the process exits.
+        let _serial = lock_ignore_poison(&EMERGENCY_TESTS);
+        let m = SendMock::default();
+        let mut p = Released::register(m.clone());
+        p.set_break(true).unwrap();
+        assert!(release_k_line_now());
+        assert!(
+            p.set_break(true).is_err(),
+            "break refused after the release"
+        );
+        assert!(
+            p.write_all(&[0x82]).is_err(),
+            "write refused after the release"
+        );
+        assert!(p.set_dtr(false).is_err());
+        assert_eq!(m.log(), vec!["break true", "break false", "dtr true"]);
+        drop(p);
+    }
+
+    #[test]
+    fn emergency_release_uses_its_own_handle_when_the_port_is_busy() {
+        // Re-check R02: the main thread holds the port lock inside a long read (up to 5 s
+        // after 7F xx 78). The release goes through the port's own emergency handle at once,
+        // then again under the lock if it frees up in time; afterwards nothing passes.
+        let _serial = lock_ignore_poison(&EMERGENCY_TESTS);
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let m = SendMock {
+            handle: true,
+            read_ms: 1000,
+            entered: Some(tx),
+            ..SendMock::default()
+        };
+        let mut p = Released::register(m.clone());
+        p.set_break(true).unwrap();
+        let reader = std::thread::spawn(move || {
+            let mut b = [0u8; 1];
+            let _ = p.read_some(&mut b, Duration::from_millis(1000));
+            p
+        });
+        rx.recv().unwrap();
+        let t0 = std::time::Instant::now();
+        assert!(release_k_line_now(), "released through the handle");
+        assert!(
+            t0.elapsed() < Duration::from_millis(900),
+            "did not wait for the read"
+        );
+        assert_eq!(
+            m.log(),
+            vec!["break true", "handle break false", "handle dtr true"]
+        );
+        let mut p = reader.join().unwrap();
+        assert!(
+            p.set_break(true).is_err(),
+            "break refused after the release"
+        );
+        assert_eq!(
+            m.log(),
+            vec!["break true", "handle break false", "handle dtr true"]
+        );
+        drop(p);
     }
 
     #[cfg(unix)]
