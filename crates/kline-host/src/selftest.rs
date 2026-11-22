@@ -163,7 +163,7 @@ pub fn measure_echo_rtt(t: &mut dyn Transport, count: u32) -> io::Result<EchoRtt
 }
 
 /// Why the TiniL check failed, for the selftest report; `None` when it passed. When the break
-/// call itself is slow, the USB round trip of the break request (SetCommBreak/ClearCommBreak,
+/// call itself is slow (at least half the worst deviation), the USB round trip of the break request (SetCommBreak/ClearCommBreak,
 /// TIOCSBRK) is the cause, not our sleep: under Parallels USB passthrough on Windows 11 ARM it
 /// is ~0.3 ms typically with 1.5..3 ms spikes, unchanged by thread priority (measured,
 /// docs/platforms.md).
@@ -171,7 +171,9 @@ pub fn fast_init_cause(j: &BreakJitter) -> Option<String> {
     if j.fast_init_ok {
         return None;
     }
-    Some(if j.max_call_us * 2 >= FAST_INIT_TOLERANCE_US {
+    // The break call is the cause when it alone accounts for at least half the worst edge
+    // deviation (ours).
+    Some(if j.max_call_us * 2 >= j.max_dev_us {
         format!(
             "the break request itself took up to {:.2} ms: USB round-trip latency of the break call, not the host's sleep. Seen under VM USB passthrough (Parallels, Windows 11 ARM; thread priority does not help, docs/platforms.md); fast init may then miss TiniL, try bare metal or another USB port",
             j.max_call_us as f64 / 1000.0
@@ -396,6 +398,9 @@ mod tests {
             "{usb}"
         );
         let sleep = fast_init_cause(&j(1_510, 200)).unwrap();
+        assert!(sleep.contains("sleeps woke late"), "{sleep}");
+        // A 0.6 ms call does not explain a 2 ms deviation.
+        let sleep = fast_init_cause(&j(2_000, 600)).unwrap();
         assert!(sleep.contains("sleeps woke late"), "{sleep}");
     }
 
