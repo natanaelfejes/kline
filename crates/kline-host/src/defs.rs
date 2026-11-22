@@ -519,6 +519,53 @@ pub fn decoded_json(decoded: &[(String, Result<Vec<DecodedItem>, SpecError>)]) -
     )
 }
 
+/// One-line meanings of known flags, keyed by item name: `(item, raw value or None for any,
+/// text)`. Sources: the owner's record `step7-oos-safe-extract.md` section A (BMT `21 A3`
+/// remote and `21 A4` transponder status, confirmed from the DDT2000 XML) and
+/// `trf-investigation.md` (TRF = remote type; 1 = RF, polarity inferred with high
+/// confidence). Shown in human output only; JSON is unchanged. Add rows here, not in code.
+pub const FLAG_MEANINGS: &[(&str, Option<u64>, &str)] = &[
+    ("TRF", Some(1), "RF remote"),
+    (
+        "TRF",
+        Some(0),
+        "infrared remote: the BMT ignores an RF remote",
+    ),
+    ("TIR RF RECU", None, "1 = a remote frame was received"),
+    (
+        "TIR RF VAL",
+        None,
+        "1 = the remote frame is valid (well-formed)",
+    ),
+    ("TIR RF OK", None, "1 = remote accepted (learned remote)"),
+    (
+        "TRP RECU",
+        None,
+        "1 = transponder frame received by the antenna ring",
+    ),
+    ("TRP VAL", None, "1 = transponder frame valid (well-formed)"),
+    (
+        "TRPOK",
+        None,
+        "1 = transponder authenticated, code accepted",
+    ),
+    ("INTCLE", None, "1 = key inserted in the ignition switch"),
+    (
+        "VERLOGI",
+        None,
+        "state of the coded (VERLOG) line to the engine ECU",
+    ),
+];
+
+/// The [`FLAG_MEANINGS`] text for a decoded item, if any.
+pub fn flag_meaning(i: &DecodedItem) -> Option<&'static str> {
+    let name = i.name.trim();
+    FLAG_MEANINGS
+        .iter()
+        .find(|(n, v, _)| *n == name && v.is_none_or(|v| i.raw_int() == Some(v)))
+        .map(|(_, _, t)| *t)
+}
+
 pub fn decoded_human(decoded: &[(String, Result<Vec<DecodedItem>, SpecError>)]) -> String {
     let mut s = String::new();
     for (name, r) in decoded {
@@ -528,11 +575,15 @@ pub fn decoded_human(decoded: &[(String, Result<Vec<DecodedItem>, SpecError>)]) 
                 let w = items.iter().map(|i| i.name.len()).max().unwrap_or(0);
                 for i in items {
                     s.push_str(&format!(
-                        "    {:<w$}  {} {}\n",
+                        "    {:<w$}  {} {}",
                         i.name,
                         i.display.as_deref().unwrap_or("-"),
                         i.unit.as_deref().unwrap_or("")
                     ));
+                    if let Some(m) = flag_meaning(i) {
+                        s.push_str(&format!("  ({m})"));
+                    }
+                    s.push('\n');
                 }
             }
             Err(e) => s.push_str(&format!("  [{name}] does not decode: {e}\n")),
@@ -860,5 +911,50 @@ mod difference_tests {
         );
         // Same layout, texts equal after trimming: nothing to report.
         assert!(candidate_differences(&[&def("X ", false), &def("X", false)]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod meaning_tests {
+    use super::*;
+
+    fn item(name: &str, raw: u64) -> DecodedItem {
+        DecodedItem {
+            name: name.into(),
+            raw: Some(Raw::Int(raw)),
+            value: Some(Value::Number(raw as f64)),
+            display: Some(raw.to_string()),
+            unit: None,
+        }
+    }
+
+    #[test]
+    fn known_flags_get_a_one_line_meaning() {
+        let d = vec![(
+            "R".to_string(),
+            Ok(vec![
+                item("TRF", 1),
+                item("TIR RF RECU", 0),
+                item("TRPOK", 1),
+                item("OTHER", 1),
+            ]),
+        )];
+        let h = decoded_human(&d);
+        assert!(h.contains("TRF          1   (RF remote)"), "{h}");
+        assert!(h.contains("(1 = a remote frame was received)"), "{h}");
+        assert!(
+            h.contains("(1 = transponder authenticated, code accepted)"),
+            "{h}"
+        );
+        assert!(
+            h.lines().any(|l| l.trim_end().ends_with("OTHER        1")),
+            "{h}"
+        );
+        let d = vec![("R".to_string(), Ok(vec![item("TRF", 0)]))];
+        assert!(
+            decoded_human(&d).contains("(infrared remote: the BMT ignores an RF remote)"),
+            "{}",
+            decoded_human(&d)
+        );
     }
 }

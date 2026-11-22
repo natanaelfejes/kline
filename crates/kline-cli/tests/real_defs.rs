@@ -116,3 +116,64 @@ fn the_two_real_bmt_definitions_differ_where_the_docs_say() {
     // TRF sits at the same place in both.
     assert!(!h.iter().any(|l| l.contains("TRF")), "{h:#?}");
 }
+
+/// The real ph1_p BMT definition in the simulator, answering like `scenario`.
+fn real_bmt(
+    defs: &std::path::Path,
+    file: &str,
+    sc: kline_sim::scenario::Scenario,
+) -> kline_sim::ecu::SpecEcu {
+    let def = kline_spec::EcuDef::from_xml_bytes(&std::fs::read(defs.join(file)).unwrap()).unwrap();
+    kline_sim::ecu::SpecEcu::new(kline_sim::ecu::EcuProfile::bmt(), def, sc).unwrap()
+}
+
+#[test]
+fn real_bmt_reads_show_flag_meanings_and_the_open_definition_choice() {
+    let Some(d) = defs_dir() else { return };
+    let dir = std::path::PathBuf::from(&d);
+    if !dir.join("BMT_SAGEM.xml").exists() {
+        eprintln!("SKIPPED: no BMT_SAGEM.xml");
+        return;
+    }
+    let sc = kline_sim::scenario::Scenario::new()
+        .number("TRF", 1.0)
+        .number("CARCLIENT", 1.0)
+        .number("TIR RF RECU", 1.0);
+    let (r, j) = run(
+        real_bmt(&dir, "BMT_X65_ph1_p.xml", sc.clone()),
+        &["--defs", &d, "read", "--ecu", "bmt", "21A1"],
+    );
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    for needle in [
+        "definition choice unresolved: BMT_X65_ph1_p, BMT_SAGEM; values below decoded with BMT_X65_ph1_p",
+        "(RF remote)",
+        "decoded differently by the candidates:",
+        "BMT_SAGEM: CONDROUL 1",
+    ] {
+        assert!(r.stdout.contains(needle), "missing {needle:?} in\n{}", r.stdout);
+    }
+    j.assert_no_writes();
+    let (r, _) = run(
+        real_bmt(&dir, "BMT_X65_ph1_p.xml", sc.clone()),
+        &["--defs", &d, "read", "--ecu", "bmt", "21A3"],
+    );
+    assert!(
+        r.stdout.contains("(1 = a remote frame was received)"),
+        "{}",
+        r.stdout
+    );
+    let (r, _) = run(
+        real_bmt(&dir, "BMT_X65_ph1_p.xml", sc),
+        &["--defs", &d, "ident", "--ecu", "bmt"],
+    );
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout
+            .contains("21 A1 byte 3 mask 0x80: CARCLIENT (BMT_X65_ph1_p) vs CONDROUL (BMT_SAGEM)"),
+        "{}",
+        r.stdout
+    );
+    if std::env::var_os("KLINE_SHOW").is_some() {
+        eprintln!("{}", r.stdout);
+    }
+}
