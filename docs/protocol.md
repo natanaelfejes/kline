@@ -144,7 +144,7 @@ XML values are assumed to be ms.
 | 5-baud read window | `kw2_timeout_ms` + 100 | RE: IOTBD32V3 |
 | Fast init | 1 ms, then 25 low, 25 high | RE: IOTBD32V3 |
 | Multipoint 5-baud address XOR | 0x80 | RE: KWP2000Diag4 KWP2000Ecu |
-| Idle before any init | 300 | ours (ISO 9141/14230 W5/Tidle; DDT2000 relies on its 300 ms worker exit tail) |
+| Idle before any init | 300 | ours (ISO 9141/14230 W5/Tidle; DDT2000 relies on its 300 ms worker exit tail, and its scan waits 350 ms after `StopDiag` before the next ECU: ddt2000-parity.md C3) |
 | Read timeout after a 0x78 reply | 5000 | ours (KWP2000 P2* extended timing) |
 | Maximum consecutive 0x78 replies | 10 | ours |
 
@@ -306,7 +306,8 @@ Payloads returned to callers start at the response SID.
 6. Decode and classify: `7F SID NRC` is a negative reply; **`7F SID 78` (responsePending)
    restarts step 5 without a new request**, with a 5000 ms first-byte timeout, at most 10
    times (ours: DDT2000 treats 0x78 as a plain error: RE: KWP2000Diag4 NRC jump table 0x2305f8a4
-   sends it to the default error 0x7F8, and nothing reads on).
+   sends it to the default error 0x7F8, and nothing reads on; on its D-PDU/VCI path the driver
+   handles P2*, independent RE 2 only, not the KKL path).
 
 ## Session: TesterPresent and Stop
 

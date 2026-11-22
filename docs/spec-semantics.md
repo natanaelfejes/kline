@@ -42,7 +42,8 @@ describes the ddt4all mode.** Where DDT2000 mode differs, it does so in these pl
 | numeric span over 4 bytes | decoded | refused when the file is loaded |
 | unsigned `Bits` of 32 or more | number | byte array (hex), never scaled |
 | 1-bit item with `<Scaled>` | scaled | never scaled |
-| display | `Format` with `.` only, else decimal | Visual Basic `Format()` (`00`, `#0`, `00.00000`); `bin` shows a binary string |
+| display | `Format` with `.` only, else decimal | Visual Basic `Format()` (`00`, `#0`, `00.00000`; rounding mode UNRESOLVED, ddt2000-parity.md D8a); `bin` shows a binary string, MSB left (D8b) |
+| item beyond a short reply | absent | absent (`None`, CLI `-`, JSON `null`); DDT2000 shows `""` (ddt2000-parity.md D10b) |
 | value missing from a List | lowercase hex | `##` + hex + `##` |
 | byte arrays | lowercase hex | uppercase hex |
 | ascii | UTF-8, invalid bytes dropped | windows-1252, nothing dropped |
