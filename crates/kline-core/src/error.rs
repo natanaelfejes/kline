@@ -61,7 +61,8 @@ pub enum LinkError {
     /// The host woke up from a wake-up sleep (5-baud start/data bit, fast-init TiniL/TWuP) so
     /// late that the pattern was already outside its tolerance; the transport aborted the
     /// attempt (ours, no DDT2000 status). In a 5-baud address it held K low through the
-    /// stop-bit slot first, so no receiver decodes a valid, different address byte.
+    /// stop-bit slot first, which covers a late wake-up; a host stall longer than the remaining
+    /// slot can still leave a different valid address byte (rare, badly loaded host only).
     #[error(
         "init timing missed: a {requested_ms} ms wake-up sleep woke {late_us} us late \
          (max {max_late_us} us); attempt aborted, K line released"

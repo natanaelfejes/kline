@@ -177,9 +177,13 @@ delays the keyword read after a complete address. When a guarded sleep wakes up 
 
 - in a 5-baud address the transport holds K low through the remaining bit slots and the
   stop-bit slot (until start + 10 bit times), so a receiver sampling at the bit centres sees a
-  low stop bit, a framing error, and never a valid byte. Releasing K at once would have sent a
-  different, valid address (0x7A cut after bit 2 reads as 0xFA, the Multipoint wake of the
-  Sirius). Then K is released and DTR raised;
+  low stop bit and a framing error. This covers a late wake-up that ends before the stop-bit
+  centre. A host stall longer than the remaining bit and stop-bit slot (process descheduled,
+  VM pause) can still leave a different valid address byte on the line, because the line kept
+  its stale level while the process did not run (e.g. 0x7A read as 0xFA after a stall of about
+  350 ms in bit 6). This is rare and only happens on a badly loaded host. Releasing K at once
+  would have sent a different, valid address even for a short late wake-up (0x7A cut after bit
+  2 reads as 0xFA, the Multipoint wake of the Sirius). Then K is released and DTR raised;
 - in a fast init K is released at once and DTR raised; StartCommunication is not sent.
 
 The attempt fails with `init timing missed: a N ms wake-up sleep woke X us late (max Y us);
