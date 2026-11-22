@@ -6,6 +6,7 @@
 use std::io;
 
 use clio_core::init::{FastInit, FiveBaudInit, InitOutcome};
+#[cfg(feature = "approved-routines")]
 use clio_core::safety::Approval;
 use clio_core::session::{Session, SessionError, SessionOutcome};
 use clio_core::{Action, InitKind, LinkConfig, LinkError, Step};
@@ -82,7 +83,9 @@ impl<L: Line> Driver<L> {
         let ev = self.line.perform(a)?;
         if let Some(c) = &mut self.capture {
             match (a, &ev) {
-                (Action::Write { bytes, .. }, _) => c.push(LogEntry::new(t, Dir::Tx, bytes)),
+                (Action::Write { frame, .. }, _) => {
+                    c.push(LogEntry::new(t, Dir::Tx, frame.bytes()))
+                }
                 (
                     Action::Read { .. },
                     clio_core::Event::ReadOk(b) | clio_core::Event::ReadTimeout(b),
@@ -111,9 +114,10 @@ impl<L: Line> Driver<L> {
         }
     }
 
-    /// Session after `init`, starting now.
-    pub fn session(&self, cfg: &LinkConfig, init: &InitOutcome) -> Session {
-        Session::new(cfg, init, self.line.now_ms())
+    /// Session on the link `init` opened, starting now. Consumes the outcome: one init, one
+    /// session.
+    pub fn session(&self, init: InitOutcome) -> Session {
+        Session::new(init, self.line.now_ms())
     }
 
     pub fn request(
@@ -127,13 +131,16 @@ impl<L: Line> Driver<L> {
         self.run(s, first)
     }
 
+    /// Send the payload `approval` stands for (feature `approved-routines`).
+    #[cfg(feature = "approved-routines")]
     pub fn request_approved(
         &mut self,
         s: &mut Session,
         approval: Approval,
     ) -> Result<SessionOutcome, DriveError> {
+        let payload = approval.payload().to_vec();
         let first = s
-            .request_approved(approval, self.line.now_ms())
+            .request_approved(&payload, approval, self.line.now_ms())
             .map_err(DriveError::Session)?;
         self.run(s, first)
     }

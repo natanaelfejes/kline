@@ -17,7 +17,7 @@ fn session_with(ecu: SpecEcu) -> (Driver<VirtualLine>, Session, Journal) {
     let (mut d, j) = drive(ecu);
     let cfg = cfg(&sirius());
     let init = d.init(&cfg).unwrap();
-    let s = d.session(&cfg, &init);
+    let s = d.session(init);
     (d, s, j)
 }
 
@@ -41,7 +41,7 @@ fn wrong_keywords_reported_or_rejected() {
     let (mut d, _) = drive(sirius_ecu().with_init_fault(fault));
     let init = d.init(&cfg(&sirius())).unwrap();
     assert_eq!(init.keywords(), (0xE9, 0x8F));
-    assert_eq!(init.keywords_match, Some(false));
+    assert_eq!(init.keywords_match(), Some(false));
 
     let (mut d, _) = drive(sirius_ecu().with_init_fault(fault));
     let mut c: LinkConfig = cfg(&sirius());
@@ -71,11 +71,13 @@ fn checksum_error() {
     let ecu = sirius_ecu().with_fault(FaultRule::on(&A9, ReplyFault::BadChecksum).once());
     let (mut d, mut s, _) = session_with(ecu);
     let e = d.request(&mut s, &A9).unwrap_err();
-    // Reply decode errors surface as SessionError::Frame (see report: API request).
+    // Reply decode errors are link errors; SessionError::Frame is for unframeable requests.
     assert!(
         matches!(
             e.session(),
-            Some(SessionError::Frame(FrameError::Checksum { .. }))
+            Some(SessionError::Link(LinkError::Frame(
+                FrameError::Checksum { .. }
+            )))
         ),
         "{e:?}"
     );

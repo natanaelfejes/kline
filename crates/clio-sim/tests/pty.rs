@@ -119,8 +119,8 @@ fn pty_smoke_session() {
     let cfg = cfg(&sirius());
     let init = d.init(&cfg).unwrap();
     assert_eq!(init.keywords(), (0xD0, 0x8F));
-    assert_eq!(init.address_complement, Some(0x85));
-    let mut s = d.session(&cfg, &init);
+    assert_eq!(init.address_complement(), Some(0x85));
+    let mut s = d.session(init);
     let r = positive(&d.request(&mut s, &[0x21, 0xA9]).unwrap());
     assert_eq!(
         decode(&sirius(), "Live A9", &r),

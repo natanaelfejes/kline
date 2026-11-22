@@ -17,7 +17,7 @@ const SCRIPT: [&[u8]; 4] = [&[0x10, 0xA0], &[0x21, 0x80], &[0x21, 0xA9], &[0x21,
 /// Init, the script, TesterPresent, Stop; all outcomes.
 fn session<L: Line>(d: &mut Driver<L>, cfg: &LinkConfig) -> Vec<SessionOutcome> {
     let init = d.init(cfg).unwrap();
-    let mut s = d.session(cfg, &init);
+    let mut s = d.session(init);
     let mut out: Vec<SessionOutcome> = SCRIPT
         .iter()
         .map(|p| d.request(&mut s, p).unwrap())
@@ -76,7 +76,7 @@ fn replay_mismatch_goes_silent() {
     let mut d = Driver::new(l);
     let cfg = cfg(&sirius());
     let init = d.init(&cfg).unwrap();
-    let mut s = d.session(&cfg, &init);
+    let mut s = d.session(init);
     // The log expects 10 A0 first.
     let e = d.request(&mut s, &[0x21, 0xAA]).unwrap_err();
     assert!(
@@ -100,8 +100,8 @@ fn hand_written_log_with_echo_in_rx() {
     let mut d = Driver::new(l);
     let cfg = cfg(&bmt());
     let init = d.init(&cfg).unwrap();
-    assert_eq!(init.address_complement, Some(0xD9));
-    let mut s = d.session(&cfg, &init);
+    assert_eq!(init.address_complement(), Some(0xD9));
+    let mut s = d.session(init);
     let r = positive(&d.request(&mut s, &[0x21, 0xA3]).unwrap());
     assert_eq!(r, [0x61, 0xA3, 0x05, 0x02]);
     assert!(j.violations().is_empty(), "{:?}", j.violations());

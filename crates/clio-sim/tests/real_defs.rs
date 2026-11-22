@@ -18,11 +18,15 @@ fn check_file(name: &str) {
     let cfg = cfg(&def);
     let init = d.init(&cfg).unwrap();
     assert_eq!(Some(init.keywords()), cfg.expected_keywords);
-    let mut s = d.session(&cfg, &init);
-    let target = Target {
-        protocol: Protocol::Kwp,
-        ecu_address: cfg.ecu_address,
-    };
+    let mut s = d.session(init);
+    let target = s.target();
+    assert_eq!(
+        target,
+        Target {
+            protocol: Protocol::Kwp,
+            ecu_address: cfg.ecu_address,
+        }
+    );
     let mut sent = 0;
     for req in &def.requests {
         let p = &req.sent_bytes.0;

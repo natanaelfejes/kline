@@ -27,7 +27,7 @@ pub enum WriteKind {
     Routine,
     /// 0x34..0x37: download / upload / programming.
     Programming,
-    /// BMT `21 A4` transponder read (rule 3).
+    /// BMT `21 A4` with extra bytes, or another immobilizer request (rule 3).
     Immobilizer,
     /// Any other service, or a malformed variant of a read service.
     Unknown,

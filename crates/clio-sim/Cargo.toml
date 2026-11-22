@@ -5,6 +5,11 @@ edition.workspace = true
 publish.workspace = true
 description = "ECU simulator for end-to-end tests: K-line bus with echo and wake-up detection, spec-driven ECUs, replay, in-process and pty transports."
 
+[features]
+# Forwards clio-core's `approved-routines` (SAFETY.md rule 2): `Driver::request_approved` and the
+# approval tests. Off by default; only clio-cli turns it on.
+approved-routines = ["clio-core/approved-routines"]
+
 [dependencies]
 clio-core = { path = "../clio-core" }
 clio-spec = { path = "../clio-spec" }

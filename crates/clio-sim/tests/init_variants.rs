@@ -21,7 +21,7 @@ fn try_variant(accept: AddressAccept, v: InitVariant) -> Result<Option<u8>, Link
     let mut c = cfg(&sirius());
     c.variant = v;
     d.init(&c)
-        .map(|o| o.address_complement)
+        .map(|o| o.address_complement())
         .map_err(|e| e.init().cloned().unwrap())
 }
 
@@ -48,7 +48,7 @@ fn fallback(d: &mut Driver<VirtualLine>) -> Option<(InitVariant, Vec<u8>)> {
         let mut c = cfg(&sirius());
         c.variant = v;
         if let Ok(init) = d.init(&c) {
-            let mut s = d.session(&c, &init);
+            let mut s = d.session(init);
             let r = positive(&d.request(&mut s, &[0x21, 0xA9]).unwrap());
             return Some((v, r));
         }
@@ -99,7 +99,7 @@ fn fast_init_variant() {
     c.variant = InitVariant::FastInit;
     let init = d.init(&c).unwrap();
     assert_eq!(init.keywords(), (0xD0, 0x8F));
-    let mut s = d.session(&c, &init);
+    let mut s = d.session(init);
     positive(&d.request(&mut s, &[0x21, 0xAA]).unwrap());
     j.assert_no_violations();
 

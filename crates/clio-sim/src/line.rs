@@ -45,10 +45,10 @@ pub trait Line {
                 Event::Done
             }
             Action::Write {
-                bytes,
+                frame,
                 inter_byte_ms,
             } => {
-                self.write(bytes, *inter_byte_ms)?;
+                self.write(frame.bytes(), *inter_byte_ms)?;
                 Event::Done
             }
             Action::Read { count, timeout_ms } => {

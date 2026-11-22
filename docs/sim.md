@@ -51,7 +51,8 @@ tested end to end without the car. Nothing in it is measured on the car.
   `lenient`; `EcuTiming` sets the ECU's own W1..W4, P1, P2.
 - **ECU write log.** Every request that is not a read (by the simulator's own list, written
   from SAFETY.md rule 2 and 3) is recorded and printed to stderr as `clio-sim: ECU WRITE LOG:`,
-  whether or not the definition knows it; this includes BMT `21 A4` (transponder) and the
+  whether or not the definition knows it; this includes BMT `21 A4 ..` with extra bytes (the exact
+  2-byte transponder *status* read is Tier 0 and not logged) and the
   approved BMT routines. `Journal::assert_no_writes()` panics with the whole log.
 
 ## pty transport: how break and DTR are represented

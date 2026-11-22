@@ -3,7 +3,7 @@
 mod common;
 
 use clio_core::frame::Reply;
-use clio_core::safety::{Approval, ApprovedRoutine, DenyReason};
+use clio_core::safety::DenyReason;
 use clio_core::session::{SessionError, SessionOutcome};
 use clio_sim::ecu::{EcuProfile, SpecEcu};
 use clio_sim::journal::WriteKind;
@@ -20,12 +20,12 @@ fn sirius_full_session_round_trips_scenario() {
     let cfg = cfg(&def);
 
     let init = d.init(&cfg).unwrap();
-    assert_eq!(init.sync, Some(0x55));
+    assert_eq!(init.sync(), Some(0x55));
     assert_eq!(init.keywords(), (0xD0, 0x8F));
-    assert_eq!(init.keywords_match, Some(true));
-    assert_eq!(init.address_byte, Some(0x7A));
-    assert_eq!(init.address_complement, Some(0x85));
-    let mut s = d.session(&cfg, &init);
+    assert_eq!(init.keywords_match(), Some(true));
+    assert_eq!(init.address_byte(), Some(0x7A));
+    assert_eq!(init.address_complement(), Some(0x85));
+    let mut s = d.session(init);
 
     assert_eq!(
         positive(&d.request(&mut s, &[0x10, 0xA0]).unwrap()),
@@ -63,23 +63,29 @@ fn sirius_full_session_round_trips_scenario() {
 
 #[test]
 fn ecu_sleeps_after_stop() {
+    use clio_sim::frame::checksum;
     let def = sirius();
     let (mut d, journal) = drive(sirius_ecu());
     let cfg = cfg(&def);
     let init = d.init(&cfg).unwrap();
-    let mut s = d.session(&cfg, &init);
+    let mut s = d.session(init);
     d.stop(&mut s).unwrap();
-    // A new session object without a new init: the ECU must not answer.
-    d.line.sleep_ms(100); // well past P3min, so silence is not a timing rejection
-    let mut s2 = d.session(&cfg, &init);
-    let e = d.request(&mut s2, &[0x21, 0xA9]).unwrap_err();
+    // The closed session refuses further requests (one init, one session) ...
     assert!(
         matches!(
-            e.session(),
-            Some(SessionError::Link(clio_core::LinkError::NoReply))
+            d.request(&mut s, &[0x21, 0xA9]).unwrap_err().session(),
+            Some(SessionError::Closed)
         ),
-        "{e:?}"
+        "a stopped session must refuse requests"
     );
+    // ... and the ECU itself is asleep: a well-formed 21 A9 frame written directly on the line
+    // gets only the cable echo back, no reply.
+    d.line.sleep_ms(100); // well past P3min, so silence is not a timing rejection
+    let mut f = vec![0x82, 0x7A, 0xF1, 0x21, 0xA9];
+    f.push(checksum(&f));
+    d.line.flush_rx().unwrap();
+    d.line.write(&f, 0).unwrap();
+    assert_eq!(d.line.read(64, 1_000).unwrap(), f, "only the echo");
     journal.assert_no_writes();
     journal.assert_no_violations();
 }
@@ -91,7 +97,7 @@ fn tester_present_keeps_session_and_silence_ends_it() {
     // Alive: TesterPresent every 3 s for 12 s.
     let (mut d, _j) = drive(sirius_ecu());
     let init = d.init(&cfg).unwrap();
-    let mut s = d.session(&cfg, &init);
+    let mut s = d.session(init);
     for _ in 0..4 {
         d.line.sleep_ms(3_000);
         assert!(s.tester_present_due(d.line.now_ms()));
@@ -124,8 +130,8 @@ fn bmt_21a3_read_and_shared_2180() {
     let (mut d, journal) = drive(ecu);
     let cfg = cfg(&def);
     let init = d.init(&cfg).unwrap();
-    assert_eq!(init.address_complement, Some(0xD9));
-    let mut s = d.session(&cfg, &init);
+    assert_eq!(init.address_complement(), Some(0xD9));
+    let mut s = d.session(init);
     let r = positive(&d.request(&mut s, &[0x21, 0xA3]).unwrap());
     assert_eq!(r[..2], [0x61, 0xA3]);
     assert_eq!(
@@ -145,19 +151,23 @@ fn bmt_21a3_read_and_shared_2180() {
 }
 
 #[test]
-fn bmt_transponder_read_is_denied_before_the_wire() {
+fn bmt_transponder_write_is_denied_before_the_wire() {
     let def = bmt();
     let ecu = SpecEcu::new(EcuProfile::bmt(), def.clone(), Scenario::new()).unwrap();
     let (mut d, journal) = drive(ecu);
     let cfg = cfg(&def);
     let init = d.init(&cfg).unwrap();
-    let mut s = d.session(&cfg, &init);
-    let e = d.request(&mut s, &[0x21, 0xA4]).unwrap_err();
+    let mut s = d.session(init);
+    // Transponder *status* (exactly 21 A4) is a Tier 0 read: answered, not in the write log.
+    let r = positive(&d.request(&mut s, &[0x21, 0xA4]).unwrap());
+    assert_eq!(r[..2], [0x61, 0xA4]);
+    // Anything after 21 A4 is refused as an immobilizer request before the wire.
+    let e = d.request(&mut s, &[0x21, 0xA4, 0x01]).unwrap_err();
     assert!(
         matches!(e.session(), Some(SessionError::Denied(dn)) if dn.reason == DenyReason::Immobilizer),
         "{e:?}"
     );
-    // Writes, too, never reach the ECU through the core.
+    // Non-read tiers, too, never reach the ECU through `request` (no approval).
     for p in [
         &[0x14, 0xFF, 0x00][..],
         &[0x31, 0xC7, 0, 0, 0],
@@ -171,22 +181,32 @@ fn bmt_transponder_read_is_denied_before_the_wire() {
     journal.assert_no_writes();
 }
 
+#[cfg(feature = "approved-routines")]
 #[test]
 fn approved_routine_reaches_ecu_and_is_logged() {
+    use clio_core::safety::{Approval, Tier};
     let def = bmt();
     let ecu = SpecEcu::new(EcuProfile::bmt(), def.clone(), Scenario::new()).unwrap();
     let (mut d, journal) = drive(ecu);
     let cfg = cfg(&def);
     let init = d.init(&cfg).unwrap();
-    let mut s = d.session(&cfg, &init);
-    let routine = ApprovedRoutine::LearnSecondRemote;
-    let a = Approval::from_typed_confirmation(routine, routine.confirmation_phrase()).unwrap();
+    let mut s = d.session(init);
+    let payload = [0x31, 0xC8, 0x00, 0x00, 0x00];
+    // A wrong code approves nothing and nothing reaches the ECU.
+    let c = s.service_challenge(&payload).unwrap();
+    assert_eq!(c.tier(), Tier::Service);
+    assert!(Approval::confirm(c, "WRONG!").is_err());
+    assert!(journal.writes().is_empty());
+    // The right code: exactly this routine goes out once.
+    let c = s.service_challenge(&payload).unwrap();
+    let code = c.code().to_string();
+    let a = Approval::confirm(c, &code).unwrap();
     let r = positive(&d.request_approved(&mut s, a).unwrap());
     assert_eq!(r, [0x71, 0xC8, 0x00, 0x00, 0x00]);
     let w = journal.writes();
     assert_eq!(w.len(), 1, "{w:?}");
     assert_eq!(w[0].kind, WriteKind::Routine);
-    assert_eq!(w[0].payload, [0x31, 0xC8, 0x00, 0x00, 0x00]);
+    assert_eq!(w[0].payload, payload);
     assert_eq!(w[0].request_names, ["Learn remote 2"]);
 }
 
@@ -198,8 +218,8 @@ fn write_log_catches_raw_frames_that_bypass_the_core() {
     let (mut d, journal) = drive(ecu);
     let cfg = cfg(&def);
     d.init(&cfg).unwrap();
-    // A buggy tester writes 21 A4 and 14 FF 00 directly on the line.
-    for p in [&[0x21, 0xA4][..], &[0x14, 0xFF, 0x00]] {
+    // A buggy tester writes 21 A4 01 and 14 FF 00 directly on the line.
+    for p in [&[0x21, 0xA4, 0x01][..], &[0x14, 0xFF, 0x00]] {
         let mut f = vec![0x80 | p.len() as u8, 0x26, 0xF1];
         f.extend_from_slice(p);
         f.push(checksum(&f));
@@ -219,7 +239,7 @@ fn unknown_requests_get_7f_11_and_7f_12() {
     let (mut d, journal) = drive(sirius_ecu());
     let cfg = cfg(&def);
     let init = d.init(&cfg).unwrap();
-    let mut s = d.session(&cfg, &init);
+    let mut s = d.session(init);
     // 1A is allowed by the core but not in the definition: serviceNotSupported.
     assert_eq!(
         d.request(&mut s, &[0x1A, 0x80]).unwrap(),
@@ -250,8 +270,8 @@ fn safir_iso8_session() {
     let cfg = cfg(&def);
     let init = d.init(&cfg).unwrap();
     assert_eq!(init.keywords(), (0xC2, 0x85));
-    assert_eq!(init.address_complement, None);
-    let mut s = d.session(&cfg, &init);
+    assert_eq!(init.address_complement(), None);
+    let mut s = d.session(init);
     let r = positive(&d.request(&mut s, &[0x33, 0x50]).unwrap());
     assert_eq!(
         decode(&def, "Block 50", &r),

@@ -75,6 +75,7 @@ fn items_end(ecu: &EcuDef, req: &Request) -> Result<usize, SimError> {
 /// - requests with received items: bytes 2 .. (first item - 1) echo `sent` (as far as it
 ///   goes), the rest is 0 up to `max(MinBytes, end of the last item)`, then every item with a
 ///   scenario value is inserted with `encode_exact` + `insert`;
+/// - SID `21`: byte 2 is always `sent[1]` (the local-identifier echo), also over an item;
 /// - requests without received items: `sent[1..]` echoed, padded with 0 to MinBytes
 ///   (assumption, NOT VERIFIED: e.g. `10 A0` -> `50 A0`).
 pub fn positive_response(
@@ -113,6 +114,12 @@ pub fn positive_response(
             let raw = d.encode_exact(v).map_err(enc)?;
             d.insert(&raw, &mut frame, item, ecu.endian).map_err(enc)?;
         }
+    }
+    // KWP ReadDataByLocalIdentifier always echoes the identifier at byte 2, even when the
+    // definition maps byte 2 as an item (Sirius 32 `21 81` LocalIvinOK); clio-spec checks it
+    // (docs/spec-semantics.md, response validation step 5).
+    if sid == 0x21 && sent.len() >= 2 && frame.len() >= 2 {
+        frame[1] = sent[1];
     }
     Ok(frame)
 }
