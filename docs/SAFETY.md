@@ -58,7 +58,9 @@ In any tier, including expert. This is the only forbidden class (owner-approved)
   overwrite or erase the key-code EEPROM); `30`/`31`/`32`/`33` C0-C9
   (except exact `31C7000000`/`31C8000000`) or with the immobilizer actuator outputs `A6`
   "Ligne Transpondeur", `AB` "Led Verlog", `AC` "Ligne ECM" (both BMT definitions, step 7);
-  any `2E`/`2F`; any `3B` except `3B D2` and `3B D2` index 2 (AP1CLE); `21A4` with extra
+  any `2E`/`2F`; any `3B` except `3B D2`, and `3B D2` index 2 (AP1CLE) or any index whose low
+  nibble is 2 (`12`, `22`, .. `F2`: an alias of AP1CLE if the firmware masks the index, NOT
+  VERIFIED); `21A4` with extra
   bytes. `3B D2` index 3 (TRF) is the remote type, RF or infrared, not key related: Tier 2 with
   a specific warning (`ChangesRemoteType`).
 - **On non-immobilizer ECUs**: `31 A0 A3` (and `32`/`33`/`38`-`3A` `A0 A3`), writes

@@ -380,8 +380,10 @@ not safety rules:
   maintainer decision); `30`/`31`/`32`/`33` with byte 2 = actuator output `A6` (Ligne
   Transpondeur), `AB` (Led Verlog) or `AC` (Ligne ECM) (both BMT definitions, step 7);
   transfer `34`-`37` and flash erase/checksum `31`/`32`/`33` `81`/`82` (key-code EEPROM,
-  maintainer decision step 7; memory read `23` stays Expert); every `2E`/`2F`; every `3B` except `3B D2`; `3B D2 02 ..` (AP1CLE, key
-  related); `21 A4` with anything after it.
+  maintainer decision step 7; memory read `23` stays Expert); every `2E`/`2F`; every `3B`
+  except `3B D2`; `3B D2 02 ..` (AP1CLE, key related) and `3B D2 x2 ..` (`12`, `22`, .. `F2`:
+  an alias of AP1CLE if the BMT firmware masks the index to its low nibble, security review H1,
+  NOT VERIFIED; other indices above 0x0F stay Expert); `21 A4` with anything after it.
 - Not BMT, any protocol claim (an ISO8 target at 0x7A included, found in a review):
   `31`/`32`/`33`/`38`-`3A` with `A0 A3` (reset of the backed-up memory, may touch the "verrou
   logiciel" area); `2E`/`2F`/`3B` on `A0`, `A2`, `AE`, `BD` (frames carrying immobilizer /

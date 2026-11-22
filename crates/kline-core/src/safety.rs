@@ -7,7 +7,7 @@
 //! | [`Tier::Service`] | clear DTC, output tests, adaptation reset, Sirius `31 A0 A0`, BMT remote learning and actuators | a human, one typed `Approval` per request |
 //! | [`Tier::ConfigWrite`] | `3B` config writes | a human `Approval`, after the backup read and (BMT) the `21 80` identification the definition was chosen from |
 //! | [`Tier::Expert`] | any other request that is not forbidden: undocumented services and identifiers, security access `27`, download/upload/transfer `34`-`37` and flash erase/checksum `31 81`/`31 82` (not on a BMT), other `10 xx` sessions, memory/routine-by-address services on non-immobilizer ECUs (with specific warnings such as [`Warning::MayBrickEcu`]) | a human expert `Approval` that shows the risk |
-//! | forbidden | the immobilizer line only (owner decision 2026-11-22, final): on a BMT/UCH/decoder (address `26`/`A6` or a BMT/UCH/decoder definition, [`DefinitionGuard`]) `3D`, `38`-`3A`, `2C`, `34`-`37`, `31`-`33` `81`/`82` (flash erase/checksum), `30`-`33` with `C0`-`C9` (except exact `31C7000000`/`31C8000000`) or with the immobilizer outputs `A6`/`AB`/`AC` ([`BMT_IMMOBILIZER_OUTPUTS`]), `2E`/`2F`, `3B` other than `3B D2` and `3B D2 02` (AP1CLE), `21 A4` with extra bytes; elsewhere (Sirius) `2E`/`2F`/`3B`/`30` on `A0`/`A2`/`AE`/`BD`, routines on `A2`/`AE`/`BD` and `A0 A3`; definition requests named like immobilizer/transponder/key ([`DenyReason::ImmobilizerNamed`]) | nobody, never |
+//! | forbidden | the immobilizer line only (owner decision 2026-11-22, final): on a BMT/UCH/decoder (address `26`/`A6` or a BMT/UCH/decoder definition, [`DefinitionGuard`]) `3D`, `38`-`3A`, `2C`, `34`-`37`, `31`-`33` `81`/`82` (flash erase/checksum), `30`-`33` with `C0`-`C9` (except exact `31C7000000`/`31C8000000`) or with the immobilizer outputs `A6`/`AB`/`AC` ([`BMT_IMMOBILIZER_OUTPUTS`]), `2E`/`2F`, `3B` other than `3B D2` and `3B D2 x2` (AP1CLE, also with a high nibble), `21 A4` with extra bytes; elsewhere (Sirius) `2E`/`2F`/`3B`/`30` on `A0`/`A2`/`AE`/`BD`, routines on `A2`/`AE`/`BD` and `A0 A3`; definition requests named like immobilizer/transponder/key ([`DenyReason::ImmobilizerNamed`]) | nobody, never |
 //!
 //! Link frames (`81`, `82`, ISO8 `36`/`3F`) are refused as requests ([`DenyReason::ProtocolReserved`]),
 //! not as a safety rule: sent as a request they would desynchronise the session state machine.
@@ -77,7 +77,9 @@ pub const FLASH_ROUTINES: [u8; 2] = [0x81, 0x82];
 /// an undocumented identifier cannot be shown not to touch the immobilizer.
 pub const BMT_CONFIG_WRITE_LID: u8 = 0xD2;
 pub const BMT_CONFIG_READ: [u8; 2] = [0x21, 0xA1];
-/// BMT config index 2 is AP1CLE (key related): refused (rule 3).
+/// BMT config index 2 is AP1CLE (key related): refused (rule 3), and so is every index whose
+/// low nibble is 2 (`12`, `22`, .. `F2`), in case the firmware masks the index byte (security
+/// review H1, NOT VERIFIED on a BMT). Other indices above 0x0F stay Expert.
 pub const BMT_CONFIG_IMMOBILIZER_INDEX: u8 = 0x02;
 /// BMT config index 3 is TRF, the remote-control type: RF (1) or infrared (0); not
 /// immobilizer (Technical Note 77 11 204 878 section 88, TIR panel of the BMT screen). Tier 2
@@ -428,9 +430,13 @@ fn forbidden_bytes(guard: &DefinitionGuard, target: &Target, payload: &[u8]) -> 
             s if BMT_MEMORY_SERVICES.contains(&s) => true,
             s if BMT_TRANSFER_SERVICES.contains(&s) => true,
             0x2E | 0x2F => true,
+            // Index 2 is AP1CLE; `x2` too, in case the firmware masks the index to its low
+            // nibble ("Choix fonction" has 16 values: security review H1).
             0x3B => {
                 p1 != Some(BMT_CONFIG_WRITE_LID)
-                    || payload.get(2) == Some(&BMT_CONFIG_IMMOBILIZER_INDEX)
+                    || payload
+                        .get(2)
+                        .is_some_and(|i| i & 0x0F == BMT_CONFIG_IMMOBILIZER_INDEX)
             }
             0x21 => payload.len() > 2 && payload[..2] == BMT_TRANSPONDER_READ,
             _ => false,

@@ -400,3 +400,41 @@ mod with_session {
         assert!(s.service_challenge(&[0x31, 0xC7, 0, 0, 0]).is_ok());
     }
 }
+
+/// Security review H1: if the BMT firmware masks the `3B D2` index to its low nibble,
+/// `3B D2 x2 ..` would write AP1CLE (index 2). Forbidden on an immobilizer ECU; other
+/// indices above 0x0F stay Expert.
+#[test]
+fn bmt_config_index_nibble_alias_of_ap1cle_is_forbidden() {
+    let immo_def = DefinitionGuard::new(EcuClass::Immobilizer);
+    let at_40 = Target {
+        protocol: Protocol::Kwp,
+        ecu_address: 0x40,
+    };
+    for idx in [0x02u8, 0x12, 0x22, 0x82, 0xF2] {
+        for p in [vec![0x3B, 0xD2, idx, 0x01], vec![0x3B, 0xD2, idx]] {
+            assert!(immo(&BMT, &p), "{p:02X?}: {:?}", tier_of(&BMT, &p));
+            assert!(immo(&BMT_ALT, &p), "{p:02X?}");
+            assert!(
+                matches!(tier_of_in(&immo_def, &at_40, &p), Err(ref d) if d.reason == DenyReason::Immobilizer),
+                "{p:02X?}"
+            );
+        }
+    }
+    for idx in [0x10u8, 0x13, 0x21, 0x83, 0xF3, 0xFF] {
+        assert_eq!(
+            tier_of(&BMT, &[0x3B, 0xD2, idx, 0x01]).unwrap(),
+            Tier::Expert,
+            "{idx:02X}"
+        );
+    }
+    assert_eq!(
+        tier_of(&BMT, &[0x3B, 0xD2, 0x01, 0x01]).unwrap(),
+        Tier::ConfigWrite
+    );
+    // Not an immobilizer ECU: 3B D2 12 is an ordinary config write.
+    assert_eq!(
+        tier_of(&SIRIUS, &[0x3B, 0xD2, 0x12, 0x01]).unwrap(),
+        Tier::ConfigWrite
+    );
+}
