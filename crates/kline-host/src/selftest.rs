@@ -42,6 +42,9 @@ pub struct BreakJitter {
     pub mean_dev_us: u64,
     /// Longest single set_break call.
     pub max_call_us: u64,
+    /// Largest distance of a pulse length (from the end of one set_break call to the end of the
+    /// next) from `half_ms`: the TiniL figure.
+    pub max_pulse_dev_us: u64,
     /// Whether RX saw a break after the last set_break(true) (needs K-line power; a cable
     /// plugged only into the Mac normally shows nothing).
     pub loopback_seen: bool,
@@ -50,41 +53,52 @@ pub struct BreakJitter {
 }
 
 /// Toggle break `toggles` times, `half_ms` on and `half_ms` off, and time every edge.
+///
+/// The sleeps are whole slots (`half_ms`, the on-slot split in two around the loopback check),
+/// so on [`crate::transport::KklLine`] they run on the same deadline-paced chain as an init: the
+/// chain starts at the first break-on call and every edge is due at a multiple of `half_ms`
+/// from there (re-check R06; the earlier "sleep until the ideal time, in whole ms" fought that
+/// pacing and reported a rounding artifact plus one ioctl). Two figures come out:
+/// - `max_dev_us`: each edge (end of its set_break call) against the ideal grid from the
+///   first call; it includes the ioctl cost once. The 5-baud verdict uses it.
+/// - `max_pulse_dev_us`: each pulse (end of one set_break call to the end of the next)
+///   against `half_ms`. A constant ioctl cost shifts both edges and cancels; its variation and
+///   late wake-ups do not. This is the TiniL figure, and the fast-init verdict uses it.
 pub fn measure_break_jitter(
     t: &mut dyn Transport,
     toggles: u32,
     half_ms: u32,
 ) -> io::Result<BreakJitter> {
+    let half_us = u64::from(half_ms) * 1000;
     let t0 = t.now_us();
     let mut devs = Vec::new();
+    let mut pulse_devs = Vec::new();
+    let mut prev_edge: Option<u64> = None;
     let mut max_call = 0u64;
     let mut loopback_seen = false;
     for k in 0..toggles * 2 {
         let on = k % 2 == 0;
-        let ideal = t0 + u64::from(k) * u64::from(half_ms) * 1000;
+        let ideal = t0 + u64::from(k) * half_us;
         let before = t.now_us();
         t.set_break(on)?;
         let after = t.now_us();
         max_call = max_call.max(after - before);
         devs.push(after.abs_diff(ideal));
+        if let Some(p) = prev_edge {
+            pulse_devs.push(after.saturating_sub(p).abs_diff(half_us));
+        }
+        prev_edge = Some(after);
         if on {
             t.sleep_ms(half_ms / 2);
             loopback_seen |= t.break_loopback_seen()?;
-            let ideal_next = ideal + u64::from(half_ms) * 1000;
-            let now = t.now_us();
-            if ideal_next > now {
-                t.sleep_ms(((ideal_next - now) / 1000) as u32);
-            }
+            t.sleep_ms(half_ms - half_ms / 2);
         } else {
-            let ideal_next = ideal + u64::from(half_ms) * 1000;
-            let now = t.now_us();
-            if ideal_next > now {
-                t.sleep_ms(((ideal_next - now) / 1000) as u32);
-            }
+            t.sleep_ms(half_ms);
         }
     }
     t.set_break(false)?;
     let max_dev = devs.iter().copied().max().unwrap_or(0);
+    let max_pulse_dev = pulse_devs.iter().copied().max().unwrap_or(0);
     let mean_dev = if devs.is_empty() {
         0
     } else {
@@ -96,9 +110,10 @@ pub fn measure_break_jitter(
         max_dev_us: max_dev,
         mean_dev_us: mean_dev,
         max_call_us: max_call,
+        max_pulse_dev_us: max_pulse_dev,
         loopback_seen,
         five_baud_ok: max_dev < FIVE_BAUD_TOLERANCE_US,
-        fast_init_ok: max_dev < FAST_INIT_TOLERANCE_US,
+        fast_init_ok: max_pulse_dev < FAST_INIT_TOLERANCE_US,
     })
 }
 
@@ -171,9 +186,9 @@ pub fn fast_init_cause(j: &BreakJitter) -> Option<String> {
     if j.fast_init_ok {
         return None;
     }
-    // The break call is the cause when it alone accounts for at least half the worst edge
+    // The break call is the cause when it alone accounts for at least half the worst pulse
     // deviation (ours).
-    Some(if j.max_call_us * 2 >= j.max_dev_us {
+    Some(if j.max_call_us * 2 >= j.max_pulse_dev_us {
         format!(
             "the break request itself took up to {:.2} ms: USB round-trip latency of the break call, not the host's sleep. Seen under VM USB passthrough (Parallels, Windows 11 ARM; thread priority does not help, docs/platforms.md); fast init may then miss TiniL, try bare metal or another USB port",
             j.max_call_us as f64 / 1000.0
@@ -390,6 +405,7 @@ mod tests {
             max_dev_us,
             mean_dev_us: 300,
             max_call_us,
+            max_pulse_dev_us: max_dev_us,
             loopback_seen: false,
             five_baud_ok: true,
             fast_init_ok: max_dev_us < FAST_INIT_TOLERANCE_US,
@@ -407,10 +423,13 @@ mod tests {
         assert!(sleep.contains("sleeps woke late"), "{sleep}");
     }
 
-    /// A line whose set_break costs `cost_us` and whose clock is virtual.
+    /// A line whose set_break calls cost the next value of `costs` (cycled), with a virtual
+    /// clock and sleeps paced from deadlines like `KklLine` (the chain starts at the first
+    /// break call).
     struct Slow {
         now: u64,
-        cost_us: u64,
+        costs: Vec<u64>,
+        pace: Option<u64>,
         breaks: Vec<bool>,
     }
 
@@ -428,7 +447,8 @@ mod tests {
             Ok(())
         }
         fn set_break(&mut self, on: bool) -> io::Result<()> {
-            self.now += self.cost_us;
+            self.pace.get_or_insert(self.now);
+            self.now += self.costs[self.breaks.len() % self.costs.len()];
             self.breaks.push(on);
             Ok(())
         }
@@ -436,7 +456,9 @@ mod tests {
             Ok(false)
         }
         fn sleep_ms(&mut self, ms: u32) {
-            self.now += u64::from(ms) * 1000;
+            let target = self.pace.unwrap_or(self.now) + u64::from(ms) * 1000;
+            self.now = self.now.max(target);
+            self.pace = Some(target);
         }
         fn flush_rx(&mut self) -> io::Result<()> {
             Ok(())
@@ -449,13 +471,18 @@ mod tests {
         }
     }
 
+    fn slow(costs: &[u64]) -> Slow {
+        Slow {
+            now: 0,
+            costs: costs.to_vec(),
+            pace: None,
+            breaks: Vec::new(),
+        }
+    }
+
     #[test]
     fn jitter_reflects_the_cost_of_each_break_call() {
-        let mut fast = Slow {
-            now: 0,
-            cost_us: 200,
-            breaks: Vec::new(),
-        };
+        let mut fast = slow(&[200]);
         let j = measure_break_jitter(&mut fast, 5, 10).unwrap();
         assert_eq!(j.edges, 10);
         assert_eq!(j.max_call_us, 200);
@@ -464,13 +491,20 @@ mod tests {
         assert_eq!(&fast.breaks[..4], [true, false, true, false]);
         assert_eq!(fast.breaks.last(), Some(&false));
 
-        let mut slow = Slow {
-            now: 0,
-            cost_us: 3_000,
-            breaks: Vec::new(),
-        };
-        let j = measure_break_jitter(&mut slow, 5, 10).unwrap();
-        assert!(j.max_dev_us >= 3_000, "{j:?}");
+        // A constant 3 ms break call moves both edges of a pulse alike: the pulse keeps its
+        // length (re-check R06), only the edge grid figure shows the cost.
+        let mut constant = slow(&[3_000]);
+        let j = measure_break_jitter(&mut constant, 5, 10).unwrap();
+        assert_eq!(j.max_pulse_dev_us, 0, "{j:?}");
+        assert!(
+            j.max_dev_us >= 3_000 && j.fast_init_ok && j.five_baud_ok,
+            "{j:?}"
+        );
+
+        // A break call whose cost varies (0.2 ms, then 3 ms) changes the pulse length.
+        let mut jittery = slow(&[200, 3_000]);
+        let j = measure_break_jitter(&mut jittery, 5, 10).unwrap();
+        assert_eq!(j.max_pulse_dev_us, 2_800, "{j:?}");
         assert!(!j.fast_init_ok && j.five_baud_ok, "{j:?}");
     }
 

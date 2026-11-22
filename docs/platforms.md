@@ -234,7 +234,9 @@ that does not pace its 5-baud edges from deadlines fails the init there (docs/si
 transport"). This is CI only; no real cable is attached to that runner.
 
 Break edges on the Windows VM (FT232R on the Mac's USB, attached to Parallels "Windows 11"
-ARM64 as COM1; 2026-11-22). `kline selftest` (40 edges, 10 ms half-period) gave max deviation
+ARM64 as COM1; 2026-11-22). `kline selftest` (40 edges, 10 ms half-period; before re-check R06, when the TiniL verdict used
+the edge deviation, which included the break ioctl and a whole-ms rounding of the sleeps; it now
+uses the pulse length) gave max deviation
 0.55-5.74 ms over 8 runs (one outlier 63.7 ms with a 47 ms `set_break`), so TiniL (+-1 ms) is
 `TOO IMPRECISE` in most runs while 5-baud (+-10 ms) is OK; on the Mac the same cable passes. A
 probe (100 pulses of 25 ms each, spin-waited, timeBeginPeriod(1), two runs) per thread priority:

@@ -1762,6 +1762,22 @@ mod tests {
         assert!(m.0.borrow().calls.is_empty());
     }
 
+    #[test]
+    fn selftest_reports_the_pulse_length_without_the_ioctl_cost() {
+        // Re-check R06: selftest's break toggles run through the same paced chain as an init.
+        // A constant 125 us break ioctl shifts both edges of a pulse by the same amount: the
+        // TiniL figure (pulse length against 10 ms) must not contain it, nor a whole-ms
+        // rounding of the sleeps.
+        for ioctl_us in [0u64, 125, 500] {
+            let (mut l, _m) = line(ioctl_us);
+            let j = crate::selftest::measure_break_jitter(&mut l, 20, 10).unwrap();
+            assert!(j.max_pulse_dev_us <= 10, "{ioctl_us} us ioctl: {j:?}");
+            assert!(j.fast_init_ok, "{ioctl_us} us ioctl: {j:?}");
+            // The edge grid figure shows the ioctl once, not twice.
+            assert!(j.max_dev_us <= ioctl_us + 10, "{ioctl_us} us ioctl: {j:?}");
+        }
+    }
+
     /// The emergency port is one process-wide slot: its tests run one at a time.
     static EMERGENCY_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

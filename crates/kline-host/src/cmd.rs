@@ -1016,7 +1016,7 @@ pub fn selftest(ctx: &mut Ctx, a: &SelftestArgs) -> Result<(), CliError> {
                "break_jitter": j, "echo_rtt": echo, "latency_timer": latency_json,
                "note": note}),
         format!(
-            "port: {path}{}{not_kkl_human}\nbaud: requested {baud}, driver reports {} ({baud_source})\nbreak toggles: {} edges, {} ms half-period: max deviation {:.2} ms, mean {:.2} ms, slowest set_break {:.2} ms; loopback {}\n5-baud bits (+-10 ms): {}; fast-init TiniL (+-1 ms): {}{fast_init_human}{echo_human}{latency_human}\n{note}",
+            "port: {path}{}{not_kkl_human}\nbaud: requested {baud}, driver reports {} ({baud_source})\nbreak toggles: {} edges, {} ms half-period: edge max deviation {:.2} ms, mean {:.2} ms, slowest set_break {:.2} ms, pulse length max deviation {:.2} ms; loopback {}\n5-baud bits (+-10 ms, edges): {}; fast-init TiniL (+-1 ms, pulse length): {}{fast_init_human}{echo_human}{latency_human}\n{note}",
             usb.as_ref()
                 .and_then(|u| u.usb.map(|v| format!(" (usb {:04x}:{:04x} {})", v.0, v.1, u.product.clone().unwrap_or_default())))
                 .unwrap_or_default(),
@@ -1026,6 +1026,7 @@ pub fn selftest(ctx: &mut Ctx, a: &SelftestArgs) -> Result<(), CliError> {
             j.max_dev_us as f64 / 1000.0,
             j.mean_dev_us as f64 / 1000.0,
             j.max_call_us as f64 / 1000.0,
+            j.max_pulse_dev_us as f64 / 1000.0,
             if j.loopback_seen { "seen" } else { "not seen (normal without K-line power)" },
             if j.five_baud_ok { "OK" } else { "TOO IMPRECISE" },
             if j.fast_init_ok { "OK" } else { "TOO IMPRECISE" },
