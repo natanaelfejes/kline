@@ -1292,6 +1292,45 @@ mod tests {
         assert!(!break_times(&m).last().unwrap().0);
     }
 
+    #[test]
+    fn connect_moves_to_the_next_variant_after_an_init_timing_fault() {
+        // Code review L10: an InitTiming failure ends only that attempt.
+        let (l, m) = line(500);
+        // Sleep 0 is the W5 idle, 1 the start bit, 2 bit 0: 30 ms late.
+        m.0.borrow_mut().oversleep_nth = Some((2, 30_000));
+        let mut link = crate::link::Link::new(Box::new(l), Tracer::off(), None);
+        let cfg = kline_core::LinkConfig::new(0x7A, kline_core::KTiming::default());
+        let policy = kline_core::RetryPolicy {
+            init_attempts: 1,
+            ..kline_core::RetryPolicy::default()
+        };
+        let mut seen = Vec::new();
+        let r = crate::link::connect(
+            &mut link,
+            &cfg,
+            &[
+                kline_core::InitVariant::SingleEcu,
+                kline_core::InitVariant::MultiEcu,
+            ],
+            &policy,
+            &mut |a| seen.push((a.variant, a.error.clone())),
+        );
+        assert!(r.is_err(), "the mock has no ECU");
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert!(
+            seen[0].1.as_deref().unwrap().contains("init timing missed"),
+            "{seen:?}"
+        );
+        assert_eq!(seen[1].0, kline_core::InitVariant::MultiEcu);
+        assert!(
+            !seen[1].1.as_deref().unwrap().contains("init timing"),
+            "{seen:?}"
+        );
+        // A receiver saw only the second attempt's complete address (no Multipoint in the
+        // default timing, so 0x7A again), and no byte from the aborted one.
+        assert_eq!(decoded_addresses(&m).0, vec![0x7A]);
+    }
+
     #[cfg(unix)]
     #[test]
     fn input_flags_deliver_a_break_as_a_byte() {
