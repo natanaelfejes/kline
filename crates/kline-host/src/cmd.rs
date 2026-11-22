@@ -1068,9 +1068,37 @@ pub fn ident(ctx: &mut Ctx, a: &LinkArgs) -> Result<(), CliError> {
                 .unwrap_or_default();
             let chosen_path = chosen.map(|i| o.ecu.defs[i].path.display().to_string());
             let diagfailures_ok = reply.len() == DIAGFAILURES_IDENT_BYTES;
+            let ambiguous = auto.is_none() && fallback.ambiguous;
+            let fitting: Vec<&defs::LoadedDef> =
+                fallback.fits.iter().map(|&i| &o.ecu.defs[i]).collect();
+            let differences = if ambiguous {
+                defs::candidate_differences(&fitting)
+            } else {
+                Vec::new()
+            };
+            let ambiguity_note = if ambiguous {
+                let mut n = format!(
+                    "\nnote: definition choice unresolved: {} all decode {}: fine for reads; before any config write choose the definition with {} (docs/cli.md \"Choosing the BMT definition\")",
+                    fitting.iter().map(|d| defs::def_stem(d)).collect::<Vec<_>>().join(", "),
+                    hex_sp(&p),
+                    choose_hint(&o.ecu)
+                );
+                if differences.is_empty() {
+                    n.push_str("\nthey decode every request alike");
+                } else {
+                    n.push_str("\nthey differ in:");
+                    for d in &differences {
+                        n.push_str(&format!("\n  {}", d.human()));
+                    }
+                }
+                n
+            } else {
+                String::new()
+            };
             ctx.out.emit(
                 json!({"event": "ident", "request": hex(&p), "reply": hex(&reply),
-                       "tries": tries, "chosen": chosen_path, "ambiguous": auto.is_none() && fallback.ambiguous,
+                       "tries": tries, "chosen": chosen_path, "ambiguous": ambiguous,
+                       "differences": differences.iter().map(defs::Difference::to_json).collect::<Vec<_>>(),
                        "method": method,
                        "autoident": {"ident": parsed, "match": auto.map(|(_, l)| l)},
                        "reply_len": reply.len(), "shorter_than_min_bytes": short,
@@ -1078,19 +1106,19 @@ pub fn ident(ctx: &mut Ctx, a: &LinkArgs) -> Result<(), CliError> {
                        "candidates": fallback.results,
                        "decoded": defs::decoded_json(&decoded)}),
                 format!(
-                    "{} -> {}{}\ndefinition: {} ({method}){}{}{}\n{}",
+                    "{} -> {}{}\ndefinition: {} ({method}){}{ambiguity_note}{}{}\n{}",
                     hex_sp(&p),
                     hex_sp(&reply),
                     if tries > 1 { format!(" (after {tries} tries)") } else { String::new() },
                     chosen_path.as_deref().unwrap_or("NONE fits"),
-                    if auto.is_none() && fallback.ambiguous {
-                        " (AMBIGUOUS: several candidates decode; check before any config write)"
+                    if ambiguous {
+                        " (AMBIGUOUS: several candidates decode, see the note)"
                     } else {
                         ""
                     },
                     if short { "\nnote: reply shorter than the definition's MinBytes; decoded anyway" } else { "" },
                     if p == safety::IDENTIFICATION_READ && !diagfailures_ok {
-                        format!("\nnote: {} bytes; DDT2000's DiagFailures identification needs exactly {DIAGFAILURES_IDENT_BYTES}", reply.len())
+                        format!("\nnote: {} bytes; DDT2000's DiagFailures identification needs exactly {DIAGFAILURES_IDENT_BYTES} (only DDT2000's fault screen checks that; fine for reads and for kline)", reply.len())
                     } else {
                         String::new()
                     },
@@ -1108,6 +1136,15 @@ pub fn ident(ctx: &mut Ctx, a: &LinkArgs) -> Result<(), CliError> {
         }
         Ok(())
     })
+}
+
+/// How to name one definition: `--xml`, plus the BMT shortcuts for `--ecu bmt`.
+pub fn choose_hint(ecu: &Ecu) -> &'static str {
+    if ecu.label == "bmt" {
+        "--ecu bmt-ph1p or --ecu bmt-sagem or --xml PATH"
+    } else {
+        "--xml PATH"
+    }
 }
 
 /// Sleep `ms` in steps, sending TesterPresent when due. False when Ctrl-C was pressed.

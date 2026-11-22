@@ -1617,3 +1617,48 @@ fn bmt_definition_shortcuts_resolve_an_ambiguous_config_write() {
         r.stdout
     );
 }
+
+/// A definitions directory with bmt_cli.xml as ph1_p and bmt_cli_alt.xml as SAGEM.
+fn differing_bmt_defs() -> String {
+    let d = temp_dir("bmt-defs-diff");
+    std::fs::copy(fixture_path("bmt_cli.xml"), d.join("BMT_X65_ph1_p.xml")).unwrap();
+    std::fs::copy(fixture_path("bmt_cli_alt.xml"), d.join("BMT_SAGEM.xml")).unwrap();
+    path_str(&d)
+}
+
+#[test]
+fn ambiguous_ident_explains_the_impact_and_names_the_differing_bits() {
+    let defs = differing_bmt_defs();
+    let (r, _) = run(bmt_ecu(), &["--defs", &defs, "ident", "--ecu", "bmt"]);
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    for needle in [
+        "AMBIGUOUS",
+        "fine for reads",
+        "before any config write choose the definition with --ecu bmt-ph1p or --ecu bmt-sagem or --xml",
+        "21 A1 byte 3 mask 0x01: Option A (BMT_X65_ph1_p) vs Option B (BMT_SAGEM)",
+        "21 A1 byte 3 mask 0x02: - (BMT_X65_ph1_p) vs Option C (BMT_SAGEM)",
+        // The fixture's 21 80 reply has 9 bytes.
+        "note: 9 bytes; DDT2000's DiagFailures identification needs exactly 26 (only DDT2000's fault screen checks that; fine for reads and for kline)",
+    ] {
+        assert!(r.stdout.contains(needle), "missing {needle:?} in\n{}", r.stdout);
+    }
+    let (r, _) = run(
+        bmt_ecu(),
+        &["--json", "--defs", &defs, "ident", "--ecu", "bmt"],
+    );
+    let id = &r.event("ident")[0];
+    assert_eq!(id["ambiguous"], true);
+    let d = id["differences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["place"] == "byte 3 mask 0x01")
+        .unwrap();
+    assert_eq!(d["request"], "21A1");
+    assert_eq!(d["place"], "byte 3 mask 0x01");
+    assert_eq!(d["names"]["BMT_SAGEM"], "Option B");
+    // One definition named: no ambiguity note.
+    let (r, _) = run(bmt_ecu(), &["--defs", &defs, "ident", "--ecu", "bmt-sagem"]);
+    assert_eq!(r.code, 0);
+    assert!(!r.stdout.contains("AMBIGUOUS"), "{}", r.stdout);
+}

@@ -85,3 +85,34 @@ fn safir_dtc_reads_its_fault_named_frames() {
     assert_eq!(reqs, ["3350", "3352", "3351"], "{}", r.stdout);
     j.assert_no_writes();
 }
+
+#[test]
+fn the_two_real_bmt_definitions_differ_where_the_docs_say() {
+    let Some(d) = defs_dir() else { return };
+    let dir = std::path::Path::new(&d);
+    if !dir.join("BMT_SAGEM.xml").exists() {
+        eprintln!("SKIPPED: no BMT_SAGEM.xml");
+        return;
+    }
+    let load = |f: &str| kline_host::defs::LoadedDef {
+        path: dir.join(f),
+        def: kline_spec::EcuDef::from_xml_bytes(&std::fs::read(dir.join(f)).unwrap()).unwrap(),
+    };
+    let (a, b) = (load("BMT_X65_ph1_p.xml"), load("BMT_SAGEM.xml"));
+    let h: Vec<String> = kline_host::defs::candidate_differences(&[&a, &b])
+        .iter()
+        .map(|d| d.human())
+        .collect();
+    for want in [
+        "21 A1 byte 3 mask 0x80: CARCLIENT (BMT_X65_ph1_p) vs CONDROUL (BMT_SAGEM)",
+        "21 A1 byte 4 mask 0x01: CONDROUL (BMT_X65_ph1_p) vs - (BMT_SAGEM)",
+        "21 A1 byte 4 mask 0x02: ALARMELEDCPE (BMT_X65_ph1_p) vs - (BMT_SAGEM)",
+        "3B D2 00 00 sent \"Choix fonction\" = 7: CARCLIENT (BMT_X65_ph1_p) vs CONDROUL (BMT_SAGEM)",
+    ] {
+        assert!(h.iter().any(|l| l == want), "missing {want:?} in {h:#?}");
+    }
+    // 21 80 has the same layout in both: it cannot decide (docs/cli.md).
+    assert!(!h.iter().any(|l| l.starts_with("21 80")), "{h:#?}");
+    // TRF sits at the same place in both.
+    assert!(!h.iter().any(|l| l.contains("TRF")), "{h:#?}");
+}

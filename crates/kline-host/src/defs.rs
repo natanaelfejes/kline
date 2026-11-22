@@ -606,6 +606,8 @@ pub struct IdentChoice {
     pub chosen: Option<usize>,
     pub ambiguous: bool,
     pub results: Vec<Json>,
+    /// Every candidate that fits, in order.
+    pub fits: Vec<usize>,
 }
 
 pub fn choose_by_ident(ecu: &Ecu, keywords: (u8, u8), sent: &[u8], reply: &[u8]) -> IdentChoice {
@@ -631,7 +633,141 @@ pub fn choose_by_ident(ecu: &Ecu, keywords: (u8, u8), sent: &[u8], reply: &[u8])
         chosen: fits.first().copied(),
         ambiguous: fits.len() > 1,
         results,
+        fits,
     }
+}
+
+/// One place where candidate definitions disagree: a received bit field whose item name
+/// differs (or exists in only some), or a list value of a sent item whose text differs (e.g. the
+/// BMT `3B D2` function index 7: `CARCLIENT` in ph1_p, `CONDROUL` in SAGEM).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Difference {
+    pub request: Vec<u8>,
+    pub place: String,
+    /// (definition file stem, item name or list text there).
+    pub names: Vec<(String, Option<String>)>,
+}
+
+impl Difference {
+    pub fn to_json(&self) -> Json {
+        let names: serde_json::Map<String, Json> = self
+            .names
+            .iter()
+            .map(|(d, n)| (d.clone(), json!(n)))
+            .collect();
+        json!({"request": crate::hex(&self.request), "place": self.place, "names": names})
+    }
+
+    pub fn human(&self) -> String {
+        format!(
+            "{} {}: {}",
+            crate::hex_sp(&self.request),
+            self.place,
+            self.names
+                .iter()
+                .map(|(d, n)| format!("{} ({d})", n.as_deref().unwrap_or("-")))
+                .collect::<Vec<_>>()
+                .join(" vs ")
+        )
+    }
+}
+
+/// File stem of a loaded definition, for messages.
+pub fn def_stem(d: &LoadedDef) -> String {
+    d.path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| d.def.name.clone())
+}
+
+/// Width in bits of a data definition.
+fn width_bits(d: &kline_spec::DataDef) -> u32 {
+    if d.is_bytes {
+        d.bytes_count * 8
+    } else {
+        d.bits_count.max(1)
+    }
+}
+
+/// Where a received item sits, in the words of docs/cli.md: `byte 3 mask 0x80` for a field
+/// inside one byte (DDT2000 big-endian bit offsets, MSB first), else `byte 3 (16 bits)`.
+fn place_text(first_byte: u32, bit_offset: u32, bits: u32) -> String {
+    let byte = first_byte + bit_offset / 8;
+    let off = bit_offset % 8;
+    if off + bits <= 8 {
+        let mask = (((1u32 << bits) - 1) << (8 - off - bits)) as u8;
+        format!("byte {byte} mask 0x{mask:02X}")
+    } else if off == 0 {
+        format!("byte {byte} ({bits} bits)")
+    } else {
+        format!("byte {byte} bit offset {off} ({bits} bits)")
+    }
+}
+
+/// Where `defs` disagree on the same request bytes: received bit fields named differently
+/// (or present in only some) and sent list values with different texts. Names are compared
+/// trimmed. Empty when they agree everywhere.
+/// Per definition: the name or text found there.
+type PerDef = Vec<Option<String>>;
+
+pub fn candidate_differences(defs: &[&LoadedDef]) -> Vec<Difference> {
+    use std::collections::BTreeMap;
+    let mut payloads: Vec<Vec<u8>> = Vec::new();
+    for d in defs {
+        for r in &d.def.requests {
+            if !payloads.contains(&r.sent_bytes.0) {
+                payloads.push(r.sent_bytes.0.clone());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for p in payloads {
+        // (byte, bit offset, bits) -> name per definition; (byte, offset, value) -> list text.
+        let mut recv: BTreeMap<(u32, u32, u32), PerDef> = BTreeMap::new();
+        let mut sent: BTreeMap<(u32, u32, i64), (String, PerDef)> = BTreeMap::new();
+        for (k, d) in defs.iter().enumerate() {
+            for r in requests_for(&d.def, &p) {
+                for i in &r.received_items {
+                    let bits = d.def.data(&i.name).map(width_bits).unwrap_or(8);
+                    let key = (i.first_byte + i.bit_offset / 8, i.bit_offset % 8, bits);
+                    let slot = recv.entry(key).or_insert_with(|| vec![None; defs.len()]);
+                    slot[k] = Some(i.name.trim().to_string());
+                }
+                for i in &r.sent_items {
+                    let Some(data) = d.def.data(&i.name) else {
+                        continue;
+                    };
+                    for li in &data.list {
+                        let key = (i.first_byte, i.bit_offset, li.value);
+                        let slot = sent
+                            .entry(key)
+                            .or_insert_with(|| (i.name.trim().to_string(), vec![None; defs.len()]));
+                        slot.1[k] = Some(li.text.trim().to_string());
+                    }
+                }
+            }
+        }
+        let differs = |v: &[Option<String>]| v.iter().any(|n| n != &v[0]);
+        for ((byte, off, bits), names) in recv {
+            if differs(&names) {
+                out.push(Difference {
+                    request: p.clone(),
+                    place: place_text(byte, off, bits),
+                    names: defs.iter().map(|d| def_stem(d)).zip(names).collect(),
+                });
+            }
+        }
+        for ((_, _, value), (item, names)) in sent {
+            if differs(&names) {
+                out.push(Difference {
+                    request: p.clone(),
+                    place: format!("sent {item:?} = {value}"),
+                    names: defs.iter().map(|d| def_stem(d)).zip(names).collect(),
+                });
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -674,5 +810,55 @@ mod data_dir_tests {
                 .join("kline")
         );
         assert_eq!(data_dir_from(true, env(&[])), PathBuf::from("kline-data"));
+    }
+}
+
+#[cfg(test)]
+mod difference_tests {
+    use super::*;
+
+    /// Hand-written two-request definition; `seven` is the text of list value 7.
+    fn def(seven: &str, extra_bit: bool) -> LoadedDef {
+        let extra = if extra_bit {
+            r#"<DataItem Name="Extra" Ref="1" FirstByte="4" BitOffset="7"/>"#
+        } else {
+            ""
+        };
+        let xml = format!(
+            r#"<Target Name="T" xmlns="http://www-diag.renault.com/2002/ECU">
+<Function Name="F" Address="38"/>
+<Datas>
+<Data Name="Flag"><Bits count="1"><Scaled/></Bits></Data>
+<Data Name="Extra"><Bits count="1"><Scaled/></Bits></Data>
+<Data Name="Function"><Bits count="8"><List><Item Value="3" Text="SAME"/><Item Value="7" Text="{seven}"/></List></Bits></Data>
+</Datas>
+<Requests Endian="Big">
+<Request Name="Read"><Sent><SentBytes>21A1</SentBytes></Sent>
+<Received MinBytes="4"><DataItem Name="Flag" Ref="1" FirstByte="3" BitOffset="4"/>{extra}</Received></Request>
+<Request Name="Write"><Sent><SentBytes>3BD20000</SentBytes><DataItem Name="Function" Ref="1" FirstByte="3"/></Sent>
+<Received MinBytes="1"></Received></Request>
+</Requests></Target>"#
+        );
+        LoadedDef {
+            path: PathBuf::from(if extra_bit { "a.xml" } else { "b.xml" }),
+            def: EcuDef::from_xml_bytes(xml.as_bytes()).unwrap(),
+        }
+    }
+
+    #[test]
+    fn differing_bits_and_list_texts_are_listed() {
+        let (a, b) = (def("CARCLIENT ", true), def("CONDROUL", false));
+        let d = candidate_differences(&[&a, &b]);
+        let h: Vec<String> = d.iter().map(Difference::human).collect();
+        assert_eq!(
+            h,
+            [
+                "21 A1 byte 4 mask 0x01: Extra (a) vs - (b)",
+                "3B D2 00 00 sent \"Function\" = 7: CARCLIENT (a) vs CONDROUL (b)",
+            ],
+            "{d:#?}"
+        );
+        // Same layout, texts equal after trimming: nothing to report.
+        assert!(candidate_differences(&[&def("X ", false), &def("X", false)]).is_empty());
     }
 }
