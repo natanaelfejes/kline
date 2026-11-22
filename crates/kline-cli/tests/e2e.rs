@@ -1756,6 +1756,34 @@ fn bmt_definition_shortcuts_resolve_an_ambiguous_config_write() {
     );
 }
 
+/// Re-review N2: with `--ecu bmt` unresolved, every non-read `3B D2 ..` is refused, also the
+/// Expert ones (`3B D2 0E 01`, index 14), with the same message as the Tier 2 write.
+#[test]
+fn unresolved_bmt_refuses_expert_3b_d2_like_tier_2() {
+    let defs = two_bmt_defs();
+    let exec = |req: &str| {
+        run_opts(
+            bmt_ecu(),
+            &["--defs", &defs, "exec", "--ecu", "bmt", req],
+            Opts {
+                interactive: true,
+                human: Human::TypesShownCode,
+                ..Opts::default()
+            },
+        )
+    };
+    let (t2, j) = exec("3BD20501");
+    assert_eq!(t2.code, 7, "{}", t2.stderr);
+    j.assert_no_writes();
+    let (r, j) = exec("3BD20E01");
+    assert_eq!(r.code, 7, "{}\n{}", r.stdout, r.stderr);
+    assert!(r.stderr.contains("--ecu bmt-ph1p"), "{}", r.stderr);
+    assert!(!r.stderr.contains("REFUSED:"), "refused by the choice, not the policy");
+    j.assert_no_writes();
+    let msg = |s: &str| s.lines().find(|l| l.contains("--ecu bmt-ph1p")).map(str::to_owned);
+    assert_eq!(msg(&t2.stderr), msg(&r.stderr));
+}
+
 /// Code review M3: `--ecu bmt` leaves the definition choice unresolved even when only one BMT
 /// file is present, so a config write is refused until the definition is named.
 #[test]

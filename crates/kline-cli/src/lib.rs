@@ -315,10 +315,15 @@ pub fn exec(
         }
         None => None,
     };
-    let config_write = risk.tier == Tier::ConfigWrite
+    // Any non-read `3B D2 ..` is a configuration write of the BMT whatever its tier (also the
+    // Expert indexes, re-review N2): the definition choice decides what the index means.
+    let is_config_write = |p: &[u8], r: &safety::RiskInfo| {
+        r.tier == Tier::ConfigWrite || p.starts_with(&[0x3B, 0xD2])
+    };
+    let config_write = is_config_write(&asx.payload, &risk)
         || stop
             .as_ref()
-            .is_some_and(|(_, r)| r.tier == Tier::ConfigWrite);
+            .is_some_and(|(s, r)| is_config_write(&s.payload, r));
     if config_write && ecu.choice_unresolved {
         return Err(defs::unresolved_choice_refusal(&ecu));
     }
