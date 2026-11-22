@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Hand-written clio-sim fixture (not derived from any Renault file). Shaped like a plain
+     ISO8 injection ECU at 0x7A (KW C2 85 as listed in the design notes). Data names, positions
+     and scaling are invented. -->
+<Target Name="Fixture Safir" xmlns="http://www-diag.renault.com/2002/ECU">
+<Function Name="Injection" Address="122"/>
+<K BaudRate="10417">
+<ISO8><KW1 Value="194"/><KW2 Value="133" Timeout="500"/><FirstRequest Delay="20"/></ISO8>
+<InterByte Delay="0"/>
+<ReplyToRequest Delay="5"/>
+<RequestToReply Timeout="300"/>
+<TesterPresent Delay="3000"/>
+<OnError Delay="300"/>
+</K>
+<Datas>
+<Data Name="Engine speed"><Bits count="16"><Scaled Unit="rpm" Step="2"/></Bits></Data>
+<Data Name="Coolant temperature"><Bits><Scaled Unit="C" Offset="-40"/></Bits></Data>
+</Datas>
+<Requests Endian="Big">
+<Request Name="Block 50">
+<Sent><SentBytes>3350</SentBytes></Sent>
+<Received MinBytes="5">
+<DataItem Name="Engine speed" Ref="1" FirstByte="3"/>
+<DataItem Name="Coolant temperature" Ref="1" FirstByte="5"/>
+</Received>
+</Request>
+</Requests>
+</Target>

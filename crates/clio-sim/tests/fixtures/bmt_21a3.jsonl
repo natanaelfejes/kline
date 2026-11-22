@@ -1,0 +1,7 @@
+{"t_ms":300,"dir":"tx","kind":"five_baud","hex":"26"}
+{"t_ms":2383,"dir":"rx","hex":"55 D0 8F"}
+{"t_ms":2408,"dir":"tx","hex":"70"}
+{"t_ms":2440,"dir":"rx","hex":"70 D9"}
+{"t_ms":2465,"dir":"tx","hex":"82 26 F1 21 A3 5D"}
+{"t_ms":2471,"dir":"rx","hex":"82 26 F1 21 A3 5D"}
+{"t_ms":2497,"dir":"rx","hex":"84 F1 26 61 A3 05 02 A6"}
