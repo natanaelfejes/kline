@@ -175,6 +175,9 @@ pub struct LinkConfig {
     /// widen the window on the car if an ECU's W1 is near the ISO 9141 maximum of 300 ms.
     /// NOT VERIFIED on the car whether any ECU needs it.
     pub kw_window_ms: Option<u32>,
+    /// When TesterPresent is sent; default [`TesterPresentMode::Idle`] (DDT2000's wire-level
+    /// behaviour). [`TesterPresentMode::DDT2000_PERIODIC`] is the screen player option.
+    pub tester_present_mode: crate::retry::TesterPresentMode,
 }
 
 impl LinkConfig {
@@ -191,6 +194,7 @@ impl LinkConfig {
             response_pending_timeout_ms: consts::RESPONSE_PENDING_TIMEOUT_MS,
             max_response_pending: consts::MAX_RESPONSE_PENDING,
             kw_window_ms: None,
+            tester_present_mode: crate::retry::TesterPresentMode::Idle,
         }
     }
 

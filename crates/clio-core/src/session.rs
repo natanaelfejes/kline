@@ -14,6 +14,7 @@ use crate::exchange::{Exchange, ExchangeParams};
 use crate::frame::{FrameError, Framing, KwpHeader, Reply};
 use crate::init::InitOutcome;
 use crate::io::{Action, Event, Step};
+use crate::retry::TesterPresentMode;
 use crate::safety::{self, Denied, Protocol, ProtocolFrame, Target};
 #[cfg(feature = "approved-routines")]
 use crate::safety::{Approval, ApprovalChallenge, ChallengeIds, DenyReason, RiskInfo, Tier};
@@ -130,14 +131,23 @@ impl Session {
             Protocol::Kwp => Framing::Kwp(KwpHeader {
                 target: target.ecu_address,
                 source: cfg.tool_address,
-                length_in_format: KwpHeader::length_in_format_for_kw1(init.keywords().0),
+                // RE: KWP2000Diag4 0x2305a370: the KW1 rule (separate length byte unless KW1 is
+                // 0xD0 or odd) runs only on the fast-init branch; after a 5-baud init DDT2000
+                // only fetches the key bytes and keeps the length in the format byte.
+                length_in_format: match init.kind() {
+                    InitKind::KwpFast { .. } => {
+                        KwpHeader::length_in_format_for_kw1(init.keywords().0)
+                    }
+                    _ => true,
+                },
             }),
         };
-        let next_tp_ms = match t.init {
-            InitKind::KwpFast { .. } => {
+        let next_tp_ms = match (cfg.tester_present_mode, t.init) {
+            (TesterPresentMode::Periodic { interval_ms }, _) => now_ms + u64::from(interval_ms),
+            (TesterPresentMode::Idle, InitKind::KwpFast { .. }) => {
                 now_ms + u64::from(t.tester_present_ms.saturating_sub(t.first_request_ms))
             }
-            _ => now_ms,
+            (TesterPresentMode::Idle, _) => now_ms,
         };
         Session {
             cfg,
@@ -360,7 +370,12 @@ impl Session {
             read_timeout_ms: t.request_to_reply_timeout_ms,
             pending_timeout_ms: self.cfg.response_pending_timeout_ms,
             max_pending: self.cfg.max_response_pending,
-            reply_optional: kind != Kind::Request,
+            // Periodic mode is DDT2000's "TesterPresent.WithResponse": the reply is required.
+            reply_optional: match kind {
+                Kind::Request => false,
+                Kind::TesterPresent => self.cfg.tester_present_mode == TesterPresentMode::Idle,
+                Kind::Stop => true,
+            },
         };
         let mut exchange = Exchange::new(self.framing, permit, params).map_err(|e| match e {
             LinkError::Frame(f) => SessionError::Frame(f),
@@ -430,16 +445,26 @@ impl Session {
         if kind == Kind::Stop {
             self.closed = true;
         }
-        self.finish(now_ms, result)
+        self.finish(kind, now_ms, result)
     }
 
     fn finish(
         &mut self,
+        kind: Kind,
         now_ms: u64,
         step: Step<SessionOutcome, SessionError>,
     ) -> Step<SessionOutcome, SessionError> {
         self.last_end_ms = now_ms;
-        self.next_tp_ms = now_ms + u64::from(self.t.tester_present_ms);
+        match self.cfg.tester_present_mode {
+            TesterPresentMode::Idle => {
+                self.next_tp_ms = now_ms + u64::from(self.t.tester_present_ms);
+            }
+            // Counted from the last TesterPresent only (RE: DdtDiagScrXml 0x520484a0).
+            TesterPresentMode::Periodic { interval_ms } if kind == Kind::TesterPresent => {
+                self.next_tp_ms = now_ms + u64::from(interval_ms);
+            }
+            TesterPresentMode::Periodic { .. } => {}
+        }
         step
     }
 }

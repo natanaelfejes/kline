@@ -129,8 +129,13 @@ Both keep the ~KW2 handshake and the 25 ms / 20 ms waits.
 `MultiEcu` has no effect on an ECU whose XML has no Multipoint. The 5-baud byte is always
 8 raw bits, LSB first, no parity bit (RE: IOTBD32V3).
 
-**The car must confirm which variant each ECU needs.** Test order (alone on the line):
-SingleEcu, then MultiEcu, then FastInit; the same for the BMT.
+**The car must confirm which variant each ECU needs.** `--variant auto` order (alone on the
+line): **FastInit, then SingleEcu** (DDT2000's own detection order for 0x7A and 0x26: DiagScanXml
+0x5004ee50 walks the function's `<ProtocolList>` of x65_addressing.xml in file order, Code 4
+"KWP2000 FastInit MonoPoint" then Code 2 "KWP2000 Init 5 Baud Type I", `MultiPoint="0"`), then
+our MultiEcu fallback; ISO8 (Safir) only SingleEcu. The whole list is tried up to 3 rounds,
+500 ms apart (DDT2000 "Init retry n/3"; `--init-attempts`). Constants:
+`clio_core::retry::{DDT2000_DETECTION_ORDER, RetryPolicy}`.
 
 ## Fast init (KWP)
 
@@ -200,9 +205,24 @@ Payloads returned to callers start at the response SID.
   (ours).
 - Stop: `3F` for ISO8, StopCommunication `82` for KWP. The session is closed afterwards.
 - The engine sends neither StartCommunication nor StartDiagnosticSession by itself after a
-  5-baud init; the CLI decides (Sirius 32 definition: `10 A0`). Whether DDT2000's KWP class
-  sends StartCommunication after a 5-baud init is not decoded (RE: KWP2000Diag4 KWP2000Ecu;
-  a branch first read as an 0x7A special case was later identified as a CAN flag).
+  5-baud init; the CLI decides (Sirius 32 definition: `10 A0`). DDT2000 does the same: on the
+  5-baud branch of KWP2000Ecu init (RE: KWP2000Diag4 0x2305a370, `local_8 = 0x5d`) it only
+  fetches the key bytes; `81` and the KW1 length-byte rule (separate length byte unless KW1 is
+  0xD0 or odd) exist only on the fast-init branch. So after a 5-baud init the length stays in
+  the format byte whatever KW1 is (`Session::new`, D16).
+- Optional `TesterPresentMode::DDT2000_PERIODIC` (`--periodic-tester-present`): `3E` every
+  2000 ms since the last TP whatever else is sent, reply required (RE: DdtDiagScrXml 0x520484a0,
+  "Enable or disable physical TesterPresent request, when idle", `TesterPresent.WithResponse`).
+
+## DDT2000 application behaviour (retries)
+
+Not in DDT2000's protocol layer; defaults of `clio_core::RetryPolicy`:
+
+| What | Rule | RE |
+|---|---|---|
+| NRC 0x21 / 0x23 | wait 200 / 500 ms and send again, at most 10 tries (`clio ident`; `--nrc-tries`) | DiagScanXml 0x5007c790 |
+| init | whole variant list up to 3 rounds, 500 ms apart | DdtDiagScrXml 0x520484a0 (`[0x32] = 0x1F4`), DiagFailures 0x2404f410 |
+| refresh cycle (`live`) | only a cycle where every request failed counts; retry after 400 ms, at most 3 times, then exit 5 | DdtDiagScrXml 0x5204ce50 |
 
 ## Sans-IO contract
 

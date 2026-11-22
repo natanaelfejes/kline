@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AutoIdent variant of sirius_cli.xml: Renault 21 80 layout, MinBytes 24. -->
+<!-- Hand-written clio-cli fixture (not derived from any Renault file). Shaped like an injection
+     ECU at 0x7A with KWP 5-baud Multipoint (KW D0 8F, docs/protocol.md). Request bytes are the
+     protocol facts from docs/protocol.md; names, positions and scaling are invented. -->
+<Target Name="CLI fixture Sirius AutoIdent" xmlns="http://www-diag.renault.com/2002/ECU">
+<Function Name="Injection" Address="122"/>
+<Failures Name="Flags" Id="1"/>
+<AutoIdents><AutoIdent DiagVersion="12" Supplier="001" Soft="00E1" Version="9200"/></AutoIdents>
+<K BaudRate="10400">
+<KWP Multipoint="1">
+<ISO8><KW1 Value="208"/><KW2 Value="143" Timeout="300"/><FirstRequest Delay="20"/></ISO8>
+<KW2_ Delay="25"/>
+</KWP>
+<InterByte Delay="0"/>
+<ReplyToRequest Delay="5"/>
+<RequestToReply Timeout="300"/>
+<TesterPresent Delay="3000"/>
+<OnError Delay="300"/>
+</K>
+<Datas>
+<Data Name="Calibration"><Bytes count="8" ascii="1"/></Data>
+<Data Name="Diag version"><Bytes count="1"/></Data>
+<Data Name="Supplier"><Bytes count="3" ascii="1"/></Data>
+<Data Name="Program"><Bytes count="2"/></Data>
+<Data Name="Soft version"><Bytes count="2"/></Data>
+<Data Name="Supplier code"><Bytes count="2"/></Data>
+<Data Name="Engine speed"><Bits count="16"><Scaled Unit="rpm" Step="0.125"/></Bits></Data>
+<Data Name="Vehicle speed"><Bits><Scaled Unit="km/h"/></Bits></Data>
+<Data Name="Injection time"><Bits count="16"><Scaled Unit="us" Step="4"/></Bits></Data>
+<Data Name="Battery voltage"><Bits><Scaled Unit="V" Step="0.0625" Offset="8"/></Bits></Data>
+<Data Name="Idle switch"><Bits count="1"><List><Item Value="0" Text="open"/><Item Value="1" Text="closed"/></List></Bits></Data>
+<Data Name="Coolant temperature"><Bits><Scaled Unit="C" Offset="-40"/></Bits></Data>
+<Data Name="Air temperature"><Bits signed="1"><Scaled Unit="C" Step="0.5" Format="#0.0"/></Bits></Data>
+<Data Name="Throttle position"><Bits><Scaled Unit="%" Step="0.5"/></Bits></Data>
+<Data Name="Injector 1 circuit"><Bits count="1"><List><Item Value="0" Text="ok"/><Item Value="1" Text="fault"/></List></Bits></Data>
+<Data Name="Coolant sensor circuit"><Bits count="1"><List><Item Value="0" Text="ok"/><Item Value="1" Text="fault"/></List></Bits></Data>
+<Data Name="Knock sensor circuit"><Bits count="1"><List><Item Value="0" Text="ok"/><Item Value="1" Text="fault"/></List></Bits></Data>
+<Data Name="Config value"><Bits><Scaled/></Bits></Data>
+</Datas>
+<Requests Endian="Big">
+<Request Name="Start Diagnostic Session">
+<Sent><SentBytes>10A0</SentBytes></Sent>
+<Received MinBytes="2"></Received>
+</Request>
+<Request Name="Identification">
+<Sent><SentBytes>2180</SentBytes></Sent>
+<Received MinBytes="24">
+<DataItem Name="Diag version" Ref="1" FirstByte="8"/>
+<DataItem Name="Supplier" Ref="1" FirstByte="9"/>
+<DataItem Name="Program" Ref="1" FirstByte="17"/>
+<DataItem Name="Soft version" Ref="1" FirstByte="19"/>
+</Received>
+</Request>
+<Request Name="Pannes entrees">
+<Sent><SentBytes>21A0</SentBytes></Sent>
+<Received MinBytes="4">
+<DataItem Name="Injector 1 circuit" Ref="1" FirstByte="3" BitOffset="7"/>
+<DataItem Name="Coolant sensor circuit" Ref="1" FirstByte="3" BitOffset="6"/>
+<DataItem Name="Knock sensor circuit" Ref="1" FirstByte="4" BitOffset="0"/>
+</Received>
+</Request>
+<Request Name="Live A9">
+<Sent><SentBytes>21A9</SentBytes></Sent>
+<Received MinBytes="11">
+<DataItem Name="Engine speed" Ref="1" FirstByte="3"/>
+<DataItem Name="Vehicle speed" Ref="1" FirstByte="5"/>
+<DataItem Name="Injection time" Ref="1" FirstByte="6"/>
+<DataItem Name="Battery voltage" Ref="1" FirstByte="8"/>
+<DataItem Name="Idle switch" Ref="1" FirstByte="11" BitOffset="7"/>
+</Received>
+</Request>
+<Request Name="Live AA">
+<Sent><SentBytes>21AA</SentBytes></Sent>
+<Received MinBytes="6">
+<DataItem Name="Coolant temperature" Ref="1" FirstByte="3"/>
+<DataItem Name="Air temperature" Ref="1" FirstByte="4"/>
+<DataItem Name="Throttle position" Ref="1" FirstByte="5"/>
+</Received>
+</Request>
+<Request Name="Write config">
+<Sent><SentBytes>3BD01000</SentBytes><DataItem Name="Config value" FirstByte="4"/></Sent>
+<Received MinBytes="2"></Received>
+</Request>
+<Request Name="Reinit flags de pannes">
+<Sent><SentBytes>140000</SentBytes></Sent>
+<Received MinBytes="1"></Received>
+</Request>
+<Request Name="Reset learning">
+<Sent><SentBytes>11FF</SentBytes></Sent>
+<Received MinBytes="1"></Received>
+</Request>
+</Requests>
+<Devices>
+<Device Name="Injector 1"><DeviceData Name="Injector 1 circuit" FailureFlag="1"/><DeviceData Name="Engine speed" FailureFlag="0"/></Device>
+<Device Name="Coolant sensor"><DeviceData Name="Coolant sensor circuit" FailureFlag="1"/></Device>
+<Device Name="Knock sensor"><DeviceData Name="Knock sensor circuit" FailureFlag="1"/></Device>
+</Devices>
+</Target>

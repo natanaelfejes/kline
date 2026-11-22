@@ -50,50 +50,8 @@ fn connect_with_each_explicit_variant() {
     }
 }
 
-#[test]
-fn auto_falls_back_to_multi_when_the_ecu_accepts_only_the_xor80_byte() {
-    let (r, j) = run(
-        sirius_with(AddressAccept::Xor80, false),
-        &["--json", "connect", "--xml", &xml("sirius_cli.xml")],
-    );
-    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
-    let a = r.event("init_attempt");
-    assert_eq!(a.len(), 2);
-    assert_eq!(
-        (a[0]["variant"].as_str(), a[0]["ok"].as_bool()),
-        (Some("single"), Some(false))
-    );
-    assert_eq!(a[0]["address_byte"], "7A");
-    assert_eq!(
-        (a[1]["variant"].as_str(), a[1]["ok"].as_bool()),
-        (Some("multi"), Some(true))
-    );
-    assert_eq!(connected(&r)["variant"], "multi");
-    j.assert_no_writes();
-}
-
-#[test]
-fn auto_falls_back_to_single_when_the_ecu_accepts_only_the_plain_byte() {
-    // Single comes first, so Plain-only must connect on the first attempt.
-    let (r, _) = run(
-        sirius_with(AddressAccept::Plain, false),
-        &["--json", "connect", "--xml", &xml("sirius_cli.xml")],
-    );
-    assert_eq!(r.code, 0);
-    assert_eq!(r.event("init_attempt").len(), 1);
-    assert_eq!(connected(&r)["variant"], "single");
-}
-
-#[test]
-fn auto_reaches_fast_init_when_no_5_baud_byte_wakes_the_ecu() {
-    let mut p = EcuProfile::sirius32();
-    p.protocol = EcuProtocol::KwpFast;
-    p.accept_fast_init = true;
-    let ecu = SpecEcu::new(p, fixture("sirius_cli.xml"), sirius_scenario()).unwrap();
-    let (r, j) = run(ecu, &["--json", "connect", "--xml", &xml("sirius_cli.xml")]);
-    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
-    let v: Vec<_> = r
-        .event("init_attempt")
+fn attempts(r: &Run) -> Vec<(String, bool)> {
+    r.event("init_attempt")
         .iter()
         .map(|a| {
             (
@@ -101,24 +59,80 @@ fn auto_reaches_fast_init_when_no_5_baud_byte_wakes_the_ecu() {
                 a["ok"].as_bool().unwrap(),
             )
         })
-        .collect();
+        .collect()
+}
+
+#[test]
+fn auto_falls_back_to_multi_when_the_ecu_accepts_only_the_xor80_byte() {
+    // DDT2000 order (x65 addressing: FastInit, then 5-baud Type I), then our MultiEcu.
+    let (r, j) = run(
+        sirius_with(AddressAccept::Xor80, false),
+        &["--json", "connect", "--xml", &xml("sirius_cli.xml")],
+    );
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
     assert_eq!(
-        v,
+        attempts(&r),
         [
+            ("fast".into(), false),
             ("single".into(), false),
-            ("multi".into(), false),
-            ("fast".into(), true)
+            ("multi".into(), true)
         ]
     );
+    assert_eq!(r.event("init_attempt")[1]["address_byte"], "7A");
+    assert_eq!(connected(&r)["variant"], "multi");
     j.assert_no_writes();
 }
 
 #[test]
-fn every_variant_failing_is_exit_4_init() {
+fn auto_tries_plain_5_baud_right_after_fast_init() {
+    let (r, _) = run(
+        sirius_with(AddressAccept::Plain, false),
+        &["--json", "connect", "--xml", &xml("sirius_cli.xml")],
+    );
+    assert_eq!(r.code, 0);
+    assert_eq!(
+        attempts(&r),
+        [("fast".into(), false), ("single".into(), true)]
+    );
+    assert_eq!(connected(&r)["variant"], "single");
+}
+
+#[test]
+fn auto_tries_fast_init_first() {
+    let mut p = EcuProfile::sirius32();
+    p.protocol = EcuProtocol::KwpFast;
+    p.accept_fast_init = true;
+    let ecu = SpecEcu::new(p, fixture("sirius_cli.xml"), sirius_scenario()).unwrap();
+    let (r, j) = run(ecu, &["--json", "connect", "--xml", &xml("sirius_cli.xml")]);
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    assert_eq!(attempts(&r), [("fast".into(), true)]);
+    j.assert_no_writes();
+}
+
+#[test]
+fn every_variant_failing_is_exit_4_init_after_three_rounds() {
     let ecu = sirius_ecu().with_init_fault(clio_sim::ecu::InitFault::Silent);
     let (r, _) = run(ecu, &["--json", "connect", "--xml", &xml("sirius_cli.xml")]);
     assert_eq!(r.code, 4);
     assert_eq!(r.event("error")[0]["kind"], "init");
+    let a = r.event("init_attempt");
+    // DDT2000 "Init retry n/3": 3 rounds of the 3 variants.
+    assert_eq!(a.len(), 9);
+    let rounds: Vec<u64> = a.iter().map(|x| x["round"].as_u64().unwrap()).collect();
+    assert_eq!(rounds, [1, 1, 1, 2, 2, 2, 3, 3, 3]);
+    // --init-attempts 1: one round only.
+    let ecu = sirius_ecu().with_init_fault(clio_sim::ecu::InitFault::Silent);
+    let (r, _) = run(
+        ecu,
+        &[
+            "--json",
+            "connect",
+            "--xml",
+            &xml("sirius_cli.xml"),
+            "--init-attempts",
+            "1",
+        ],
+    );
     assert_eq!(r.event("init_attempt").len(), 3);
 }
 
@@ -802,4 +816,143 @@ fn clear_dtc_ddt2000_mode_and_refusals() {
     );
     assert_eq!(r.code, 9, "{}", r.stdout);
     j.assert_no_writes();
+}
+
+#[test]
+fn ident_retries_busy_nrc_like_ddt2000() {
+    // 7F 21 21 (busy) twice, then the real reply: DDT2000 RequestByteWithRetry waits 200 ms
+    // and sends again.
+    let ecu = sirius_ecu()
+        .with_fault(FaultRule::on(&[0x21, 0x80], ReplyFault::Negative { nrc: 0x21 }).once())
+        .with_fault(FaultRule::on(&[0x21, 0x80], ReplyFault::Negative { nrc: 0x21 }).once());
+    let (r, j) = run(ecu, &["--json", "ident", "--xml", &xml("sirius_cli.xml")]);
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    let id = &r.event("ident")[0];
+    assert_eq!(id["tries"], 3);
+    j.assert_no_writes();
+    // --nrc-tries 1: no retry, the negative reply is the result (exit 6).
+    let ecu = sirius_ecu()
+        .with_fault(FaultRule::on(&[0x21, 0x80], ReplyFault::Negative { nrc: 0x21 }).once());
+    let (r, _) = run(
+        ecu,
+        &[
+            "--json",
+            "ident",
+            "--xml",
+            &xml("sirius_cli.xml"),
+            "--nrc-tries",
+            "1",
+        ],
+    );
+    assert_eq!(r.code, 6, "{}", r.stdout);
+}
+
+#[test]
+fn live_retries_a_cycle_only_when_every_request_failed() {
+    // One of two frames always silent: the cycle still counts as good (DDT2000 retries only
+    // when every request of the cycle failed).
+    let ecu = sirius_ecu().with_fault(FaultRule::on(&[0x21, 0xAA], ReplyFault::NoReply));
+    let (r, _) = run(
+        ecu,
+        &[
+            "--json",
+            "live",
+            "--xml",
+            &xml("sirius_cli.xml"),
+            "--frames",
+            "21A9,21AA",
+            "--count",
+            "5",
+            "--rate",
+            "10",
+        ],
+    );
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    assert!(r.event("live_retry").is_empty());
+    // Both silent: 3 retries 400 ms apart, then exit 5.
+    let ecu = sirius_ecu()
+        .with_fault(FaultRule::on(&[0x21, 0xA9], ReplyFault::NoReply))
+        .with_fault(FaultRule::on(&[0x21, 0xAA], ReplyFault::NoReply));
+    let (r, _) = run(
+        ecu,
+        &[
+            "--json",
+            "live",
+            "--xml",
+            &xml("sirius_cli.xml"),
+            "--frames",
+            "21A9,21AA",
+            "--rate",
+            "10",
+        ],
+    );
+    assert_eq!(r.code, 5, "{}\n{}", r.stdout, r.stderr);
+    let retries = r.event("live_retry");
+    assert_eq!(retries.len(), 3);
+    assert_eq!(retries[0]["wait_ms"], 400);
+}
+
+#[test]
+fn periodic_tester_present_option_sends_tp_every_2000_ms() {
+    let (r, j) = run(
+        sirius_ecu(),
+        &[
+            "--trace",
+            "live",
+            "--xml",
+            &xml("sirius_cli.xml"),
+            "--frames",
+            "21A9",
+            "--count",
+            "6",
+            "--rate",
+            "1",
+            "--periodic-tester-present",
+        ],
+    );
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    // 6 cycles at 1 Hz with a request every second: idle TP (3000 ms) would never fire.
+    let tps = r.stderr.matches("TX 81 7A F1 3E 2A").count();
+    assert!(tps >= 2, "{tps} TP\n{}", r.stderr);
+    j.assert_no_writes();
+}
+
+fn autoident_ecu(version: &str) -> SpecEcu {
+    let sc = sirius_scenario()
+        .set("Diag version", clio_spec::Value::Hex("0C".into()))
+        .text("Supplier", "001")
+        .set("Program", clio_spec::Value::Hex("00E1".into()))
+        .set("Soft version", clio_spec::Value::Hex(version.into()));
+    let sc = sc
+        .iter()
+        .filter(|(n, _)| !["Calibration", "Supplier code"].contains(&n.as_str()))
+        .fold(clio_sim::scenario::Scenario::new(), |s, (n, v)| {
+            s.set(n, v.clone())
+        });
+    SpecEcu::new(EcuProfile::sirius32(), fixture("sirius_autoident.xml"), sc).unwrap()
+}
+
+#[test]
+fn ident_uses_the_ddt2000_autoident_ladder() {
+    let (r, j) = run(
+        autoident_ecu("9200"),
+        &["--json", "ident", "--xml", &xml("sirius_autoident.xml")],
+    );
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    let id = &r.event("ident")[0];
+    assert_eq!(id["autoident"]["match"], "exact");
+    assert_eq!(id["autoident"]["ident"]["diag_version"], 12);
+    assert_eq!(id["autoident"]["ident"]["version"], "9200");
+    assert_eq!(id["method"], "DDT2000 AutoIdent: exact");
+    // 24-byte reply (MinBytes 24): fine for us, DDT2000's DiagFailures wants exactly 26.
+    assert_eq!(id["reply_len"], 24);
+    assert_eq!(id["ddt2000_diagfailures_accepts"], false);
+    j.assert_no_writes();
+    // Another software version: the only definition is still taken (MatchUnique).
+    let (r, _) = run(
+        autoident_ecu("9300"),
+        &["--json", "ident", "--xml", &xml("sirius_autoident.xml")],
+    );
+    assert_eq!(r.code, 0, "{}", r.stdout);
+    assert_eq!(r.event("ident")[0]["autoident"]["match"], "unique");
 }

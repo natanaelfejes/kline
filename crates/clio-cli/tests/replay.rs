@@ -38,7 +38,10 @@ fn capture_replays_offline_and_as_the_ecu() {
     );
     assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
     assert!(!r.opened, "replay needs no port");
-    let wake = &r.event("wake")[0];
+    // DDT2000 detection order: the (unanswered) fast init comes first, then the 5-baud init.
+    let wakes = r.event("wake");
+    assert_eq!(wakes[0]["kind"], "fast_init");
+    let wake = wakes.iter().find(|w| w["kind"] == "five_baud").unwrap();
     assert_eq!(
         (wake["kind"].as_str(), wake["hex"].as_str()),
         (Some("five_baud"), Some("7A"))
@@ -59,7 +62,8 @@ fn capture_replays_offline_and_as_the_ecu() {
         }
     }
     let reqs: Vec<&str> = ex.iter().map(|e| e["request"].as_str().unwrap()).collect();
-    assert_eq!(reqs, ["10A0", "21A9", "21AA", "21A9", "21AA", "82"]);
+    // "81" is the StartCommunication of the unanswered fast init.
+    assert_eq!(reqs, ["81", "10A0", "21A9", "21AA", "21A9", "21AA", "82"]);
 
     // 2. The capture is clio-sim replay format, and replaying it as the ECU reproduces the
     //    session exactly (any difference would be a ReplayMismatch and silence).

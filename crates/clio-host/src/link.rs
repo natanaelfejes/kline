@@ -19,7 +19,7 @@ use crate::{hex, hex_sp};
 /// `--variant` (docs/protocol.md "Init variants").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
 pub enum VariantArg {
-    /// Try single, multi, fast in the documented order; log which worked.
+    /// DDT2000's detection order (fast init, then plain 5-baud), then multi; log which worked.
     #[default]
     Auto,
     Single,
@@ -46,16 +46,17 @@ pub fn variant_label(v: InitVariant) -> &'static str {
     }
 }
 
-/// Variants to try for `cfg`, in the order of docs/protocol.md: SingleEcu, MultiEcu, FastInit
-/// for a KWP 5-baud ECU; variants that would run the identical init are skipped (MultiEcu
-/// without `Multipoint`, anything but SingleEcu for ISO8, only fast init for a fast-init ECU).
+/// Variants to try for `cfg`. Auto: DDT2000's detection order for 0x7A / 0x26
+/// ([`clio_core::retry::DDT2000_DETECTION_ORDER`]: FastInit, then SingleEcu), then our MultiEcu
+/// fallback. Variants that would run the identical init are skipped (MultiEcu without
+/// `Multipoint`, only SingleEcu for ISO8, only fast init for a fast-init ECU).
 pub fn variants(cfg: &LinkConfig, arg: VariantArg) -> Vec<InitVariant> {
     let all = match arg {
-        VariantArg::Auto => vec![
-            InitVariant::SingleEcu,
-            InitVariant::MultiEcu,
-            InitVariant::FastInit,
-        ],
+        VariantArg::Auto => {
+            let mut v = clio_core::retry::DDT2000_DETECTION_ORDER.to_vec();
+            v.push(InitVariant::MultiEcu);
+            v
+        }
         VariantArg::Single => vec![InitVariant::SingleEcu],
         VariantArg::Multi => vec![InitVariant::MultiEcu],
         VariantArg::Fast => vec![InitVariant::FastInit],
@@ -66,6 +67,10 @@ pub fn variants(cfg: &LinkConfig, arg: VariantArg) -> Vec<InitVariant> {
     if matches!(cfg.timing.init, InitKind::KwpFast { .. }) {
         // A fast-init definition: every variant runs the same fast init; call it that.
         return vec![InitVariant::FastInit];
+    }
+    if cfg.timing.init == InitKind::Iso8FiveBaud {
+        // ISO8 (Safir) has no fast init and no Multipoint.
+        return vec![InitVariant::SingleEcu];
     }
     let mut seen: Vec<(InitKind, u8)> = Vec::new();
     all.into_iter()
@@ -307,6 +312,32 @@ impl Link {
         }
     }
 
+    /// Send a Tier 0 request; on NRC 0x21 / 0x23 wait and send it again as `policy` says
+    /// (DDT2000 RequestByteWithRetry). Returns the last outcome and the number of tries.
+    pub fn request_retrying(
+        &mut self,
+        s: &mut Session,
+        payload: &[u8],
+        policy: &clio_core::RetryPolicy,
+    ) -> Result<(SessionOutcome, u8), ExchangeError> {
+        let mut tries = 1u8;
+        loop {
+            let o = self.request(s, payload)?;
+            match &o {
+                SessionOutcome::Reply(Reply::Negative { nrc, .. }) => {
+                    match policy.nrc_retry_ms(*nrc, tries) {
+                        Some(ms) => {
+                            self.sleep_ms(ms);
+                            tries += 1;
+                        }
+                        None => return Ok((o, tries)),
+                    }
+                }
+                _ => return Ok((o, tries)),
+            }
+        }
+    }
+
     /// Send a Tier 0 request.
     pub fn request(
         &mut self,
@@ -344,6 +375,8 @@ impl Link {
 #[derive(Debug, Clone)]
 pub struct Attempt {
     pub variant: InitVariant,
+    /// 1-based init round.
+    pub round: u8,
     pub address_byte: Option<u8>,
     pub error: Option<String>,
 }
@@ -353,6 +386,7 @@ impl Attempt {
         json!({
             "event": "init_attempt",
             "variant": variant_label(self.variant),
+            "round": self.round,
             "address_byte": self.address_byte.map(|b| format!("{b:02X}")),
             "ok": self.error.is_none(),
             "error": self.error,
@@ -373,15 +407,27 @@ pub struct Connected {
     pub kind: InitKind,
 }
 
-/// Try `variants` in order until one init succeeds; `on_attempt` sees each attempt as it ends.
+/// Try `variants` in order until one init succeeds, up to `policy.init_attempts` rounds with
+/// `policy.init_retry_ms` between rounds (DDT2000 "Init retry n/3"); `on_attempt` sees each
+/// attempt as it ends.
 pub fn connect(
     link: &mut Link,
     base: &LinkConfig,
     variants: &[InitVariant],
+    policy: &clio_core::RetryPolicy,
     on_attempt: &mut dyn FnMut(&Attempt),
 ) -> Result<(Session, Connected), CliError> {
     let mut attempts = Vec::new();
-    for &v in variants {
+    let rounds = policy.init_attempts.max(1);
+    let schedule: Vec<(u8, InitVariant)> = (1..=rounds)
+        .flat_map(|r| variants.iter().map(move |&v| (r, v)))
+        .collect();
+    let mut last_round = 1;
+    for (round, v) in schedule {
+        if round != last_round {
+            last_round = round;
+            link.sleep_ms(policy.init_retry_ms);
+        }
         let mut cfg = base.clone();
         cfg.variant = v;
         let address_byte = (!matches!(cfg.init_kind(), InitKind::KwpFast { .. }))
@@ -389,6 +435,7 @@ pub fn connect(
         let r = link.init(&cfg).map_err(CliError::io)?;
         let a = Attempt {
             variant: v,
+            round,
             address_byte,
             error: r.as_ref().err().map(|e| e.to_string()),
         };

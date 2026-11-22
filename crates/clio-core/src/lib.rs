@@ -20,6 +20,7 @@ mod exchange;
 pub mod frame;
 pub mod init;
 pub mod io;
+pub mod retry;
 pub mod safety;
 pub mod scan;
 mod seq;
@@ -137,4 +138,5 @@ pub use error::LinkError;
 )]
 pub mod security_regressions {}
 pub use io::{Action, Event, Step};
+pub use retry::{RetryPolicy, TesterPresentMode};
 pub use timing::{InitKind, InitVariant, KTiming, LinkConfig};

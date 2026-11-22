@@ -449,13 +449,64 @@ fn safir_iso8_session() {
 }
 
 #[test]
-fn length_byte_framing_when_kw1_requires_it() {
-    // KW1 0xC2 (bit 0 clear, not 0xD0): KWP length goes in a separate byte.
-    let cfg = sirius_cfg();
-    let mut s = Session::new(open(&cfg, 0xC2, 0x8F), 0);
+fn length_byte_framing_when_kw1_requires_it_after_fast_init_only() {
+    // RE: KWP2000Diag4 0x2305a370 (D16): the KW1 rule runs on the fast-init branch only.
+    // Fast init, KW1 0xC2 (bit 0 clear, not 0xD0): KWP length goes in a separate byte.
+    let fast = LinkConfig::new(
+        0x7A,
+        KTiming {
+            init: InitKind::KwpFast { multipoint: false },
+            ..KTiming::default()
+        },
+    );
+    let mut s = Session::new(open(&fast, 0xC2, 0x8F), 0);
     let req = [0x80, 0x7A, 0xF1, 0x02, 0x21, 0xA0, 0xAE];
     assert_eq!(s.request(&[0x21, 0xA0], 0).unwrap(), flush());
     assert_eq!(act(s.on_event(done(), 0)), write(&req, 0));
+}
+
+#[test]
+fn five_baud_keeps_length_in_format_whatever_kw1_says() {
+    // Same KW1 0xC2 after a 5-baud init: DDT2000 only fetches the key bytes, the length stays
+    // in the format byte.
+    let mut s = Session::new(open(&sirius_cfg(), 0xC2, 0x8F), 0);
+    assert_eq!(s.request(&[0x21, 0xA0], 0).unwrap(), flush());
+    assert_eq!(act(s.on_event(done(), 0)), write(&REQ_21A0, 0));
+}
+
+#[test]
+fn periodic_tester_present_every_2000_ms_with_required_reply() {
+    let mut cfg = sirius_cfg();
+    cfg.tester_present_mode = clio_core::TesterPresentMode::DDT2000_PERIODIC;
+    let mut s = Session::new(open(&cfg, 0xD0, 0x8F), 0);
+    // Not due at once (unlike the idle rule after a 5-baud init); due 2000 ms after the last TP,
+    // even though a request ran in between.
+    assert!(!s.tester_present_due(0));
+    let first = s.request(&[0x21, 0xA0], 0).unwrap();
+    let mut script = vec![
+        (flush(), done()),
+        (write(&REQ_21A0, 0), done()),
+        (read(6, 300), ok(&REQ_21A0)),
+    ];
+    script.extend(reply_reads(&from_ecu(&[0x61, 0xA0])));
+    assert!(matches!(run(&mut s, first, &script, 1500), Step::Done(_)));
+    assert!(!s.tester_present_due(1999));
+    assert!(s.tester_present_due(2000));
+    // The reply is required: silence fails the exchange.
+    let first = s.tester_present(2000).unwrap();
+    let tp = [0x81, 0x7A, 0xF1, 0x3E, 0x2A];
+    let script = vec![
+        (flush(), done()),
+        (write(&tp, 0), done()),
+        (read(5, 300), ok(&tp)),
+        (read(1, 300), timeout(&[])),
+    ];
+    assert!(matches!(
+        run(&mut s, first, &script, 2300),
+        Step::Failed(SessionError::Link(LinkError::NoReply))
+    ));
+    assert!(!s.tester_present_due(4299));
+    assert!(s.tester_present_due(4300));
 }
 
 #[test]

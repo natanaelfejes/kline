@@ -74,7 +74,7 @@ impl GlobalArgs {
     }
 }
 
-#[derive(Debug, Clone, Default, Args)]
+#[derive(Debug, Clone, Args)]
 pub struct LinkArgs {
     #[command(flatten)]
     pub ecu: EcuArgs,
@@ -84,9 +84,42 @@ pub struct LinkArgs {
     /// Diagnostic session to open after the init.
     #[arg(long, value_enum, default_value_t = SessionArg::Auto)]
     pub session: SessionArg,
+    /// Init rounds over all variants (DDT2000: 3, 500 ms apart).
+    #[arg(long, default_value_t = clio_core::RetryPolicy::default().init_attempts)]
+    pub init_attempts: u8,
+    /// Tries of a request answered with NRC 21/23 (DDT2000 identification: 10; 200/500 ms).
+    #[arg(long, default_value_t = clio_core::RetryPolicy::default().nrc_tries)]
+    pub nrc_tries: u8,
+    /// Send TesterPresent every 2000 ms with a required reply (DDT2000 screen option) instead of
+    /// after 3000 ms of idle line.
+    #[arg(long)]
+    pub periodic_tester_present: bool,
+}
+
+impl Default for LinkArgs {
+    fn default() -> Self {
+        let p = clio_core::RetryPolicy::default();
+        LinkArgs {
+            ecu: EcuArgs::default(),
+            variant: VariantArg::Auto,
+            session: SessionArg::Auto,
+            init_attempts: p.init_attempts,
+            nrc_tries: p.nrc_tries,
+            periodic_tester_present: false,
+        }
+    }
 }
 
 impl LinkArgs {
+    /// The retry policy these options select (DDT2000 defaults otherwise).
+    pub fn retry_policy(&self) -> clio_core::RetryPolicy {
+        clio_core::RetryPolicy {
+            init_attempts: self.init_attempts.max(1),
+            nrc_tries: self.nrc_tries.max(1),
+            ..clio_core::RetryPolicy::default()
+        }
+    }
+
     pub fn to_cli(&self) -> Vec<String> {
         let mut v = self.ecu.to_cli();
         if self.variant != VariantArg::Auto {
@@ -280,7 +313,11 @@ pub fn open_session(
     args: &LinkArgs,
     command: &str,
 ) -> Result<Open, CliError> {
-    let cfg = ecu.link_config()?;
+    let mut cfg = ecu.link_config()?;
+    if args.periodic_tester_present {
+        cfg.tester_present_mode = clio_core::TesterPresentMode::DDT2000_PERIODIC;
+    }
+    let policy = args.retry_policy();
     let spec = ctx.port_spec()?;
     let tracer = if ctx.g.trace {
         Tracer::to(ctx.env.stderr.clone())
@@ -307,12 +344,21 @@ pub fn open_session(
     let mut link = Link::new(t, tracer, Some(cap));
     let variants = link::variants(&cfg, args.variant);
     let out = ctx.out.clone();
-    let (mut session, connected) = link::connect(&mut link, &cfg, &variants, &mut |a| {
+    let (mut session, connected) = link::connect(&mut link, &cfg, &variants, &policy, &mut |a| {
         out.emit(
             a.to_json(),
             format!(
-                "init {:<6} {}: {}",
+                "init {:<6} {}{}: {}",
                 link::variant_label(a.variant),
+                if a.round > 1 {
+                    format!(
+                        "retry {}/{} ",
+                        a.round - 1,
+                        policy.init_attempts.saturating_sub(1)
+                    )
+                } else {
+                    String::new()
+                },
                 a.address_byte
                     .map(|b| format!("byte {b:02X}"))
                     .unwrap_or_else(|| "fast init".into()),
@@ -530,7 +576,38 @@ pub fn read(ctx: &mut Ctx, a: &ReadArgs) -> Result<(), CliError> {
     })
 }
 
+/// DiagFailures' generic identification wants exactly this many bytes for `21 80`
+/// (RE: DiagFailures 0x2403ee70, "need 26 bytes, receive n"); Sirius 32 declares MinBytes 24.
+pub const DIAGFAILURES_IDENT_BYTES: usize = 26;
+
+/// Decode `reply` with `def`; a reply shorter than MinBytes is decoded anyway (items past the
+/// end are `None`) and flagged, since one MinBytes covers many software versions.
+type Decoded = Vec<(
+    String,
+    Result<Vec<clio_spec::DecodedItem>, clio_spec::SpecError>,
+)>;
+
+fn decode_ident(def: &clio_spec::EcuDef, p: &[u8], reply: &[u8]) -> (Decoded, bool) {
+    let checked = defs::decode_reply(def, p, reply);
+    let too_short = !checked.is_empty()
+        && checked
+            .iter()
+            .all(|(_, r)| matches!(r, Err(clio_spec::SpecError::TooShort { .. })));
+    if !too_short {
+        return (checked, false);
+    }
+    let lenient = defs::requests_for(def, p)
+        .into_iter()
+        .map(|r| (r.name.clone(), r.decode_checked_allow_short(def, reply)))
+        .collect();
+    (lenient, true)
+}
+
+/// `ident`: `21 80` with DDT2000's NRC 21/23 retry, then the definition: DDT2000's AutoIdent
+/// ladder when the candidates have `<AutoIdents>` and the reply has the Renault layout, else the
+/// first candidate whose key bytes match and whose identification requests decode.
 pub fn ident(ctx: &mut Ctx, a: &LinkArgs) -> Result<(), CliError> {
+    let policy = a.retry_policy();
     with_session(ctx, a, "ident", |ctx, o| {
         let t = o.target();
         let reqs = defs::ident_requests(o.ecu.def(), &t);
@@ -549,36 +626,67 @@ pub fn ident(ctx: &mut Ctx, a: &LinkArgs) -> Result<(), CliError> {
             ));
         }
         for p in payloads {
-            let r = o.link.request(&mut o.session, &p).map_err(|e| e.to_cli())?;
+            let (r, tries) = o
+                .link
+                .request_retrying(&mut o.session, &p, &policy)
+                .map_err(|e| e.to_cli())?;
             let reply = link::positive(&r)?.to_vec();
-            let choice = defs::choose_by_ident(&o.ecu, o.connected.keywords, &p, &reply);
-            let chosen = choice
-                .chosen
-                .map(|i| o.ecu.defs[i].path.display().to_string());
-            let decoded = choice
-                .chosen
-                .map(|i| defs::decode_reply(&o.ecu.defs[i].def, &p, &reply))
+            let fallback = defs::choose_by_ident(&o.ecu, o.connected.keywords, &p, &reply);
+            let parsed = (p == safety::IDENTIFICATION_READ)
+                .then(|| clio_spec::Ident::from_renault_2180(&reply))
+                .flatten();
+            let candidates: Vec<&clio_spec::EcuDef> = o.ecu.defs.iter().map(|d| &d.def).collect();
+            let has_autoidents = candidates.iter().any(|d| !d.auto_idents.is_empty());
+            let auto = parsed
+                .as_ref()
+                .filter(|_| has_autoidents)
+                .and_then(|id| clio_spec::best_match(&candidates, id));
+            let (chosen, method) = match auto {
+                Some((i, level)) => (
+                    Some(i),
+                    format!("DDT2000 AutoIdent: {}", serde_json::to_value(level).unwrap_or_default().as_str().unwrap_or("?")),
+                ),
+                None => (
+                    fallback.chosen,
+                    "first candidate whose key bytes match and whose identification requests decode (checked; AutoIdent not applicable)".to_string(),
+                ),
+            };
+            let (decoded, short) = chosen
+                .map(|i| decode_ident(&o.ecu.defs[i].def, &p, &reply))
                 .unwrap_or_default();
+            let chosen_path = chosen.map(|i| o.ecu.defs[i].path.display().to_string());
+            let diagfailures_ok = reply.len() == DIAGFAILURES_IDENT_BYTES;
             ctx.out.emit(
                 json!({"event": "ident", "request": hex(&p), "reply": hex(&reply),
-                       "chosen": chosen, "ambiguous": choice.ambiguous,
-                       "candidates": choice.results,
-                       "method": "first candidate whose key bytes match and whose identification requests decode (checked); AutoIdent not used"}),
+                       "tries": tries, "chosen": chosen_path, "ambiguous": auto.is_none() && fallback.ambiguous,
+                       "method": method,
+                       "autoident": {"ident": parsed, "match": auto.map(|(_, l)| l)},
+                       "reply_len": reply.len(), "shorter_than_min_bytes": short,
+                       "ddt2000_diagfailures_accepts": diagfailures_ok,
+                       "candidates": fallback.results,
+                       "decoded": defs::decoded_json(&decoded)}),
                 format!(
-                    "{} -> {}\ndefinition: {}{}\n{}",
+                    "{} -> {}{}\ndefinition: {} ({method}){}{}{}\n{}",
                     hex_sp(&p),
                     hex_sp(&reply),
-                    chosen.as_deref().unwrap_or("NONE fits"),
-                    if choice.ambiguous {
+                    if tries > 1 { format!(" (after {tries} tries)") } else { String::new() },
+                    chosen_path.as_deref().unwrap_or("NONE fits"),
+                    if auto.is_none() && fallback.ambiguous {
                         " (AMBIGUOUS: several candidates decode; check before any config write)"
                     } else {
                         ""
+                    },
+                    if short { "\nnote: reply shorter than the definition's MinBytes; decoded anyway" } else { "" },
+                    if p == safety::IDENTIFICATION_READ && !diagfailures_ok {
+                        format!("\nnote: {} bytes; DDT2000's DiagFailures identification needs exactly {DIAGFAILURES_IDENT_BYTES}", reply.len())
+                    } else {
+                        String::new()
                     },
                     defs::decoded_human(&decoded)
                 )
                 .trim_end(),
             );
-            if choice.chosen.is_none() {
+            if chosen.is_none() {
                 return Err(CliError::new(
                     exit::DECODE,
                     "decode",
@@ -607,9 +715,6 @@ fn idle(ctx: &Ctx, o: &mut Open, ms: u64) -> Result<bool, CliError> {
     }
 }
 
-/// Consecutive failed cycles after which `live` gives up (ours).
-const LIVE_MAX_FAILED_CYCLES: u32 = 3;
-
 pub fn live(ctx: &mut Ctx, a: &LiveArgs) -> Result<(), CliError> {
     let ecu = Ecu::resolve(&a.link.ecu, &ctx.g.defs_dir())?;
     let frames: Vec<defs::Resolved> = a
@@ -631,17 +736,22 @@ pub fn live(ctx: &mut Ctx, a: &LiveArgs) -> Result<(), CliError> {
         ));
     }
     let period = (1000.0 / a.rate) as u64;
+    let policy = a.link.retry_policy();
     with_session(ctx, &a.link, "live", |ctx, o| {
         let mut cycle = 0u64;
-        let mut failed = 0u32;
+        // DDT2000 screen refresh (RE: DdtDiagScrXml 0x5204ce50): only a cycle in which EVERY
+        // request failed counts; it is retried after 400 ms, at most 3 times, then "Fatal error,
+        // No communication with ECU".
+        let mut retries = 0u8;
         while a.count.is_none_or(|c| cycle < c) && !ctx.stopped() {
             let start = o.link.now_ms();
-            let mut ok = true;
+            let mut any_ok = false;
             for f in &frames {
                 let t_ms = o.link.now_ms();
                 match o.link.request(&mut o.session, &f.payload) {
                     Ok(r) => match link::positive(&r) {
                         Ok(reply) => {
+                            any_ok = true;
                             let decoded = defs::decode_reply(o.ecu.def(), &f.payload, reply);
                             ctx.out.emit(
                                 json!({"event": "live", "cycle": cycle, "t_ms": t_ms,
@@ -655,7 +765,6 @@ pub fn live(ctx: &mut Ctx, a: &LiveArgs) -> Result<(), CliError> {
                             );
                         }
                         Err(e) => {
-                            ok = false;
                             ctx.out.emit(
                                 json!({"event": "live_error", "cycle": cycle, "request": hex(&f.payload), "message": e.message}),
                                 format!("#{cycle} {}: {}", hex_sp(&f.payload), e.message),
@@ -663,7 +772,6 @@ pub fn live(ctx: &mut Ctx, a: &LiveArgs) -> Result<(), CliError> {
                         }
                     },
                     Err(e) if e.is_link() => {
-                        ok = false;
                         let m = e.to_cli().message;
                         ctx.out.emit(
                             json!({"event": "live_error", "cycle": cycle, "request": hex(&f.payload), "message": m}),
@@ -673,15 +781,30 @@ pub fn live(ctx: &mut Ctx, a: &LiveArgs) -> Result<(), CliError> {
                     Err(e) => return Err(e.to_cli()),
                 }
             }
-            failed = if ok { 0 } else { failed + 1 };
-            if failed >= LIVE_MAX_FAILED_CYCLES {
-                return Err(CliError::new(
-                    exit::COMM,
-                    "comm",
-                    format!("{failed} cycles in a row failed; stopping"),
-                ));
-            }
             cycle += 1;
+            if !any_ok {
+                if retries >= policy.cycle_retries {
+                    return Err(CliError::new(
+                        exit::COMM,
+                        "comm",
+                        format!(
+                            "no communication with the ECU: every request failed in {} cycles in a row; stopping",
+                            retries + 1
+                        ),
+                    ));
+                }
+                retries += 1;
+                ctx.out.emit(
+                    json!({"event": "live_retry", "retry": retries, "of": policy.cycle_retries,
+                           "wait_ms": policy.cycle_retry_ms}),
+                    format!("read data: retry {retries}/{}", policy.cycle_retries),
+                );
+                if !idle(ctx, o, u64::from(policy.cycle_retry_ms))? {
+                    break;
+                }
+                continue;
+            }
+            retries = 0;
             if a.count.is_none_or(|c| cycle < c) {
                 let next = start + period;
                 let now = o.link.now_ms();
