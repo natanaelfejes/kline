@@ -166,6 +166,13 @@ pub struct LiveArgs {
     /// Stop after this many cycles (default: until Ctrl-C).
     #[arg(long)]
     pub count: Option<u64>,
+    /// Show only these decoded items (comma-separated names, case-insensitive), also in JSON.
+    #[arg(long, value_name = "NAME[,NAME..]")]
+    pub items: Option<String>,
+    /// One line per cycle: the --items values, or without --items the values that changed
+    /// since the previous cycle (all of them in the first). Human output only.
+    #[arg(long)]
+    pub compact: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -1297,10 +1304,55 @@ pub fn live(ctx: &mut Ctx, a: &LiveArgs) -> Result<(), CliError> {
             "--rate must be in (0, 50] cycles per second",
         ));
     }
+    let selected: Option<Vec<String>> = a.items.as_ref().map(|s| {
+        s.split(',')
+            .map(|n| n.trim().to_lowercase())
+            .filter(|n| !n.is_empty())
+            .collect()
+    });
+    if let Some(sel) = &selected {
+        let known: Vec<&str> = frames
+            .iter()
+            .flat_map(|f| defs::requests_for(ecu.def(), &f.payload))
+            .flat_map(|r| r.received_items.iter().map(|i| i.name.as_str()))
+            .collect();
+        let unknown: Vec<&String> = sel
+            .iter()
+            .filter(|n| !known.iter().any(|k| k.trim().to_lowercase() == **n))
+            .collect();
+        if sel.is_empty() || !unknown.is_empty() {
+            return Err(CliError::definition(format!(
+                "--items {:?}: no such item in the --frames requests (they have: {})",
+                a.items.as_deref().unwrap_or(""),
+                known.join(", ")
+            )));
+        }
+    }
+    let keep = |decoded: Decoded| -> Decoded {
+        let Some(sel) = &selected else {
+            return decoded;
+        };
+        decoded
+            .into_iter()
+            .map(|(n, r)| {
+                (
+                    n,
+                    r.map(|items| {
+                        items
+                            .into_iter()
+                            .filter(|i| sel.contains(&i.name.trim().to_lowercase()))
+                            .collect()
+                    }),
+                )
+            })
+            .collect()
+    };
     let period = (1000.0 / a.rate) as u64;
     let policy = a.link.retry_policy();
     with_session(ctx, &a.link, "live", |ctx, o| {
         definition_choice_notice(ctx, o);
+        // --compact: the last shown text of every item (to print only what changed).
+        let mut last: std::collections::HashMap<String, String> = Default::default();
         let mut cycle = 0u64;
         // DDT2000 screen refresh (RE: DdtDiagScrXml 0x5204ce50): only a cycle in which EVERY
         // request failed counts; it is retried after 400 ms, at most 3 times, then "Fatal error,
@@ -1313,13 +1365,36 @@ pub fn live(ctx: &mut Ctx, a: &LiveArgs) -> Result<(), CliError> {
         while a.count.is_none_or(|c| cycle < c) && !ctx.stopped() {
             let start = o.link.now_ms();
             let mut any_ok = false;
+            let mut line: Vec<String> = Vec::new();
             for f in &frames {
                 let t_ms = o.link.now_ms();
                 match o.link.request(&mut o.session, &f.payload) {
                     Ok(r) => match link::positive(&r) {
                         Ok(reply) => {
                             any_ok = true;
-                            let decoded = defs::decode_reply(o.ecu.def(), &f.payload, reply);
+                            let decoded = keep(defs::decode_reply(o.ecu.def(), &f.payload, reply));
+                            if a.compact {
+                                for i in decoded
+                                    .iter()
+                                    .filter_map(|(_, r)| r.as_ref().ok())
+                                    .flatten()
+                                {
+                                    let mut t = format!(
+                                        "{}={}",
+                                        i.name.trim(),
+                                        i.display.as_deref().unwrap_or("-")
+                                    );
+                                    if let Some(u) = i.unit.as_deref().filter(|u| !u.is_empty()) {
+                                        t.push(' ');
+                                        t.push_str(u);
+                                    }
+                                    let changed =
+                                        last.insert(i.name.clone(), t.clone()).as_ref() != Some(&t);
+                                    if changed || selected.is_some() {
+                                        line.push(t);
+                                    }
+                                }
+                            }
                             let (alts, alt_human) = alternatives(o, &f.payload, reply);
                             let mut j = json!({"event": "live", "cycle": cycle, "t_ms": t_ms,
                                        "request": hex(&f.payload), "reply": hex(reply),
@@ -1327,14 +1402,24 @@ pub fn live(ctx: &mut Ctx, a: &LiveArgs) -> Result<(), CliError> {
                             if o.ecu.defs.len() > 1 {
                                 j["alternatives"] = json!(alts);
                             }
+                            // With --items, a frame without a selected item prints nothing.
+                            let shown = selected.is_none()
+                                || decoded
+                                    .iter()
+                                    .any(|(_, r)| r.as_ref().map_or(true, |v| !v.is_empty()));
                             ctx.out.emit(
                                 j,
-                                format!(
-                                    "#{cycle} t={t_ms} ms {}\n{}\n{alt_human}",
-                                    hex_sp(&f.payload),
-                                    defs::decoded_human(&decoded)
-                                )
-                                .trim_end(),
+                                if a.compact || !shown {
+                                    String::new()
+                                } else {
+                                    format!(
+                                        "#{cycle} t={t_ms} ms {}\n{}\n{alt_human}",
+                                        hex_sp(&f.payload),
+                                        defs::decoded_human(&decoded)
+                                    )
+                                    .trim_end()
+                                    .to_string()
+                                },
                             );
                         }
                         Err(e) => {
@@ -1362,6 +1447,16 @@ pub fn live(ctx: &mut Ctx, a: &LiveArgs) -> Result<(), CliError> {
                     }
                     Err(e) => return Err(e.to_cli()),
                 }
+            }
+            if a.compact && any_ok {
+                ctx.out.human(format!(
+                    "#{cycle} t={start} ms {}",
+                    if line.is_empty() {
+                        "(no change)".to_string()
+                    } else {
+                        line.join("; ")
+                    }
+                ));
             }
             cycle += 1;
             if !any_ok {

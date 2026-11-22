@@ -1790,3 +1790,64 @@ fn ctrl_c_in_live_is_reported_with_the_stop() {
         "{s}"
     );
 }
+
+#[test]
+fn live_items_filter_and_compact_lines() {
+    let sx = xml("sirius_cli.xml");
+    let base = [
+        "live",
+        "--xml",
+        &sx,
+        "--frames",
+        "21A9,21AA",
+        "--count",
+        "2",
+        "--rate",
+        "10",
+    ];
+    let with = |extra: &[&str], json: bool| {
+        let mut v: Vec<&str> = Vec::new();
+        if json {
+            v.push("--json");
+        }
+        v.extend(base.iter().copied());
+        v.extend(extra.iter().copied());
+        run(sirius_ecu(), &v).0
+    };
+    let r = with(&["--items", "engine speed,Coolant temperature"], false);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stdout.contains("Engine speed") && r.stdout.contains("Coolant temperature"));
+    assert!(!r.stdout.contains("Battery voltage"), "{}", r.stdout);
+    let r = with(&["--items", "Engine speed"], true);
+    let live = r.event("live");
+    assert_eq!(items(&live[0]["decoded"][0]).len(), 1, "{}", r.stdout);
+    // 21AA has no selected item: its decoded list is empty, the reply is still there.
+    assert!(live[1]["decoded"][0]["items"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    // Compact: one line per cycle, changed values only (all of them in the first cycle).
+    let r = with(&["--compact"], false);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let lines: Vec<&str> = r.stdout.lines().filter(|l| l.starts_with('#')).collect();
+    assert_eq!(lines.len(), 2, "{}", r.stdout);
+    assert!(
+        lines[0].contains("Engine speed=850 rpm") && lines[0].contains("Coolant temperature=88"),
+        "{}",
+        lines[0]
+    );
+    assert!(lines[1].ends_with("(no change)"), "{}", lines[1]);
+    // Compact with --items: the selected values every cycle.
+    let r = with(&["--compact", "--items", "Engine speed"], false);
+    let lines: Vec<&str> = r.stdout.lines().filter(|l| l.starts_with('#')).collect();
+    assert_eq!(lines.len(), 2, "{}", r.stdout);
+    assert!(
+        lines.iter().all(|l| l.ends_with("Engine speed=850 rpm")),
+        "{lines:?}"
+    );
+    // Unknown item: exit 8 before the port is opened.
+    let r = with(&["--items", "Engine sped"], false);
+    assert_eq!(r.code, 8, "{}", r.stderr);
+    assert!(r.stderr.contains("Engine sped"), "{}", r.stderr);
+    assert!(!r.opened);
+}

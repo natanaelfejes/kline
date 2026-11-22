@@ -113,6 +113,13 @@ impl Out {
         }
     }
 
+    /// A stdout line for humans only (nothing with `--json`), recorded like [`Out::emit`].
+    pub fn human(&self, s: impl AsRef<str>) {
+        if !self.json {
+            self.emit(Value::Null, s);
+        }
+    }
+
     /// A note for humans on stderr (both modes; stdout stays pure JSON with `--json`).
     pub fn note(&self, s: impl AsRef<str>) {
         self.record.line(s.as_ref());
