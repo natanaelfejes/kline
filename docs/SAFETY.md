@@ -49,6 +49,14 @@ Default-deny, decided on exact payload bytes and the target of the init that act
   prerequisites (none of those is dropped).
 - **Protocol frames.** ISO8 `36` (keep-alive) and `3F` (stop), KWP `81`/`82`: sent only by the
   init machines and `Session::tester_present`/`stop`, never as requests.
+- **One send per approval.** An approved request is written exactly once. `exec --hold` keeps
+  the session open afterwards with TesterPresent only, `--watch` adds one Tier 0 read (checked
+  before the port is opened and again by kline-core); neither ever sends the approved request
+  again (final critique F01). If the reply is lost after the write, kline says that the request
+  WAS SENT and to read the state before repeating it (exit 13, F06).
+- **BMT actuators.** `31 out param count` stays Tier 1; on the lock motors (`A0`/`A1`) and the
+  window (`A2`/`A3`) count `FF` carries "count FF = permanent: lock/window motor may run until
+  stopped; use 1-3" (final critique F07, not forbidden).
 
 ## Rule 3: never touch the immobilizer or transponder
 

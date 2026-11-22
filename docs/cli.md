@@ -151,8 +151,8 @@ nothing.
 | `dtc [--show-clear]` | `<Failures Id="1">` (Sirius 32): reads the Tier 0 frames that carry `FailureFlag="1"` items of `<Devices>` and lists the set flags with their device (DDT2000 DiagFailures); otherwise the frames whose name says `panne`/`defaut`/`fault`/`dtc`, non-zero items; otherwise (ISO8 Safir: `Failures Id="0"`, which DDT2000 shows as no fault list) a `dtc_note` saying so and the non-zero fault-named items of its Tier 0 reads (Safir `33 50`/`33 51`/`33 52` "Panne presente ..."). Each frame and the summary say `N set (present: a, memorized: b)` (by item name; `, other: c` for the rest; just `N set` when no name says present or memorized). `--show-clear` adds the clear plan (what `kline clear-dtc` would send); JSON `dtc_summary` always has `clear_plan`, plus `present`/`memorized` | never clears |
 | `clear-dtc [--ddt2000-clear]` | Tier 1 clear: prints the exact bytes (default: `ClearDiagnosticInformation.*` if the definition has one, else the definition's own `14 ..` request; Sirius `14 00 00`) and what DDT2000's global clear would send (`14 FF 00` for the Sirius), then the `exec` approval | `kline` only; `--ddt2000-clear` sends DDT2000's choice |
 | `scan --range 21:B0-C5 [--interval MS]` | kline-core `ScanPlan`: `21`/`1A` only, >= 200 ms apart, stops after 3 missing replies or a security NRC (exit 12) | `kline` only; not offered by kline-agent |
-| `risk REQ` | tier and `RiskInfo` of a request, nothing sent | exit 7 when forbidden or refused by the name guard |
-| `exec REQ [--set ..] [--stop REQ [--stop-set ..]]` | ONE non-read request; `--stop` offers a second request afterwards (end of an actuator test) with its own `RiskInfo` and code | `kline` only, see below |
+| `risk REQ [--hold S --watch REQ]` | tier and `RiskInfo` of a request, nothing sent; for an allowed non-read also the exact `kline exec` command (`command:`, JSON `command`) with the given `--hold`/`--watch`; for the BMT remote learning without `--hold` it suggests `--hold 30 --watch 21A3` | exit 7 when forbidden, refused by the name guard, or `--watch` is not a read |
+| `exec REQ [--set ..] [--stop REQ [--stop-set ..]] [--hold S [--watch REQ [--watch-interval MS]]]` | ONE non-read request; `--stop` offers a second request afterwards (end of an actuator test) with its own `RiskInfo` and code; `--hold` keeps the session open after a positive reply, `--watch` reads one frame meanwhile | `kline` only, see below |
 | `replay FILE [--ecu/--xml]` | decodes a capture offline: wake-ups, each request with its replies (echo stripped, 0x78 sequences split), decoded with the definition if given | |
 | `prepare REQ` | `kline-agent` only: `RiskInfo` plus the exact `kline ... exec ...` command for a human | never sends |
 
@@ -175,6 +175,31 @@ stop when that code is typed. If it is not typed in time the stop is NOT sent (s
 the session then ends with StopCommunication, which on most ECUs also ends an output test
 (NOT VERIFIED on this car). One challenge per session at a time (kline-core), so the stop cannot
 be approved before the request is sent.
+
+`--hold SECONDS` (1 to 60; final critique F01): without it the session ends with
+StopCommunication a few ms after the reply, which would end a learning window the request
+opened (BMT `31C7000000`/`31C8000000`: about 10 s). With it, after a **positive** reply kline
+keeps the session open for SECONDS, sending only TesterPresent when the line has been idle for
+the definition's TesterPresent delay (3000 ms on the BMT), then Stop. `--watch REQ` (a Tier 0
+read, name or hex, e.g. `21A3`; anything else is refused before the port is opened, exit 7,
+and kline-core checks it again on every send) makes that read the only request while holding,
+every `--watch-interval` ms (default 500, at least the definition's P3 gap, else exit 2). The
+first read prints every item with the known flag meanings, later reads only the items that
+changed, e.g. `+2000 ms 21 A3  TIR RF RECU 0 -> 1  (1 = a remote frame was received)` (JSON
+`watch` with `changed`). A failed watch read is printed and the hold goes on. Ctrl-C or SIGTERM
+ends the hold early: Stop is sent and K released (`stopped by Ctrl-C, Stop sent`; a second
+Ctrl-C releases K at once). The approved request is sent exactly once: never again while
+holding, and after a negative or lost reply there is no hold at all. `--hold` cannot be
+combined with `--stop`. `kline risk ... --hold 30 --watch 21A3` prints the exact command.
+
+When the approved request **was written** to the line but its reply is lost, damaged or timed
+out (final critique F06), kline says so instead of a plain `no reply from ECU`:
+`the request 31 C7 00 00 00 WAS SENT to the ECU; its reply was not received correctly (no reply
+from ECU); do NOT repeat it blindly: first read the state (e.g. kline read --ecu bmt 21A3)`,
+exit 13 (JSON event `approved_reply_lost` with `request_sent: true`; in the capture's
+`.out.txt`). The ECU may have run it: read the state first. With `--stop` the stop is still
+offered. A request that never reached the line (wrong code, port error before the write) is
+not reported as sent.
 
 The code is an anti-accident gate: an automated agent that drives a pseudo-terminal can read and
 type it, and the owner permits that when he chooses. It is not a defence against such an agent.
@@ -226,6 +251,7 @@ third byte writes CALTERMI), so an unknown variant of a flagged read is not offe
 | 10 | reply does not decode with the definition |
 | 11 | capture/replay file problem |
 | 12 | scan stopped early (3 missing replies or a security NRC) |
+| 13 | an approved request WAS SENT but its reply was lost, damaged or timed out: read the state, do not repeat it blindly |
 
 ## Capture files
 
@@ -346,6 +372,34 @@ Mac; ignition ON, engine off; nothing else (DDT2000, another tester) on the line
     means it stopped by itself (3 missing replies or a security NRC): nothing happened, note it.
 11. Offline: `kline replay <capture>.jsonl --ecu sirius` should show the same values. Send the
     capture directory for the [protocol.md "Not verified"](protocol.md#not-verified-needs-the-car) list.
+
+## Remote learning on the car (BMT)
+
+Only after the reads above (step 8: `21 A1`, `21 A3` while pressing the remote) and when the
+owner decides to try it (record: `07-car-session/remote-pairing-plan.md` step 5). Ignition off
+(Technical Note), doors closed, remote 1 with a good battery in the hand, near the centre
+console. Each command shows its RiskInfo and a code; type the code only when ready to press the
+remote.
+
+1. `kline read --ecu bmt 21A3`: note `CODIRAPP1`, `CODIRAPP2`, `APPTIR`.
+2. Remote 1 (erases all remotes, opens the learning window):
+   `kline exec --ecu bmt 31C7000000 --hold 30 --watch 21A3`
+   - After `sent 31 C7 00 00 00: positive reply 71 C7 ...` and `holding the session for 30 s`,
+     press remote 1 once (within about 10 s; if nothing changes, press it once more).
+   - Success looks like `TIR RF RECU 0 -> 1`, `TIR RF VAL 0 -> 1` and `TIR RF OK 0 -> 1` lines
+     (frame received, valid, accepted), the doors lock and unlock, the red LED goes out;
+     `CODIRAPP1 0 -> 1` and `APPTIR` back to 0 are expected (inferred from the names, NOT
+     VERIFIED). `RECU` 1 but `VAL`/`OK` 0: the frame arrives but is not accepted. `RECU` stays
+     0: the BMT hears nothing (receiver, supply, TRF), learning will not help.
+   - Exit 13 (`WAS SENT ... do NOT repeat it blindly`): first `kline read --ecu bmt 21A3`,
+     then decide.
+   - `7F 31 ..` (exit 6): nothing to repeat, note the NRC and stop.
+3. Remote 2, only with remote 1 learned (`CODIRAPP1 1`, or a working remote 1):
+   `kline exec --ecu bmt 31C8000000 --hold 30 --watch 21A3`, press remote 2 when the hold
+   starts; success as above with `CODIRAPP2 0 -> 1`.
+4. Check: both remotes lock and unlock, also 10 s later; the key still starts the engine.
+
+`kline risk --ecu bmt 31C7000000` prints the same command (`command (remote learning: ...)`).
 
 ## Not verified (host and cable)
 
