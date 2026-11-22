@@ -158,21 +158,36 @@ a VM whose vCPU is descheduled): run `selftest` and close heavy programs if it s
 `KklLine` (the transport for the cable and the simulator pty) paces the wake-up patterns: a DTR
 or break change starts an edge chain, and every sleep in the chain ends at the previous sleep's
 deadline plus its length, never at "now" plus its length. A late wake-up therefore moves only
-its own edge; the next bits are back on the 200 ms grid, and TiniL/TWuP keep their length
-whatever the break ioctls cost. A flush, write or read ends the chain. Until 2026-11-22 the
-chain re-anchored on "now" after any sleep more than 50 ms late, which shifted every later bit
-by the stall.
+its own edge; the next bits are back on the 200 ms grid. A flush, write or read ends the chain,
+and so does the start of every init attempt. Until 2026-11-22 the chain re-anchored on "now"
+after any sleep more than 50 ms late, which shifted every later bit by the stall.
 
-During an init (`Link::init`) a guard checks every chain sleep: one that wakes up more than
-+-10 ms late (5-baud bits and the stop bit, ISO 9141-2) or +-1 ms late (the fast-init 1, 25 and
-25 ms sleeps, ISO 14230-2) means that bit or pulse is already outside its tolerance. The
-transport then releases K, raises DTR and fails the attempt with `init timing missed: a N ms
-wake-up sleep woke X us late (max Y us); attempt aborted, K line released`, instead of finishing
-a 5-baud address that an ECU could decode as another address. `connect` goes on with the next
-variant or round. The guard measures only our own sleep; how long the break call itself takes
-(USB, VM passthrough) is not part of it, so the Windows VM's break-call spread above is not
-turned into aborts. `kline selftest` drives its break edges without the guard: it measures and
-reports, it does not abort.
+Pacing keeps the edges on their grid; it does not make a pulse independent of the cost of the
+break calls. A pulse is the time between two deadlines plus the difference between the cost of
+its closing and its opening break call. The two break calls of TiniL are the same ioctl, so
+that difference is their jitter only: RX is drained (a `bytes_to_read` ioctl, a USB round trip
+on some drivers) at the chain's DTR edge, before the 1 ms pre-sleep, not inside the break-on
+edge (code review L9; a unit test checks that a 3 ms drain does not shorten TiniL).
+
+During an init (`Link::init`) a guard checks the sleeps whose lateness corrupts the wake-up:
+the 5-baud start and data bits (+-10 ms, ISO 9141-2) and the fast-init TiniL and TWuP (+-1 ms,
+ISO 14230-2). The idle before the init, the 1 ms before TiniL and the 5-baud stop-bit wait are
+not guarded: a late idle or pre-sleep only lengthens the idle line, a late stop-bit wait only
+delays the keyword read after a complete address. When a guarded sleep wakes up too late:
+
+- in a 5-baud address the transport holds K low through the remaining bit slots and the
+  stop-bit slot (until start + 10 bit times), so a receiver sampling at the bit centres sees a
+  low stop bit, a framing error, and never a valid byte. Releasing K at once would have sent a
+  different, valid address (0x7A cut after bit 2 reads as 0xFA, the Multipoint wake of the
+  Sirius). Then K is released and DTR raised;
+- in a fast init K is released at once and DTR raised; StartCommunication is not sent.
+
+The attempt fails with `init timing missed: a N ms wake-up sleep woke X us late (max Y us);
+attempt aborted, K line released`, and `connect` goes on with the next variant or round. The
+guard measures only our own sleep; how long the break call itself takes (USB, VM passthrough)
+is not part of it, so the Windows VM's break-call spread above is not turned into aborts.
+`kline selftest` drives its break edges without the guard: it measures and reports, it does not
+abort.
 
 ### GitHub macOS runner
 

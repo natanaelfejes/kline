@@ -176,10 +176,12 @@ const MAX_DRAIN: usize = 4096;
 /// at the previous sleep's deadline plus its length, never at "now" plus its length, so the
 /// 5-baud bits stay on the 200 ms grid (ISO 9141-2: 5 baud +-5 %) and TiniL/TWuP keep their
 /// length whatever the ioctls cost; lateness never adds up. A flush, write or read ends the
-/// chain. With the init guard on ([`Transport::set_init_guard`]), a chain sleep that wakes up
-/// more than [`wake_sleep_tolerance_us`] late means the bit or pulse is already wrong: the next
-/// call releases K, raises DTR and fails with [`InitTimingError`], so no corrupted address
-/// byte (which another ECU could take as its own) is sent.
+/// chain. With the init guard on ([`Transport::set_init_guard`]), a 5-baud start/data bit or a
+/// fast-init TiniL/TWuP sleep that wakes up more than [`wake_sleep_tolerance_us`] late means
+/// the bit or pulse is already wrong: the next call fails with [`InitTimingError`]. In a 5-baud
+/// address it first holds K low through the stop-bit slot (a framing error, so no other ECU can
+/// take a corrupted byte as its own address), then releases K and raises DTR. The idle, the
+/// 1 ms before TiniL and the stop-bit wait are not guarded: their lateness is harmless.
 pub struct KklLine<P: SerialIo, C: Clock> {
     port: P,
     clock: C,
@@ -193,6 +195,13 @@ pub struct KklLine<P: SerialIo, C: Clock> {
     guard: bool,
     /// A guarded chain sleep woke up too late; reported by the next call.
     fault: Option<InitTimingError>,
+    /// The chain started with DTR low: a 5-baud address byte (DTR high: fast init).
+    five_baud: bool,
+    /// Break edges since the chain's DTR edge (5-baud: 1 start bit, 2..=9 data bits, 10 the
+    /// release before the stop bit; fast init: 1 TiniL, 2 TWuP).
+    edges: u32,
+    /// Time (us) of the 5-baud start-bit edge.
+    frame_start_us: Option<u64>,
 }
 
 impl<P: SerialIo, C: Clock> KklLine<P, C> {
@@ -207,26 +216,58 @@ impl<P: SerialIo, C: Clock> KklLine<P, C> {
             pace_us: None,
             guard: false,
             fault: None,
+            five_baud: false,
+            edges: 0,
+            frame_start_us: None,
         }
     }
 
     fn end_chain(&mut self) {
         self.chain = false;
         self.pace_us = None;
+        self.edges = 0;
+        self.frame_start_us = None;
     }
 
-    /// Report a pending timing fault: release K, DTR high (idle), end the chain, fail.
+    /// Whether the sleep now starting times a slot whose lateness corrupts the wake-up: the
+    /// 5-baud start and data bits, fast-init TiniL and TWuP. Not the idle, the 1 ms before
+    /// TiniL or the 5-baud stop-bit wait, where lateness is harmless (code review L2).
+    fn guarded_slot(&self) -> bool {
+        (1..=9).contains(&self.edges)
+    }
+
+    /// Report a pending timing fault and fail. In a 5-baud address K is held low through the
+    /// remaining bit slots and the stop-bit slot (start + 10 bit times), so a receiver sees a
+    /// framing error and never a valid, different address byte (code review M1); then K is
+    /// released and DTR raised (idle), and the chain ends.
     fn check_fault(&mut self) -> io::Result<()> {
         let Some(f) = self.fault.take() else {
             return Ok(());
         };
+        let frame_end = self
+            .frame_start_us
+            .filter(|_| self.five_baud)
+            .map(|t0| t0 + 10 * u64::from(kline_core::timing::consts::FIVE_BAUD_BIT_MS) * 1000);
+        if let Some(end) = frame_end {
+            if !self.break_on {
+                let _ = self.port.set_break(true);
+                self.break_on = true;
+            }
+            self.clock.sleep_until_us(end);
+        }
         if self.break_on {
             let _ = self.port.set_break(false);
             self.break_on = false;
         }
         let _ = self.port.set_dtr(true);
         self.end_chain();
-        self.t(format!("  {f}; attempt aborted, K released, DTR high"));
+        if frame_end.is_some() {
+            self.t(format!(
+                "  {f}; attempt aborted, K held low through the stop bit (framing error), then released, DTR high"
+            ));
+        } else {
+            self.t(format!("  {f}; attempt aborted, K released, DTR high"));
+        }
         Err(io::Error::other(f))
     }
 
@@ -236,6 +277,19 @@ impl<P: SerialIo, C: Clock> KklLine<P, C> {
 
     fn t(&self, msg: impl AsRef<str>) {
         self.trace.line(self.clock.now_us(), msg);
+    }
+
+    /// Drop what RX holds (logged), so the break loopback check sees only later bytes.
+    fn discard_rx(&mut self) -> io::Result<()> {
+        let old = self.drain()?;
+        if !old.is_empty() {
+            self.t(format!(
+                "  rx before break discarded: {}",
+                crate::hex_sp(&old)
+            ));
+        }
+        self.loopback_rx.clear();
+        Ok(())
     }
 
     /// Read whatever is waiting, for the trace (and the loopback check).
@@ -273,13 +327,27 @@ impl<P: SerialIo, C: Clock> Transport for KklLine<P, C> {
         // it. The chain starts here, so an oversleep of that idle wait is not taken out of the
         // start bit or TiniL (Hydrogen final review). DTR goes high again only after the stop
         // bit, outside the paced 5-baud bits.
+        //
+        // RX is drained here, before the chain's first edge, not inside the break-on edge: the
+        // drain is an ioctl (a USB round trip on some drivers/VMs) that would make the on-edge
+        // slower than the off-edge and shorten TiniL by the difference (code review L9).
+        if !self.chain {
+            self.discard_rx()?;
+        }
         self.chain = true;
         self.pace_us = None;
+        self.five_baud = !on;
+        self.edges = 0;
+        self.frame_start_us = None;
         self.port.set_dtr(on)
     }
 
     fn set_init_guard(&mut self, on: bool) {
         self.guard = on;
+        // A new attempt (or its end) starts outside any chain: after a --strict-loopback
+        // failure the cleanup edges left one open, and the next attempt's idle wait must not
+        // be paced or guarded as a chain sleep (code review L1).
+        self.end_chain();
         if !on {
             self.fault = None;
         }
@@ -287,20 +355,21 @@ impl<P: SerialIo, C: Clock> Transport for KklLine<P, C> {
 
     fn set_break(&mut self, on: bool) -> io::Result<()> {
         self.check_fault()?;
-        self.chain = true;
         if on && !self.break_on {
-            // "Since the last set_break(true)": forget what came before the break.
-            let old = self.drain()?;
-            if !old.is_empty() {
-                self.t(format!(
-                    "  rx before break discarded: {}",
-                    crate::hex_sp(&old)
-                ));
+            // "Since the last set_break(true)": forget what came before the break. In an init
+            // the chain's DTR edge drained RX just before; outside a chain (selftest) drain now.
+            if !self.chain {
+                self.discard_rx()?;
             }
             self.loopback_rx.clear();
         }
+        self.chain = true;
         self.port.set_break(on)?;
         self.break_on = on;
+        self.edges += 1;
+        if self.five_baud && self.edges == 1 && on {
+            self.frame_start_us = Some(self.clock.now_us());
+        }
         Ok(())
     }
 
@@ -340,7 +409,7 @@ impl<P: SerialIo, C: Clock> Transport for KklLine<P, C> {
         self.pace_us = Some(target);
         let late = self.clock.now_us().saturating_sub(target);
         let max = wake_sleep_tolerance_us(ms);
-        if self.guard && late > max && self.fault.is_none() {
+        if self.guard && self.guarded_slot() && late > max && self.fault.is_none() {
             self.fault = Some(InitTimingError {
                 requested_ms: ms,
                 late_us: late,
@@ -758,6 +827,8 @@ mod tests {
         /// Sleeps so far, and (n, us): the n-th sleep (0-based) wakes up `us` late.
         sleeps: u32,
         oversleep_nth: Option<(u32, u64)>,
+        /// Cost of each `bytes_to_read` ioctl (us): a USB round trip on some drivers/VMs.
+        bytes_to_read_us: u64,
     }
 
     #[derive(Clone, Default)]
@@ -798,8 +869,10 @@ mod tests {
             Ok(())
         }
         fn bytes_to_read(&mut self) -> io::Result<usize> {
-            let s = self.0.borrow();
-            Ok(s.rx.iter().filter(|(t, _)| *t <= s.now_us).count())
+            let mut s = self.0.borrow_mut();
+            s.now_us += s.bytes_to_read_us;
+            let now = s.now_us;
+            Ok(s.rx.iter().filter(|(t, _)| *t <= now).count())
         }
         fn read_some(&mut self, buf: &mut [u8], timeout: Duration) -> io::Result<usize> {
             let mut s = self.0.borrow_mut();
@@ -979,7 +1052,8 @@ mod tests {
             (200, 11_000, 10_000)
         );
         let b = break_times(&m);
-        // Start, bits 0..2 (0x7A: 0 1 0), then the release; bit 3 was never sent.
+        // Start, bits 0..2 (0x7A: 0 1 0; bit 2 low, so K stays low through the stop-bit
+        // slot), then the release; bit 3 was never sent.
         assert_eq!(b.len(), 5, "{b:?}");
         assert!(!b.last().unwrap().0, "K released");
         assert!(matches!(
@@ -993,6 +1067,174 @@ mod tests {
         l.set_init_guard(true);
         m.0.borrow_mut().oversleep_nth = Some((3, 10_000));
         send_address(&mut l, 0x7A).unwrap();
+    }
+
+    /// What a 5-baud receiver decodes from the break edges (kline-sim's bus: ISO 9141 bit-centre
+    /// sampling): the address bytes it would take, and its rejections.
+    fn decoded_addresses(m: &Mock) -> (Vec<u8>, Vec<String>) {
+        use kline_sim::bus::{Bus, BusConfig, Out, Responder, Wake};
+        use std::sync::{Arc, Mutex};
+        struct Rec(Arc<Mutex<Vec<u8>>>);
+        impl Responder for Rec {
+            fn on_wake(&mut self, wake: Wake, _out: &mut Out) {
+                if let Wake::FiveBaud { byte, .. } = wake {
+                    self.0.lock().unwrap().push(byte);
+                }
+            }
+            fn on_byte(&mut self, _t: u64, _b: u8, _out: &mut Out) {}
+            fn next_timer(&self) -> Option<u64> {
+                None
+            }
+            fn on_timer(&mut self, _t: u64, _out: &mut Out) {}
+        }
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let journal = kline_sim::journal::Journal::new();
+        let mut bus = Bus::new(
+            Rec(got.clone()),
+            BusConfig::default(),
+            kline_sim::timing::Tolerance::lenient(),
+            journal.clone(),
+        );
+        // Offset so the first edge comes after the bus's idle start.
+        let off = 1_000;
+        let mut end = 0;
+        for (on, t) in break_times(m) {
+            end = t / 1000 + off;
+            bus.tester_break(on, end);
+        }
+        bus.advance(end + 5_000);
+        let rejections = journal
+            .violations()
+            .into_iter()
+            .map(|v| format!("{v:?}"))
+            .collect();
+        let bytes = got.lock().unwrap().clone();
+        (bytes, rejections)
+    }
+
+    #[test]
+    fn a_guarded_5_baud_abort_holds_k_low_through_the_stop_bit() {
+        // Code review M1: releasing K after a late bit would leave a valid byte on the line
+        // (0x7A cut after bit 2 reads as 0xFA). K stays low through the remaining bits and the
+        // stop-bit slot, so a receiver sees a framing error, then K is released.
+        for (nth, cut) in [
+            (3u32, "bit 2"),
+            (1, "bit 0"),
+            (8, "bit 7"),
+            (0, "start bit"),
+        ] {
+            let (mut l, m) = line(500);
+            l.set_init_guard(true);
+            m.0.borrow_mut().oversleep_nth = Some((nth, 11_000));
+            let e = send_address(&mut l, 0x7A).unwrap_err();
+            assert!(InitTimingError::find(&e).is_some(), "{cut}");
+            let b = break_times(&m);
+            let t0 = b[0].1;
+            let (on, t_low) = b[b.len() - 2];
+            assert!(on, "{cut}: K pulled low after the fault: {b:?}");
+            let (off, t_rel) = *b.last().unwrap();
+            assert!(!off, "{cut}: K released at the end");
+            assert!(
+                t_rel >= t0 + 2_000_000,
+                "{cut}: released at +{} us, before the end of the stop-bit slot",
+                t_rel - t0
+            );
+            assert!(
+                t_low < t0 + 1_800_000,
+                "{cut}: low before the stop-bit slot"
+            );
+            assert!(matches!(
+                m.0.borrow().calls.last(),
+                Some(Call::Dtr(true, _))
+            ));
+            let (bytes, rejections) = decoded_addresses(&m);
+            assert!(bytes.is_empty(), "{cut}: decoded {bytes:02X?}");
+            assert!(
+                rejections.iter().any(|r| r.contains("stop bit")),
+                "{cut}: {rejections:?}"
+            );
+        }
+        // Control: without a fault the receiver decodes 0x7A.
+        let (mut l, m) = line(500);
+        l.set_init_guard(true);
+        send_address(&mut l, 0x7A).unwrap();
+        assert_eq!(decoded_addresses(&m).0, vec![0x7A]);
+    }
+
+    #[test]
+    fn tinil_is_not_shortened_by_an_rx_drain_on_the_break_edge() {
+        // Code review L9: set_break(true) drained RX (a bytes_to_read ioctl) before the break
+        // ioctl, so the on-edge cost more than the off-edge and TiniL came out short by the
+        // difference. The drain happens at the chain's DTR edge instead.
+        let (mut l, m) = line(500);
+        m.0.borrow_mut().bytes_to_read_us = 3_000;
+        l.set_dtr(true).unwrap();
+        l.sleep_ms(1);
+        l.set_break(true).unwrap();
+        l.sleep_ms(25);
+        l.set_break(false).unwrap();
+        l.sleep_ms(25);
+        let b = break_times(&m);
+        let tinil = b[1].1 - b[0].1;
+        assert!((24_500..=25_500).contains(&tinil), "TiniL {tinil} us");
+        // RX bytes from before the init still do not count as the break loopback.
+        let (mut l, m) = line(500);
+        m.0.borrow_mut().rx.push_back((0, 0x55));
+        m.0.borrow_mut().now_us = 10;
+        l.set_dtr(false).unwrap();
+        l.set_break(true).unwrap();
+        l.sleep_ms(200);
+        assert!(!l.break_loopback_seen().unwrap());
+    }
+
+    #[test]
+    fn harmless_sleeps_are_not_guarded() {
+        // Code review L2: a late stop-bit wait (after a complete address) or a late 1 ms
+        // before TiniL does not abort the attempt.
+        let (mut l, m) = line(500);
+        l.set_init_guard(true);
+        // send_address sleeps: 0 start bit, 1..=8 data bits, 9 the stop-bit wait.
+        m.0.borrow_mut().oversleep_nth = Some((9, 50_000));
+        send_address(&mut l, 0x7A).unwrap();
+        l.flush_rx().unwrap();
+        let (mut l, m) = line(500);
+        l.set_init_guard(true);
+        m.0.borrow_mut().oversleep_nth = Some((0, 5_000));
+        l.set_dtr(true).unwrap();
+        l.sleep_ms(1);
+        l.set_break(true).unwrap();
+        l.sleep_ms(25);
+        l.set_break(false).unwrap();
+        l.sleep_ms(25);
+        l.write(&[0x81], 0).unwrap();
+        // TWuP stays guarded.
+        let (mut l, m) = line(500);
+        l.set_init_guard(true);
+        m.0.borrow_mut().oversleep_nth = Some((2, 1_500));
+        l.set_dtr(true).unwrap();
+        l.sleep_ms(1);
+        l.set_break(true).unwrap();
+        l.sleep_ms(25);
+        l.set_break(false).unwrap();
+        l.sleep_ms(25);
+        assert!(l.write(&[0x81], 0).is_err());
+    }
+
+    #[test]
+    fn after_a_strict_loopback_failure_the_next_idle_is_not_guarded() {
+        // Code review L1: the cleanup edges (break off, DTR high) left the chain open, so the
+        // next attempt's 300 ms idle was a guarded chain sleep with a 10 ms tolerance.
+        let (l, m) = line(500);
+        let mut link = crate::link::Link::new(Box::new(l), Tracer::off(), None);
+        let mut cfg = kline_core::LinkConfig::new(0x7A, kline_core::KTiming::default());
+        cfg.strict_break_loopback = true;
+        let r = link.init(&cfg).expect("not a transport error");
+        assert_eq!(r.unwrap_err(), kline_core::LinkError::KLineInactive);
+        // The next attempt's idle wakes 30 ms late; its start bit then has no loopback again.
+        let n = m.0.borrow().sleeps;
+        m.0.borrow_mut().oversleep_nth = Some((n, 30_000));
+        let r = link.init(&cfg).expect("not a transport error");
+        assert_eq!(r.unwrap_err(), kline_core::LinkError::KLineInactive);
     }
 
     #[test]

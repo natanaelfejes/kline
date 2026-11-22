@@ -58,9 +58,10 @@ pub enum LinkError {
     /// The driver fed an event that does not answer the last action, or fed a finished machine.
     #[error("event does not match the outstanding action")]
     UnexpectedEvent,
-    /// The host woke up from a wake-up sleep (5-baud bit, fast-init TiniL/TWuP) so late that the
-    /// pattern was already outside its tolerance; the transport released K and aborted the
-    /// attempt instead of sending a corrupted address (ours, no DDT2000 status).
+    /// The host woke up from a wake-up sleep (5-baud start/data bit, fast-init TiniL/TWuP) so
+    /// late that the pattern was already outside its tolerance; the transport aborted the
+    /// attempt (ours, no DDT2000 status). In a 5-baud address it held K low through the
+    /// stop-bit slot first, so no receiver decodes a valid, different address byte.
     #[error(
         "init timing missed: a {requested_ms} ms wake-up sleep woke {late_us} us late \
          (max {max_late_us} us); attempt aborted, K line released"
