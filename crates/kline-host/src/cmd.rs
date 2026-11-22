@@ -264,9 +264,14 @@ impl<'a> Ctx<'a> {
     /// Report the result and return the exit code.
     pub fn finish(&self, r: Result<(), CliError>) -> u8 {
         let code = self.report(r);
-        if !self.out.json {
+        let done = format!("done (exit {code})");
+        if self.out.json {
+            // `<capture>.out.txt` ends with it in both modes (code review L4); stdout stays
+            // pure JSON and stderr gets no extra line.
+            self.out.record.line(&done);
+        } else {
             // The last line of every human run, so a terminal log shows how it ended.
-            self.out.note(format!("done (exit {code})"));
+            self.out.note(done);
         }
         code
     }
@@ -276,6 +281,9 @@ impl<'a> Ctx<'a> {
             Ok(()) => exit::OK,
             Err(e) => {
                 if self.out.json {
+                    self.out
+                        .record
+                        .line(&format!("{}: error: {}", self.tool, e.message));
                     self.out.stdout.line(
                         &json!({"event": "error", "code": e.code, "kind": e.kind, "message": e.message})
                             .to_string(),

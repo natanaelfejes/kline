@@ -1468,6 +1468,30 @@ fn human_output_is_saved_next_to_the_capture_and_ends_with_done() {
     assert!(!r.stderr.contains("done (exit"), "{}", r.stderr);
     let c = &r.event("capture")[0];
     assert!(c["out"].as_str().unwrap().ends_with(".out.txt"), "{c}");
+    let text = std::fs::read_to_string(c["out"].as_str().unwrap()).unwrap();
+    assert!(text.trim_end().ends_with("done (exit 0)"), "{text}");
+    // Code review L4: with --json the file also has the error and the done line, while
+    // stdout stays one JSON object per line and stderr gets nothing extra.
+    let ecu = sirius_ecu().with_fault(FaultRule::on(
+        &[0x21, 0xA9],
+        ReplyFault::Negative { nrc: 0x12 },
+    ));
+    let (r, _) = run(
+        ecu,
+        &["--json", "read", "--xml", &xml("sirius_cli.xml"), "21A9"],
+    );
+    assert_eq!(r.code, 6);
+    let text = std::fs::read_to_string(r.captures()[0].with_extension("out.txt")).unwrap();
+    assert!(
+        text.contains("error: ECU answered negatively: 7F 21 12"),
+        "{text}"
+    );
+    assert!(text.trim_end().ends_with("done (exit 6)"), "{text}");
+    assert!(!r.stderr.contains("done (exit"), "{}", r.stderr);
+    assert_eq!(r.event("error").len(), 1, "{}", r.stdout);
+    for l in r.stdout.lines() {
+        serde_json::from_str::<serde_json::Value>(l).unwrap_or_else(|e| panic!("{l}: {e}"));
+    }
 }
 
 #[test]

@@ -241,7 +241,9 @@ Next to it, `<capture>.out.txt` holds what the command printed for a human: the 
 `<capture>.trace.txt`). No `script` session is needed to keep the decoded values. The
 `capture` JSON event names it in `out`.
 
-In human mode every command ends with `done (exit N)` on stderr (not with `--json`).
+In human mode every command ends with `done (exit N)` on stderr. With `--json` stderr gets no
+such line and stdout stays pure JSON (the error is an `error` event), but `<capture>.out.txt`
+still has the error text and ends with `done (exit N)`.
 
 `t_ms` is ms since the port was opened. `kline replay` decodes it; kline-sim's `ReplayEcu` plays it
 back as the ECU (`crates/kline-cli/tests/replay.rs` replays a CLI capture and gets the same
