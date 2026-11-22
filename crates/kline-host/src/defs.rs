@@ -535,15 +535,15 @@ pub const FLAG_MEANINGS: &[(&str, Option<u64>, &str)] = &[
     (
         "TIR RF VAL",
         None,
-        "1 = the remote frame is valid (well-formed)",
+        "1 = the remote frame is valid, well-formed",
     ),
-    ("TIR RF OK", None, "1 = remote accepted (learned remote)"),
+    ("TIR RF OK", None, "1 = remote accepted, a learned remote"),
     (
         "TRP RECU",
         None,
         "1 = transponder frame received by the antenna ring",
     ),
-    ("TRP VAL", None, "1 = transponder frame valid (well-formed)"),
+    ("TRP VAL", None, "1 = transponder frame valid, well-formed"),
     (
         "TRPOK",
         None,
@@ -553,7 +553,7 @@ pub const FLAG_MEANINGS: &[(&str, Option<u64>, &str)] = &[
     (
         "VERLOGI",
         None,
-        "state of the coded (VERLOG) line to the engine ECU",
+        "state of the coded VERLOG line to the engine ECU",
     ),
 ];
 
