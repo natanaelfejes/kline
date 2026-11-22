@@ -122,9 +122,11 @@ line measures the real round trip on every OS.
 
 The 5-baud init is bit-banged with break (200 ms bits, +-10 ms, ISO 9141-2) and the fast-init low
 pulse TiniL is 25 +- 1 ms (ISO 14230-2). kline's clock (`kline_host::hrtimer`) sleeps with the OS
-until a spin tail before each deadline and busy-waits the rest. The tail starts at 1 ms (2 ms on
-Windows) and grows to twice the worst OS-sleep lateness it has seen (at most 25 ms); the 300 ms
-idle wait (W5) before every init teaches it. On Windows the transport also requests a 1 ms
+in chunks of at most 5 ms until a spin tail before each deadline and busy-waits the rest. The
+tail starts at 1 ms (2 ms on Windows) and grows to twice the worst OS-sleep lateness it has seen
+(at most 25 ms); the 300 ms idle wait (W5) before every init teaches it. The chunks matter where
+the OS wakes a sleep late in proportion to its length (the GitHub macOS runner below): one
+200 ms OS sleep could overshoot any tail, a 5 ms one stays inside it. On Windows the transport also requests a 1 ms
 system timer tick (`timeBeginPeriod(1)`, released when the port closes; the default tick is
 15.625 ms, which alone would break TiniL).
 
@@ -140,15 +142,50 @@ guarantee):
 | macOS 27, M4 Pro | 0.6 ms | 0 ms | 0.4 ms | 5.0-5.8 ms | 11-12.5 ms |
 | Windows 11 ARM64 (Parallels VM on that Mac), `timeBeginPeriod(1)` granted | 0.1 ms | 0.07 ms | 0.01 ms | 3.6-6.2 ms | 9-14.5 ms |
 
+These rows were measured before the 5 ms OS-sleep chunks. Re-measured after them (2026-11-22,
+one run each; the Windows VM was not re-measured): Linux container 0.013 / 0 / 0.001 ms max late
+with 1.4 ms OS lateness and a 3.8 ms tail; macOS 27, M4 Pro 0 / 0 / 0.006 ms with 6.2 ms and
+13.5 ms.
+
 With an earlier fixed tail 25 ms sleeps woke up to ~4.8 ms late on macOS and
 ~1.65 ms late on the Windows VM (cause not investigated; timer coalescing is a guess), which is
 why the tail is adaptive. A spin cannot help when the thread itself is preempted (a loaded host or
 a VM whose vCPU is descheduled): run `selftest` and close heavy programs if it says
 `TOO IMPRECISE`.
 
+### Wake-up pacing and the init timing guard
+
+`KklLine` (the transport for the cable and the simulator pty) paces the wake-up patterns: a DTR
+or break change starts an edge chain, and every sleep in the chain ends at the previous sleep's
+deadline plus its length, never at "now" plus its length. A late wake-up therefore moves only
+its own edge; the next bits are back on the 200 ms grid, and TiniL/TWuP keep their length
+whatever the break ioctls cost. A flush, write or read ends the chain. Until 2026-11-22 the
+chain re-anchored on "now" after any sleep more than 50 ms late, which shifted every later bit
+by the stall.
+
+During an init (`Link::init`) a guard checks every chain sleep: one that wakes up more than
++-10 ms late (5-baud bits and the stop bit, ISO 9141-2) or +-1 ms late (the fast-init 1, 25 and
+25 ms sleeps, ISO 14230-2) means that bit or pulse is already outside its tolerance. The
+transport then releases K, raises DTR and fails the attempt with `init timing missed: a N ms
+wake-up sleep woke X us late (max Y us); attempt aborted, K line released`, instead of finishing
+a 5-baud address that an ECU could decode as another address. `connect` goes on with the next
+variant or round. The guard measures only our own sleep; how long the break call itself takes
+(USB, VM passthrough) is not part of it, so the Windows VM's break-call spread above is not
+turned into aborts. `kline selftest` drives its break edges without the guard: it measures and
+reports, it does not abort.
+
+### GitHub macOS runner
+
 The GitHub macOS runner (macos-26-arm64, macOS 26.7.2, `VirtualMac2,1`, 2026-11-22) is much
 coarser than the hosts above: in the simulator's pty test `thread::sleep(1 ms)` took 1.1-7.6 ms
-(median 5.8-6.6 ms) and `thread::sleep(200 ms)` 203-276 ms, one 300 ms sleep 375 ms. A tester
+(median 5.8-6.6 ms) and `thread::sleep(200 ms)` 203-276 ms, one 300 ms sleep 375 ms. Before the
+5 ms chunks, `kline selftest` there reported `sleep 200 ms x10: late mean 11.8 / max 52.6 ms ...
+TOO IMPRECISE` with the tail at its 25 ms cap (OS sleep up to 77.6 ms late), and the simulator
+rejected the first 5-baud init of every kline-cli pty test run (`FiveBaudTiming: stop bit not
+high (line still low)`); with load the test failed outright when every variant failed. With the
+chunks and the pacing above, the same runner gave `sleep 200 ms x10: late max 0.005 ms ... OK`
+(one 5 ms chunk still woke 30.2 ms late, the tail stayed at 25 ms) and three kline-cli pty test
+runs with no simulator timing violation. A tester
 that does not pace its 5-baud edges from deadlines fails the init there (docs/sim.md "pty
 transport"). This is CI only; no real cable is attached to that runner.
 

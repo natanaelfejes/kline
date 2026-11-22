@@ -101,8 +101,9 @@ more than half a bit from the second data bit on, the bus decoded 0x7A as 0xF4, 
 accept it and sent no keywords (the init failed with `NoKeywords { received: [] }`). `SerialLine`
 in `tests/pty.rs` therefore sleeps each bit until the previous deadline plus 200 ms, in OS sleeps
 of at most 5 ms and a busy-waited 8 ms tail, so an edge is late only by its own sleep.
-`kline_host`'s `KklLine` also paces from deadlines, with its adaptive spin tail (docs/platforms.md
-"Timing precision"); its pty test in kline-cli passed on the same runner. When an init
+`kline_host`'s `KklLine` paces the same way, with chunked OS sleeps and an adaptive spin tail,
+and aborts an init attempt whose wake-up sleep woke up beyond the tolerance (docs/platforms.md
+"Wake-up pacing and the init timing guard"). When an init
 over the pty fails, the test prints the simulator's notes, which name the address the bus
 decoded.
 

@@ -36,6 +36,54 @@ pub trait Transport {
     fn baud_rate(&self) -> Option<u32> {
         None
     }
+    /// While on (one init attempt, [`crate::link::Link::init`]), a wake-up sleep that wakes up
+    /// beyond its tolerance makes the next call fail with [`InitTimingError`] after releasing K.
+    /// Off (selftest), lateness is only measured. Default: no guard.
+    fn set_init_guard(&mut self, _on: bool) {}
+}
+
+/// A wake-up sleep woke up so late that the 5-baud bit or the fast-init TiniL/TWuP it times was
+/// already outside its tolerance (see [`KklLine`]). Carried inside an `io::Error`;
+/// [`InitTimingError::find`] gets it back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InitTimingError {
+    pub requested_ms: u32,
+    pub late_us: u64,
+    pub max_late_us: u64,
+}
+
+impl std::fmt::Display for InitTimingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "init timing missed: a {} ms wake-up sleep woke {:.1} ms late (max {:.1} ms)",
+            self.requested_ms,
+            self.late_us as f64 / 1000.0,
+            self.max_late_us as f64 / 1000.0
+        )
+    }
+}
+
+impl std::error::Error for InitTimingError {}
+
+impl InitTimingError {
+    /// The timing error inside `e`, if that is what `e` is.
+    pub fn find(e: &io::Error) -> Option<InitTimingError> {
+        e.get_ref()
+            .and_then(|x| x.downcast_ref::<InitTimingError>())
+            .copied()
+    }
+}
+
+/// Allowed lateness of a wake-up sleep of `ms` (ISO): 5-baud bits and the stop bit (100 ms and
+/// more) +-10 ms (ISO 9141-2, 5 baud +-5 %); the fast-init sleeps (1 and 25 ms) +-1 ms
+/// (ISO 14230-2 TiniL 25 +- 1, TWuP 50 +- 1).
+pub fn wake_sleep_tolerance_us(ms: u32) -> u64 {
+    if ms >= 100 {
+        crate::selftest::FIVE_BAUD_TOLERANCE_US
+    } else {
+        crate::selftest::FAST_INIT_TOLERANCE_US
+    }
 }
 
 /// Wall clock for a [`KklLine`]; mocked in unit tests.
@@ -118,24 +166,33 @@ pub trait SerialIo {
     }
 }
 
-/// Window within which consecutive break/DTR sleeps are paced from the previous sleep's
-/// deadline instead of from "now" (ours). It keeps the 5-baud bit edges on the 200 ms grid
-/// (ISO 9141-2: 5 baud +-5 %) even when each `set_break` ioctl costs a millisecond or two.
-/// Beyond it (a stall), the next sleep starts from now again.
-pub const PACE_WINDOW_MS: u64 = 50;
 /// Upper bound on bytes drained in one flush (ours; a K line at 10400 baud cannot deliver more
 /// than ~1000 bytes/s, so this only stops a runaway loop).
 const MAX_DRAIN: usize = 4096;
 
 /// A K line over a serial port: the FTDI KKL cable or the simulator's pty.
+///
+/// Wake-up pacing: a DTR or break change starts an edge chain. Every sleep in the chain ends
+/// at the previous sleep's deadline plus its length, never at "now" plus its length, so the
+/// 5-baud bits stay on the 200 ms grid (ISO 9141-2: 5 baud +-5 %) and TiniL/TWuP keep their
+/// length whatever the ioctls cost; lateness never adds up. A flush, write or read ends the
+/// chain. With the init guard on ([`Transport::set_init_guard`]), a chain sleep that wakes up
+/// more than [`wake_sleep_tolerance_us`] late means the bit or pulse is already wrong: the next
+/// call releases K, raises DTR and fails with [`InitTimingError`], so no corrupted address
+/// byte (which another ECU could take as its own) is sent.
 pub struct KklLine<P: SerialIo, C: Clock> {
     port: P,
     clock: C,
     trace: Tracer,
     break_on: bool,
     loopback_rx: Vec<u8>,
-    /// Deadline (us) of the previous sleep, while pacing break/DTR edges.
+    /// In an edge chain (a DTR/break change since the last flush, write or read).
+    chain: bool,
+    /// Deadline (us) of the previous sleep in the chain.
     pace_us: Option<u64>,
+    guard: bool,
+    /// A guarded chain sleep woke up too late; reported by the next call.
+    fault: Option<InitTimingError>,
 }
 
 impl<P: SerialIo, C: Clock> KklLine<P, C> {
@@ -146,8 +203,31 @@ impl<P: SerialIo, C: Clock> KklLine<P, C> {
             trace,
             break_on: false,
             loopback_rx: Vec::new(),
+            chain: false,
             pace_us: None,
+            guard: false,
+            fault: None,
         }
+    }
+
+    fn end_chain(&mut self) {
+        self.chain = false;
+        self.pace_us = None;
+    }
+
+    /// Report a pending timing fault: release K, DTR high (idle), end the chain, fail.
+    fn check_fault(&mut self) -> io::Result<()> {
+        let Some(f) = self.fault.take() else {
+            return Ok(());
+        };
+        if self.break_on {
+            let _ = self.port.set_break(false);
+            self.break_on = false;
+        }
+        let _ = self.port.set_dtr(true);
+        self.end_chain();
+        self.t(format!("  {f}; attempt aborted, K released, DTR high"));
+        Err(io::Error::other(f))
     }
 
     pub fn port(&self) -> &P {
@@ -187,16 +267,27 @@ impl<P: SerialIo, C: Clock> Transport for KklLine<P, C> {
     }
 
     fn set_dtr(&mut self, on: bool) -> io::Result<()> {
+        self.check_fault()?;
         // Every init sequence starts with a DTR edge (5-baud: DTR low before the start bit; fast
         // init: DTR high before the 1 ms + TiniL pattern), and only the idle sleep comes before
-        // it. Pacing starts here, so an oversleep of that idle wait is not taken out of the
+        // it. The chain starts here, so an oversleep of that idle wait is not taken out of the
         // start bit or TiniL (Hydrogen final review). DTR goes high again only after the stop
         // bit, outside the paced 5-baud bits.
+        self.chain = true;
         self.pace_us = None;
         self.port.set_dtr(on)
     }
 
+    fn set_init_guard(&mut self, on: bool) {
+        self.guard = on;
+        if !on {
+            self.fault = None;
+        }
+    }
+
     fn set_break(&mut self, on: bool) -> io::Result<()> {
+        self.check_fault()?;
+        self.chain = true;
         if on && !self.break_on {
             // "Since the last set_break(true)": forget what came before the break.
             let old = self.drain()?;
@@ -214,6 +305,7 @@ impl<P: SerialIo, C: Clock> Transport for KklLine<P, C> {
     }
 
     fn break_loopback_seen(&mut self) -> io::Result<bool> {
+        self.check_fault()?;
         if let Some(seen) = self.port.break_seen()? {
             return Ok(seen);
         }
@@ -232,18 +324,34 @@ impl<P: SerialIo, C: Clock> Transport for KklLine<P, C> {
     }
 
     fn sleep_ms(&mut self, ms: u32) {
-        let now = self.clock.now_us();
+        let d = u64::from(ms) * 1000;
+        if !self.chain {
+            let now = self.clock.now_us();
+            self.clock.sleep_until_us(now + d);
+            return;
+        }
+        // In a chain: from the previous deadline, however late that sleep woke (no re-anchoring
+        // after a stall, which would shift every later bit).
         let target = match self.pace_us {
-            Some(p) if now.saturating_sub(p) < PACE_WINDOW_MS * 1000 => p + u64::from(ms) * 1000,
-            _ => now + u64::from(ms) * 1000,
+            Some(p) => p + d,
+            None => self.clock.now_us() + d,
         };
         self.clock.sleep_until_us(target);
-        // Only edges are paced: a sleep that follows a break/DTR change keeps the grid.
         self.pace_us = Some(target);
+        let late = self.clock.now_us().saturating_sub(target);
+        let max = wake_sleep_tolerance_us(ms);
+        if self.guard && late > max && self.fault.is_none() {
+            self.fault = Some(InitTimingError {
+                requested_ms: ms,
+                late_us: late,
+                max_late_us: max,
+            });
+        }
     }
 
     fn flush_rx(&mut self) -> io::Result<()> {
-        self.pace_us = None;
+        self.check_fault()?;
+        self.end_chain();
         let b = self.drain()?;
         if !b.is_empty() {
             self.t(format!("  flushed: {}", crate::hex_sp(&b)));
@@ -252,7 +360,8 @@ impl<P: SerialIo, C: Clock> Transport for KklLine<P, C> {
     }
 
     fn write(&mut self, bytes: &[u8], inter_byte_ms: u32) -> io::Result<()> {
-        self.pace_us = None;
+        self.check_fault()?;
+        self.end_chain();
         if inter_byte_ms == 0 {
             return self.port.write_all(bytes);
         }
@@ -267,7 +376,8 @@ impl<P: SerialIo, C: Clock> Transport for KklLine<P, C> {
     }
 
     fn read(&mut self, count: usize, timeout_ms: u32) -> io::Result<Vec<u8>> {
-        self.pace_us = None;
+        self.check_fault()?;
+        self.end_chain();
         let deadline = self.clock.now_us() + u64::from(timeout_ms) * 1000;
         let mut out = vec![0u8; count];
         let mut n = 0;
@@ -645,6 +755,9 @@ mod tests {
         ioctl_us: u64,
         /// How late the next sleep wakes up (us), once: a host timer oversleeping.
         oversleep_once_us: u64,
+        /// Sleeps so far, and (n, us): the n-th sleep (0-based) wakes up `us` late.
+        sleeps: u32,
+        oversleep_nth: Option<(u32, u64)>,
     }
 
     #[derive(Clone, Default)]
@@ -658,7 +771,13 @@ mod tests {
         }
         fn sleep_until_us(&mut self, t: u64) {
             let mut s = self.0 .0.borrow_mut();
-            let late = std::mem::take(&mut s.oversleep_once_us);
+            let mut late = std::mem::take(&mut s.oversleep_once_us);
+            if let Some((n, us)) = s.oversleep_nth {
+                if n == s.sleeps {
+                    late += us;
+                }
+            }
+            s.sleeps += 1;
             s.now_us = s.now_us.max(t) + late;
         }
     }
@@ -808,6 +927,127 @@ mod tests {
         let b = break_times(&m);
         let start = b[1].1 - b[0].1;
         assert!((190_000..=210_000).contains(&start), "start bit {start} us");
+    }
+
+    /// Edges of a 5-baud address byte (start bit, 8 bits LSB first) as FiveBaudInit drives them.
+    fn send_address(l: &mut KklLine<Mock, MockClock>, byte: u8) -> io::Result<()> {
+        l.set_dtr(false)?;
+        l.set_break(true)?;
+        l.sleep_ms(200);
+        l.break_loopback_seen()?;
+        for i in 0..8 {
+            l.set_break((byte >> i) & 1 == 0)?;
+            l.sleep_ms(200);
+        }
+        l.set_break(false)?;
+        l.sleep_ms(100);
+        l.set_dtr(true)
+    }
+
+    #[test]
+    fn a_stall_mid_address_does_not_shift_the_later_bits() {
+        // GitHub macOS runner: a 200 ms sleep woke up to 83 ms late. Re-anchoring the next bit
+        // on "now" after such a stall shifted every later edge (the simulator then saw the stop
+        // bit still low). Paced from the deadlines, only the late edge itself moves.
+        let (mut l, m) = line(500);
+        m.0.borrow_mut().oversleep_nth = Some((3, 60_000));
+        send_address(&mut l, 0x7A).unwrap();
+        let b = break_times(&m);
+        assert_eq!(b.len(), 10);
+        let t0 = b[0].1;
+        for (i, (_, t)) in b.iter().enumerate() {
+            let ideal = t0 + i as u64 * 200_000;
+            let slack = if i == 4 { 61_000 } else { 1_000 };
+            assert!(
+                *t >= ideal && *t <= ideal + slack,
+                "edge {i} at +{} us",
+                t - t0
+            );
+        }
+    }
+
+    #[test]
+    fn with_the_init_guard_a_late_bit_aborts_before_the_next_edge_and_releases_k() {
+        let (mut l, m) = line(500);
+        l.set_init_guard(true);
+        // Sleep 3 is bit 2's: 11 ms late, beyond +-10 ms (ISO 9141-2).
+        m.0.borrow_mut().oversleep_nth = Some((3, 11_000));
+        let e = send_address(&mut l, 0x7A).unwrap_err();
+        let f = InitTimingError::find(&e).expect("timing error");
+        assert_eq!(
+            (f.requested_ms, f.late_us, f.max_late_us),
+            (200, 11_000, 10_000)
+        );
+        let b = break_times(&m);
+        // Start, bits 0..2 (0x7A: 0 1 0), then the release; bit 3 was never sent.
+        assert_eq!(b.len(), 5, "{b:?}");
+        assert!(!b.last().unwrap().0, "K released");
+        assert!(matches!(
+            m.0.borrow().calls.last(),
+            Some(Call::Dtr(true, _))
+        ));
+        // The fault is reported once; the line works again afterwards.
+        l.set_dtr(true).unwrap();
+        // 10 ms late is still inside the tolerance.
+        let (mut l, m) = line(500);
+        l.set_init_guard(true);
+        m.0.borrow_mut().oversleep_nth = Some((3, 10_000));
+        send_address(&mut l, 0x7A).unwrap();
+    }
+
+    #[test]
+    fn with_the_init_guard_a_late_tinil_aborts_before_start_communication() {
+        let (mut l, m) = line(500);
+        l.set_init_guard(true);
+        // FastInit::start after the idle wait: DTR high, 1 ms, break 25 ms, release 25 ms.
+        m.0.borrow_mut().oversleep_nth = Some((1, 1_500));
+        l.set_dtr(true).unwrap();
+        l.sleep_ms(1);
+        l.set_break(true).unwrap();
+        l.sleep_ms(25);
+        let e = l.set_break(false).unwrap_err();
+        assert_eq!(InitTimingError::find(&e).unwrap().max_late_us, 1_000);
+        assert!(!m
+            .0
+            .borrow()
+            .calls
+            .iter()
+            .any(|c| matches!(c, Call::Write(..))));
+        assert!(!break_times(&m).last().unwrap().0, "K released");
+    }
+
+    #[test]
+    fn without_the_guard_lateness_is_only_measured() {
+        // selftest drives break edges itself and reports their timing; it must not be aborted.
+        let (mut l, m) = line(500);
+        m.0.borrow_mut().oversleep_nth = Some((3, 50_000));
+        send_address(&mut l, 0x7A).unwrap();
+        // Outside a chain (after a read) a late sleep is no fault either, guard or not.
+        let (mut l, m) = line(500);
+        l.set_init_guard(true);
+        l.read(1, 5).unwrap();
+        m.0.borrow_mut().oversleep_once_us = 30_000;
+        l.sleep_ms(25);
+        l.write(&[0x81], 0).unwrap();
+    }
+
+    #[test]
+    fn link_init_turns_a_timing_fault_into_a_failed_attempt() {
+        let (l, m) = line(500);
+        // Sleep 0 is the W5 idle, 1 the start bit, 2 bit 0: 30 ms late.
+        m.0.borrow_mut().oversleep_nth = Some((2, 30_000));
+        let mut link = crate::link::Link::new(Box::new(l), Tracer::off(), None);
+        let cfg = kline_core::LinkConfig::new(0x7A, kline_core::KTiming::default());
+        let r = link.init(&cfg).expect("not a transport error");
+        match r {
+            Err(kline_core::LinkError::InitTiming {
+                requested_ms: 200,
+                late_us: 30_000,
+                max_late_us: 10_000,
+            }) => {}
+            other => panic!("{other:?}"),
+        }
+        assert!(!break_times(&m).last().unwrap().0);
     }
 
     #[cfg(unix)]

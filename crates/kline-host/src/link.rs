@@ -268,8 +268,31 @@ impl Link {
         }
     }
 
-    /// Run one init with `cfg`. Outer error: transport; inner: the init failed.
+    /// Run one init with `cfg`. Outer error: transport; inner: the init failed. A wake-up
+    /// sleep that woke up beyond its tolerance ([`crate::transport::InitTimingError`]) fails
+    /// this attempt with [`LinkError::InitTiming`], so the next variant or round can try again.
     pub fn init(&mut self, cfg: &LinkConfig) -> io::Result<Result<InitOutcome, LinkError>> {
+        self.t.set_init_guard(true);
+        let r = self.init_guarded(cfg);
+        self.t.set_init_guard(false);
+        match r {
+            Err(e) => match crate::transport::InitTimingError::find(&e) {
+                Some(f) => {
+                    self.trace
+                        .line(self.t.now_us(), format!("INIT aborted: {f}"));
+                    Ok(Err(LinkError::InitTiming {
+                        requested_ms: f.requested_ms,
+                        late_us: f.late_us,
+                        max_late_us: f.max_late_us,
+                    }))
+                }
+                None => Err(e),
+            },
+            ok => ok,
+        }
+    }
+
+    fn init_guarded(&mut self, cfg: &LinkConfig) -> io::Result<Result<InitOutcome, LinkError>> {
         let now = self.t.now_us();
         match cfg.init_kind() {
             InitKind::KwpFast { .. } => {

@@ -7,10 +7,11 @@
 //!
 //! So [`sleep_until_us`] sleeps the OS way until [`SPIN_TAIL_US`] before the deadline and
 //! busy-waits the rest on the monotonic clock. [`AdaptiveTail`] (what the transport uses) also
-//! learns how late the OS sleep itself wakes up and widens the tail to twice that (at most
-//! [`MAX_TAIL_US`]): measured on an M4 Pro under macOS 27, `thread::sleep` woke up to ~5 ms late
-//! (cause not investigated), far beyond a 1 ms tail. The idle wait (W5, 300 ms) before every init
-//! teaches it before the first timed edge. On Windows [`TimerResolution`] additionally asks
+//! sleeps in chunks of at most [`OS_SLEEP_CHUNK_US`], learns how late the OS sleep itself wakes
+//! up and widens the tail to twice that (at most [`MAX_TAIL_US`]): measured on an M4 Pro under
+//! macOS 27, `thread::sleep` woke up to ~5 ms late (cause not investigated), far beyond a 1 ms
+//! tail. The idle wait (W5, 300 ms) before every init teaches it before the first timed edge.
+//! On Windows [`TimerResolution`] additionally asks
 //! for a 1 ms system tick (`timeBeginPeriod(1)`) for as long as a serial transport is open, so the
 //! OS part never overshoots into the spin tail by a whole 15.6 ms tick even where the Rust
 //! standard library's high-resolution waitable timer is unavailable (Windows before 10 1803).
@@ -25,6 +26,12 @@ pub const SPIN_TAIL_US: u64 = if cfg!(windows) { 2_000 } else { 1_000 };
 
 /// Upper bound of the adaptive tail (ours): TiniL (25 ms) is then busy-waited entirely.
 pub const MAX_TAIL_US: u64 = 25_000;
+
+/// Longest single OS sleep of [`AdaptiveTail::sleep_until_us`] (ours). Where the OS wakes a
+/// sleep late in proportion to its length, one long sleep can overshoot any spin tail: on the
+/// GitHub macOS runner (macos-26-arm64, a VM) a 200 ms `thread::sleep` woke up to 83 ms late
+/// while a 1 ms one woke at most 7.6 ms late. Short chunks keep each wake-up inside the tail.
+pub const OS_SLEEP_CHUNK_US: u64 = 5_000;
 
 /// A spin tail that grows with the OS sleep's observed lateness (see the module docs).
 #[derive(Debug, Clone)]
@@ -65,7 +72,7 @@ impl AdaptiveTail {
             if rem <= tail {
                 break;
             }
-            let req = rem - tail;
+            let req = (rem - tail).min(OS_SLEEP_CHUNK_US);
             s.os_sleep_us(req);
             let late = s.now_us().saturating_sub(now + req);
             self.max_os_late_us = self.max_os_late_us.max(late);
@@ -261,9 +268,11 @@ mod tests {
         // macOS timer coalescing: every OS sleep wakes 4 ms late, beyond a 1 ms tail.
         let mut m = mock(4_000, 0);
         let mut a = AdaptiveTail::new(1_000);
-        // W5 idle (300 ms) first: late, but it teaches the tail.
+        // W5 idle (300 ms) first: the first 5 ms chunk wakes late and teaches the tail, so
+        // even this sleep lands on time.
         a.sleep_until_us(&mut m, 300_000);
-        assert_eq!(m.now, 303_000, "first OS sleep: 299 ms + 4 ms late");
+        assert_eq!(m.os_calls[0], OS_SLEEP_CHUNK_US);
+        assert_eq!(m.now, 300_000);
         assert_eq!((a.max_os_late_us(), a.tail_us()), (4_000, 9_000));
         // TiniL then lands exactly.
         let t = m.now + 25_000;
@@ -274,14 +283,44 @@ mod tests {
         let mut a = AdaptiveTail::new(1_000);
         a.sleep_until_us(&mut m, 200_000);
         assert_eq!(a.tail_us(), MAX_TAIL_US);
+        let calls = m.os_calls.len();
         let t = m.now + 25_000;
         a.sleep_until_us(&mut m, t);
         assert_eq!(m.now, t);
         assert_eq!(
             m.os_calls.len(),
-            1,
+            calls,
             "25 ms with a 25 ms tail is spun entirely"
         );
+    }
+
+    #[test]
+    fn a_long_sleep_is_cut_into_chunks_so_proportional_lateness_stays_small() {
+        // GitHub macOS runner: lateness grows with the sleep (200 ms: up to 83 ms; 1 ms: up to
+        // 7.6 ms). Model: each OS sleep wakes 40 % late. One 199 ms sleep would land ~80 ms
+        // late; in 5 ms chunks each wake-up is 2 ms late, inside the learned tail.
+        struct Prop {
+            now: u64,
+            max_req: u64,
+        }
+        impl Sleeper for Prop {
+            fn now_us(&self) -> u64 {
+                self.now
+            }
+            fn os_sleep_us(&mut self, us: u64) {
+                self.max_req = self.max_req.max(us);
+                self.now += us + us * 2 / 5;
+            }
+            fn spin(&mut self) {
+                self.now += 1;
+            }
+        }
+        let mut p = Prop { now: 0, max_req: 0 };
+        let mut a = AdaptiveTail::new(1_000);
+        a.sleep_until_us(&mut p, 200_000);
+        assert_eq!(p.now, 200_000);
+        assert_eq!(p.max_req, OS_SLEEP_CHUNK_US);
+        assert!(a.max_os_late_us() <= OS_SLEEP_CHUNK_US * 2 / 5);
     }
 
     #[test]
