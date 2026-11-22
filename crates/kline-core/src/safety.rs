@@ -73,12 +73,16 @@ pub const BMT_TRANSFER_SERVICES: core::ops::RangeInclusive<u8> = 0x34..=0x37;
 pub const FLASH_ROUTINES: [u8; 2] = [0x81, 0x82];
 /// BMT `3B D2 index value` configuration write and the read that backs it up
 /// ("LECTURE CONFIGURATION" `21 A1`). Capability catalogue 3.4. On the BMT every other `3B`,
-/// and every `2E`/`2F`, is refused: the BMT config holds key/remote options (AP1CLE, TRF) and
+/// and every `2E`/`2F`, is refused: the BMT config holds a key option (AP1CLE) and the remote type (TRF), and
 /// an undocumented identifier cannot be shown not to touch the immobilizer.
 pub const BMT_CONFIG_WRITE_LID: u8 = 0xD2;
 pub const BMT_CONFIG_READ: [u8; 2] = [0x21, 0xA1];
 /// BMT config index 2 is AP1CLE (key related): refused (rule 3).
 pub const BMT_CONFIG_IMMOBILIZER_INDEX: u8 = 0x02;
+/// BMT config index 3 is TRF, the remote-control type: RF (1) or infrared (0); not
+/// immobilizer (Technical Note 77 11 204 878 section 88, TIR panel of the BMT screen). Tier 2
+/// with [`Warning::ChangesRemoteType`].
+pub const BMT_CONFIG_TRF_INDEX: u8 = 0x03;
 /// Highest documented BMT config index; 14 and 15 are reserved (catalogue 3.4) and only
 /// reachable as [`Tier::Expert`].
 pub const BMT_CONFIG_MAX_INDEX: u8 = 13;
@@ -239,6 +243,9 @@ pub enum Warning {
     /// Security access: unlocks protected services; failed attempts can lock the ECU out for a
     /// delay.
     SecurityAccess,
+    /// Changes the remote-control type (BMT config TRF: RF or infrared); a remote of the other
+    /// type stops working.
+    ChangesRemoteType,
 }
 
 /// What a non-read request does, shown to the human before approval and quoted by the
@@ -659,6 +666,28 @@ fn risk_info(bmt: bool, payload: &[u8], tier: Tier) -> RiskInfo {
             true,
             &["doors and window clear"],
             &[Warning::MovesActuator],
+        ),
+        (Tier::ConfigWrite, [0x3B, BMT_CONFIG_WRITE_LID, BMT_CONFIG_TRF_INDEX, 0x00]) if bmt => r(
+            "switches the BMT to an INFRARED remote (config TRF = 0)",
+            "an RF remote stops working; the type may lock once a remote is learned (Technical Note: change it only after clearing the remotes)",
+            true,
+            &[
+                "21 80 read and the definition chosen from it",
+                "21 A1 backup read in this session",
+                "read back 21 A1 after the write",
+            ],
+            &[Warning::ChangesRemoteType, Warning::EepromWrite],
+        ),
+        (Tier::ConfigWrite, [0x3B, BMT_CONFIG_WRITE_LID, BMT_CONFIG_TRF_INDEX, 0x01]) if bmt => r(
+            "switches the BMT to an RF remote (config TRF = 1)",
+            "an infrared remote stops working; the type may lock once a remote is learned (Technical Note: change it only after clearing the remotes)",
+            true,
+            &[
+                "21 80 read and the definition chosen from it",
+                "21 A1 backup read in this session",
+                "read back 21 A1 after the write",
+            ],
+            &[Warning::ChangesRemoteType, Warning::EepromWrite],
         ),
         (Tier::ConfigWrite, [0x3B, BMT_CONFIG_WRITE_LID, ..]) if bmt => r(
             "rewrites one BMT configuration option (index in byte 3, value in byte 4) in EEPROM",

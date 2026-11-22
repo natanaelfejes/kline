@@ -553,3 +553,23 @@ fn sirius_flash_routines_warn_may_brick() {
         );
     }
 }
+
+/// GAP 2 (trf-investigation.md): BMT config index 3 TRF is the remote type, RF (1) or
+/// infrared (0), not immobilizer: Tier 2 with a specific risk text and warning.
+#[test]
+fn bmt_trf_remote_type_is_tier2_with_specific_risk() {
+    let ir = assess(&BMT, &[0x3B, 0xD2, 0x03, 0x00]).unwrap();
+    assert_eq!(ir.tier, Tier::ConfigWrite);
+    assert!(ir.warnings.contains(&Warning::ChangesRemoteType), "{ir:?}");
+    assert!(ir.what_it_changes.contains("INFRARED"), "{ir:?}");
+    assert!(
+        ir.what_can_go_wrong.contains("RF remote stops working"),
+        "{ir:?}"
+    );
+    let rf = assess(&BMT, &[0x3B, 0xD2, 0x03, 0x01]).unwrap();
+    assert_eq!(rf.tier, Tier::ConfigWrite);
+    assert!(rf.warnings.contains(&Warning::ChangesRemoteType), "{rf:?}");
+    assert!(rf.what_it_changes.contains("RF remote"), "{rf:?}");
+    assert_eq!(tier(&BMT, &[0x3B, 0xD2, 0x03, 0x00]), Tier::ConfigWrite);
+    assert_eq!(tier(&BMT, &[0x3B, 0xD2, 0x03, 0x01]), Tier::ConfigWrite);
+}

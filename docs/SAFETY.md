@@ -56,7 +56,8 @@ In any tier, including expert. This is the only forbidden class (owner-approved)
   (except exact `31C7000000`/`31C8000000`) or with the immobilizer actuator outputs `A6`
   "Ligne Transpondeur", `AB` "Led Verlog", `AC` "Ligne ECM" (both BMT definitions, step 7);
   any `2E`/`2F`; any `3B` except `3B D2` and `3B D2` index 2 (AP1CLE); `21A4` with extra
-  bytes.
+  bytes. `3B D2` index 3 (TRF) is the remote type, RF or infrared, not key related: Tier 2 with
+  a specific warning (`ChangesRemoteType`).
 - **On non-immobilizer ECUs**: `31 A0 A3` (and `32`/`33`/`38`-`3A` `A0 A3`), writes
   `2E`/`2F`/`3B` to `A0`/`A2`/`AE`/`BD`; on a Sirius (0x7A or a Sirius definition) also output
   control `30` and routines on those LIDs.

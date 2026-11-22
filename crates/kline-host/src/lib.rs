@@ -113,6 +113,7 @@ pub fn warning_name(w: Warning) -> &'static str {
         Warning::MayBrickEcu => "MAY_BRICK_ECU",
         Warning::MayLeaveProgrammingSession => "MAY_LEAVE_PROGRAMMING_SESSION",
         Warning::SecurityAccess => "SECURITY_ACCESS",
+        Warning::ChangesRemoteType => "CHANGES_REMOTE_TYPE",
     }
 }
 
