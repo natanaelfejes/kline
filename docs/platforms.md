@@ -92,16 +92,18 @@ system timer tick (`timeBeginPeriod(1)`, released when the port closes; the defa
 
 `kline selftest` measures this on the host before it opens any port (`selftest_timing`: 10 sleeps
 each of 1, 25 and 200 ms after one 300 ms warm-up, late min/mean/max and early count, against
-+-1 ms, +-1 ms and +-10 ms), so it reports even without a cable. Results measured on the hosts of
-this project (no cable, exit 3), commit noted in the report that introduced this file:
++-1 ms, +-1 ms and +-10 ms), so it reports even without a cable. Measured on this project's hosts
+(no cable, `kline selftest`, release build, commit ab8de98; one run each, so a snapshot, not a
+guarantee):
 
-| Host | 25 ms sleep, max late | 200 ms sleep, max late | OS sleep lateness seen |
-|---|---|---|---|
-| Linux container (x86_64) | 0.02 ms | 0 ms | ~0.2 ms |
-| macOS 27, M4 Pro | see below | | ~4-5 ms with a fixed 1 ms tail |
-| Windows 11 ARM64 in Parallels on that Mac | see below | | |
+| Host | 1 ms max late | 25 ms max late | 200 ms max late | OS sleep lateness seen | learned tail |
+|---|---|---|---|---|---|
+| Linux container, x86_64 | 0 ms | 0.02 ms | 0 ms | 0.2 ms | 1.4 ms |
+| macOS 27, M4 Pro | 0.6 ms | 0 ms | 0.4 ms | 5.0-5.8 ms | 11-12.5 ms |
+| Windows 11 ARM64 (Parallels VM on that Mac), `timeBeginPeriod(1)` granted | 0.1 ms | 0.07 ms | 0.01 ms | 3.6-6.2 ms | 9-14.5 ms |
 
-With the fixed 1 ms tail macOS woke 25 ms sleeps up to ~4.8 ms late (timer coalescing), which is
+With the earlier fixed tail (commit 1caa4ad) 25 ms sleeps woke up to ~4.8 ms late on macOS and
+~1.65 ms late on the Windows VM (cause not investigated; timer coalescing is a guess), which is
 why the tail is adaptive. A spin cannot help when the thread itself is preempted (a loaded host or
 a VM whose vCPU is descheduled): run `selftest` and close heavy programs if it says
 `TOO IMPRECISE`.

@@ -9,7 +9,7 @@
 //! busy-waits the rest on the monotonic clock. [`AdaptiveTail`] (what the transport uses) also
 //! learns how late the OS sleep itself wakes up and widens the tail to twice that (at most
 //! [`MAX_TAIL_US`]): measured on an M4 Pro under macOS 27, `thread::sleep` woke up to ~5 ms late
-//! (timer coalescing), far beyond a 1 ms tail. The idle wait (W5, 300 ms) before every init
+//! (cause not investigated), far beyond a 1 ms tail. The idle wait (W5, 300 ms) before every init
 //! teaches it before the first timed edge. On Windows [`TimerResolution`] additionally asks
 //! for a 1 ms system tick (`timeBeginPeriod(1)`) for as long as a serial transport is open, so the
 //! OS part never overshoots into the spin tail by a whole 15.6 ms tick even where the Rust
