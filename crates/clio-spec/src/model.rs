@@ -35,9 +35,58 @@ pub enum Endian {
     Little,
 }
 
+/// Which program's interpretation of the XML to follow (the author's DDT2000 behaviour notes).
+///
+/// - `Ddt2000` (default): DDT2000 itself, as reverse engineered from KWP2000Diag4.dll and
+///   DiagLibs2.dll (signed via VB `CBool`, field-width sign extension, LSB-based little endian,
+///   List before Scaled, VB `Format()` display, ...).
+/// - `Ddt4all`: the ddt4all Python decoder (commit `e109cd2`), kept for
+///   `tests/crosscheck_ddt4all.py` and docs/spec-semantics.md.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Semantics {
+    #[default]
+    Ddt2000,
+    Ddt4all,
+}
+
+/// `<Failures Name Id>`: the failure model of the definition (RE: DDT2000Libxml / KWP2000Diag4
+/// strings): 0 none, 1 failure flags (Sirius 32), 2 DTC read with after-sales frames, 3 DTC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Failures {
+    pub name: String,
+    pub id: u32,
+}
+
+impl Failures {
+    /// `Id="1"`: faults are flag items named by `<Devices>` (DiagFailures "Reading flags").
+    pub fn is_flags(&self) -> bool {
+        self.id == 1
+    }
+}
+
+/// `<Devices><Device Name Type>`: one component and the data items that report its faults.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Device {
+    pub name: String,
+    /// `Device@Type` (meaning not decoded).
+    pub device_type: Option<String>,
+    pub data: Vec<DeviceData>,
+}
+
+/// `<DeviceData Name FailureFlag>`. RE: KWP2000Diag4 FUN_230263d0 sets
+/// `IsFailureFlag = IIf(@FailureFlag = "1")` on the data item of that name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeviceData {
+    pub name: String,
+    pub failure_flag: bool,
+}
+
 /// One parsed ECU definition (`<Target>`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct EcuDef {
+    /// Interpretation the definition was parsed with and decodes with.
+    pub semantics: Semantics,
     /// `Target@Name`, e.g. "Safir 2".
     pub name: String,
     /// `<Function Name Address>`: diagnostic function and K-line address.
@@ -59,6 +108,10 @@ pub struct EcuDef {
     pub datas: Vec<DataDef>,
     /// All `<Request>` definitions in document order (same duplicate rule as `datas`).
     pub requests: Vec<Request>,
+    /// `<Failures>`.
+    pub failures: Option<Failures>,
+    /// `<Devices>`, in document order.
+    pub devices: Vec<Device>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -198,6 +251,8 @@ pub struct AutoIdent {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DataDef {
     pub name: String,
+    /// Interpretation used by [`DataDef::decode`] and friends (copied from [`EcuDef::semantics`]).
+    pub semantics: Semantics,
     pub description: Option<String>,
     pub comment: Option<String>,
     pub mnemonic: Option<String>,
@@ -207,9 +262,13 @@ pub struct DataDef {
     pub bytes_count: u32,
     /// Defined with `<Bytes>` rather than `<Bits>`.
     pub is_bytes: bool,
+    /// A `<Bits>` element is present (DDT2000 picks the item kind from it, see
+    /// [`DataDef::is_byte_array`]).
+    pub has_bits: bool,
     /// `Bytes@ascii="1"`: decode as text.
     pub ascii: bool,
-    /// `Bits@signed` present (any non-empty value, as in ddt4all).
+    /// `Bits@signed`: VB `CBool` under [`Semantics::Ddt2000`] (`"0"` is false), any non-empty
+    /// value under [`Semantics::Ddt4all`].
     pub signed: bool,
     /// `<Binary>` present under `<Bits>`.
     pub binary: bool,
@@ -250,7 +309,7 @@ pub struct Request {
     pub deny_access: Vec<String>,
     /// `<DossierMaintenabilite/>` present.
     pub dossier_maintenabilite: bool,
-    /// `Received@MinBytes` (0 if absent).
+    /// `Received@MinBytes` (absent: 1 under DDT2000, 0 under ddt4all).
     pub min_bytes: u32,
     /// `<ReplyBytes>`: canned reply used by DDT2000's simulation mode.
     pub reply_bytes: Option<HexBytes>,

@@ -1,6 +1,13 @@
-# clio-spec: DDT2000 XML semantics
+# clio-spec: DDT2000 XML semantics (ddt4all mode)
 
-How `crates/clio-spec` reads a DDT2000 ECU definition and turns response bytes into values.
+> Since M3 clio-spec has two interpretations (`Semantics`). The **default is
+> `Semantics::Ddt2000`**, DDT2000 itself as reverse engineered; it is described, with evidence, in
+> the author's DDT2000 behaviour notes. This document describes **`Semantics::Ddt4all`**,
+> which `crosscheck_ddt4all.py` uses (`dump --semantics ddt4all`). Validation of responses
+> (`decode_checked`) is the same in both modes.
+
+How `crates/clio-spec` reads a DDT2000 ECU definition and turns response bytes into values
+under `Semantics::Ddt4all`.
 The reference is the ddt4all Python decoder (GPL-3, `src/ddt4all/core/ecu/`, commit `e109cd2`).
 We match its **decoding** exactly. Where we deviate (mostly encoding and error handling), or where
 ddt4all and the XML disagree or are ambiguous, this document says so.

@@ -11,7 +11,7 @@ use roxmltree::Node;
 use serde::Serialize;
 
 use crate::error::SpecError;
-use crate::model::EcuDef;
+use crate::model::{EcuDef, Semantics};
 
 /// Something in the file that the parser did not read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -21,6 +21,14 @@ pub enum ParseWarning {
     UnknownElement { path: String },
     /// An attribute the parser does not read on this element.
     UnknownAttribute { path: String, name: String },
+    /// [`Semantics::Ddt2000`]: an attribute is absent (or not a VB boolean) and the DDT2000
+    /// default was used (`DataItem@FirstByte` 1, `Received@MinBytes` 1, `Bits@signed` /
+    /// `Bytes@ascii` false).
+    Defaulted {
+        path: String,
+        name: String,
+        value: String,
+    },
 }
 
 /// Warnings collected while parsing, in document order.
@@ -48,8 +56,14 @@ const SCHEMA: &[(&str, &[&str], &[&str])] = &[
             "AutoIdents",
             "Datas",
             "Requests",
+            "Failures",
+            "Devices",
         ],
     ),
+    ("Failures", &["Name", "Id"], &[]),
+    ("Devices", &[], &["Device"]),
+    ("Device", &["Name", "Type"], &["DeviceData"]),
+    ("DeviceData", &["Name", "FailureFlag"], &[]),
     ("Function", &["Name", "Address"], &[]),
     ("Projects", &[], &[]),
     ("DenyAccess", &[], &[]),
@@ -255,11 +269,55 @@ fn walk_children(
     }
 }
 
-pub(crate) fn report(doc: &roxmltree::Document) -> ParseReport {
+fn path_of(n: Node) -> String {
+    let mut parts: Vec<String> = n
+        .ancestors()
+        .filter(|a| a.is_element())
+        .map(segment)
+        .collect();
+    parts.reverse();
+    parts.join("/")
+}
+
+/// Defaults DDT2000 applies silently (`On Error Resume Next`), reported so a broken file is
+/// still noticed.
+fn ddt2000_defaults(root: Node, out: &mut Vec<ParseWarning>) {
+    let mut warn = |n: Node, name: &str, value: &str| {
+        out.push(ParseWarning::Defaulted {
+            path: path_of(n),
+            name: name.to_string(),
+            value: value.to_string(),
+        })
+    };
+    for n in root.descendants().filter(|n| n.is_element()) {
+        match n.tag_name().name() {
+            "DataItem" if crate::xml::attr(n, "FirstByte").is_none() => warn(n, "FirstByte", "1"),
+            "Received" if crate::xml::attr(n, "MinBytes").is_none() => warn(n, "MinBytes", "1"),
+            "Bits" | "Bytes" => {
+                let a = if n.tag_name().name() == "Bits" {
+                    "signed"
+                } else {
+                    "ascii"
+                };
+                if let Some(v) = n.attribute(a) {
+                    if crate::xml::vb_cbool(Some(v)).is_none() {
+                        warn(n, a, "false");
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+pub(crate) fn report(doc: &roxmltree::Document, sem: Semantics) -> ParseReport {
     let root = doc.root_element();
     let mut warnings = Vec::new();
     // The parser searches the whole document for these (`descendants(root, ..)`).
     walk(root, &segment(root), DOCUMENT_SCOPE, &mut warnings);
+    if sem == Semantics::Ddt2000 {
+        ddt2000_defaults(root, &mut warnings);
+    }
     ParseReport { warnings }
 }
 
@@ -267,7 +325,17 @@ impl EcuDef {
     /// Like [`from_xml_bytes`](Self::from_xml_bytes), and also report every element and
     /// attribute the parser did not read (misspellings, unsupported DDT2000 features,
     /// the screen layout sections).
+    /// Uses [`Semantics::Ddt2000`].
     pub fn from_xml_bytes_with_report(bytes: &[u8]) -> Result<(EcuDef, ParseReport), SpecError> {
-        crate::parse::parse_bytes(bytes, report)
+        Self::from_xml_bytes_with_report_as(bytes, Semantics::Ddt2000)
+    }
+
+    /// [`from_xml_bytes_with_report`](Self::from_xml_bytes_with_report) with the given
+    /// interpretation; DDT2000 defaults are reported as [`ParseWarning::Defaulted`].
+    pub fn from_xml_bytes_with_report_as(
+        bytes: &[u8],
+        semantics: Semantics,
+    ) -> Result<(EcuDef, ParseReport), SpecError> {
+        crate::parse::parse_bytes(bytes, semantics, |d| report(d, semantics))
     }
 }

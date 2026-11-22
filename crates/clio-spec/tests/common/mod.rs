@@ -30,9 +30,14 @@ pub fn ddt_file(name: &str) -> Option<Vec<u8>> {
     }
 }
 
+/// A Renault file parsed with ddt4all semantics (the golden tests pin ddt4all output).
 pub fn ddt_ecu(name: &str) -> Option<EcuDef> {
+    ddt_ecu_as(name, clio_spec::Semantics::Ddt4all)
+}
+
+pub fn ddt_ecu_as(name: &str, sem: clio_spec::Semantics) -> Option<EcuDef> {
     let bytes = ddt_file(name)?;
-    Some(EcuDef::from_xml_bytes(&bytes).unwrap_or_else(|e| panic!("{name}: {e}")))
+    Some(EcuDef::from_xml_bytes_as(&bytes, sem).unwrap_or_else(|e| panic!("{name}: {e}")))
 }
 
 pub fn fixture(name: &str) -> Vec<u8> {

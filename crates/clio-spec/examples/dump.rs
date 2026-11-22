@@ -6,13 +6,17 @@
 //! cargo run -p clio-spec --example dump -- ddt-xml/x65_addressing.xml
 //! ```
 //! `--response` may be repeated; each decode is printed as one JSON line.
+//! `--semantics ddt4all` decodes like ddt4all (used by tests/crosscheck_ddt4all.py); the default
+//! is DDT2000.
 
 use std::error::Error;
 
-use clio_spec::{Addressing, EcuDef, HexBytes, SpecError};
+use clio_spec::{Addressing, EcuDef, HexBytes, Semantics, SpecError};
 
 fn usage() -> ! {
-    eprintln!("usage: dump <file.xml> [--request NAME [--response HEX]...]");
+    eprintln!(
+        "usage: dump <file.xml> [--semantics ddt2000|ddt4all] [--request NAME [--response HEX]...]"
+    );
     std::process::exit(2);
 }
 
@@ -21,10 +25,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut path = None;
     let mut request = None;
     let mut responses = Vec::new();
+    let mut semantics = Semantics::Ddt2000;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--request" => request = Some(args.next().unwrap_or_else(|| usage())),
             "--response" => responses.push(args.next().unwrap_or_else(|| usage())),
+            "--semantics" => {
+                semantics = match args.next().as_deref() {
+                    Some("ddt2000") => Semantics::Ddt2000,
+                    Some("ddt4all") => Semantics::Ddt4all,
+                    _ => usage(),
+                }
+            }
             _ if path.is_none() && !a.starts_with("--") => path = Some(a),
             _ => usage(),
         }
@@ -32,7 +44,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let path = path.unwrap_or_else(|| usage());
     let bytes = std::fs::read(&path)?;
 
-    let ecu = match EcuDef::from_xml_bytes(&bytes) {
+    let ecu = match EcuDef::from_xml_bytes_as(&bytes, semantics) {
         Ok(ecu) => ecu,
         Err(SpecError::WrongDocument(_)) if request.is_none() => {
             let addressing = Addressing::from_xml_bytes(&bytes)?;

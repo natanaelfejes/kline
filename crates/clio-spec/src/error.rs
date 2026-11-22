@@ -45,6 +45,15 @@ pub enum SpecError {
         /// The nearest value that can be encoded (what `encode` would round to).
         nearest: f64,
     },
+    /// DDT2000 semantics: a numeric item spans more than 4 bytes
+    /// (`(BitOffset mod 8 + bits - 1) / 8 + 1`), which DDT2000 refuses at load ("Invalid data
+    /// position, can't be over 5 bytes", RE: DiagLibs2 0x1100cf00 / 0x1100dbc0).
+    #[error("request {request:?}: item {item:?} spans {span} bytes, DDT2000 allows at most 4")]
+    SpanTooLong {
+        request: String,
+        item: String,
+        span: u32,
+    },
     /// A `<DataItem>` without a `FirstByte` attribute.
     #[error("<DataItem Name={item:?}> has no FirstByte")]
     MissingFirstByte { item: String },

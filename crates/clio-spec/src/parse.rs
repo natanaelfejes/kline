@@ -7,7 +7,7 @@ use crate::error::SpecError;
 use crate::model::*;
 use crate::xml::{
     attr, attr_f64, attr_flag, attr_parse, child, children, decode_bytes, descendant, descendants,
-    invalid_value, text,
+    invalid_value, text, vb_cbool,
 };
 
 impl EcuDef {
@@ -15,14 +15,26 @@ impl EcuDef {
     /// declaration names).
     /// Elements and attributes the parser does not read are ignored; use
     /// [`from_xml_bytes_with_report`](Self::from_xml_bytes_with_report) to list them.
+    ///
+    /// Uses [`Semantics::Ddt2000`]; see [`from_xml_bytes_as`](Self::from_xml_bytes_as).
     pub fn from_xml_bytes(bytes: &[u8]) -> Result<EcuDef, SpecError> {
-        parse_bytes(bytes, |_| ()).map(|(ecu, ())| ecu)
+        Self::from_xml_bytes_as(bytes, Semantics::Ddt2000)
+    }
+
+    /// Parse with the given interpretation (the author's DDT2000 behaviour notes). Under
+    /// [`Semantics::Ddt2000`] a missing `DataItem@FirstByte` is 1 and a missing
+    /// `Received@MinBytes` is 1 (reported by
+    /// [`from_xml_bytes_with_report_as`](Self::from_xml_bytes_with_report_as)), and a numeric
+    /// item spanning more than 4 bytes is an error ([`SpecError::SpanTooLong`]).
+    pub fn from_xml_bytes_as(bytes: &[u8], semantics: Semantics) -> Result<EcuDef, SpecError> {
+        parse_bytes(bytes, semantics, |_| ()).map(|(ecu, ())| ecu)
     }
 }
 
 /// Decode, parse the XML, build the model and run `extra` on the same document.
 pub(crate) fn parse_bytes<T>(
     bytes: &[u8],
+    semantics: Semantics,
     extra: impl FnOnce(&Document) -> T,
 ) -> Result<(EcuDef, T), SpecError> {
     let text = decode_bytes(bytes)?;
@@ -31,7 +43,7 @@ pub(crate) fn parse_bytes<T>(
         ..Default::default()
     };
     let doc = Document::parse_with_options(&text, opts)?;
-    let ecu = parse_doc(&doc)?;
+    let ecu = parse_doc(&doc, semantics)?;
     Ok((ecu, extra(&doc)))
 }
 
@@ -52,7 +64,7 @@ fn find_target<'a, 'i>(doc: &'a Document<'i>) -> Result<Node<'a, 'i>, SpecError>
     Ok(target)
 }
 
-fn parse_doc(doc: &Document) -> Result<EcuDef, SpecError> {
+fn parse_doc(doc: &Document, sem: Semantics) -> Result<EcuDef, SpecError> {
     let target = find_target(doc)?;
     let root = doc.root_element();
 
@@ -103,16 +115,46 @@ fn parse_doc(doc: &Document) -> Result<EcuDef, SpecError> {
             endian = parse_endian(reqs, e)?;
         }
         for r in descendants(reqs, "Request") {
-            upsert(&mut requests, parse_request(r)?, |x| &x.name);
+            upsert(&mut requests, parse_request(r, sem)?, |x| &x.name);
         }
     }
 
     let mut datas: Vec<DataDef> = Vec::new();
     for d in descendants(root, "Data") {
-        upsert(&mut datas, parse_data(d)?, |x| &x.name);
+        upsert(&mut datas, parse_data(d, sem)?, |x| &x.name);
+    }
+    if sem == Semantics::Ddt2000 {
+        check_spans(&requests, &datas)?;
     }
 
+    let failures = match child(target, "Failures") {
+        Some(f) => Some(Failures {
+            name: f.attribute("Name").unwrap_or_default().to_string(),
+            id: attr_parse::<u32>(f, "Id")?.unwrap_or(0),
+        }),
+        None => None,
+    };
+    let devices = match child(target, "Devices") {
+        Some(ds) => children(ds, "Device")
+            .map(|d| Device {
+                name: d.attribute("Name").unwrap_or_default().to_string(),
+                device_type: attr(d, "Type").map(str::to_string),
+                data: children(d, "DeviceData")
+                    .map(|dd| DeviceData {
+                        name: dd.attribute("Name").unwrap_or_default().to_string(),
+                        // RE: KWP2000Diag4 FUN_230263d0: IIf(@FailureFlag = "1").
+                        failure_flag: dd.attribute("FailureFlag") == Some("1"),
+                    })
+                    .collect(),
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+
     Ok(EcuDef {
+        semantics: sem,
+        failures,
+        devices,
         name: target.attribute("Name").unwrap_or_default().to_string(),
         function,
         description: child(target, "Description").map(text),
@@ -125,6 +167,32 @@ fn parse_doc(doc: &Document) -> Result<EcuDef, SpecError> {
         datas,
         requests,
     })
+}
+
+/// DDT2000 refuses a numeric item whose bits span more than 4 bytes: n = (BitOffset mod 8 +
+/// bits - 1) / 8 + 1 > 4 raises "Invalid data position, can't be over 5 bytes" (RE: DiagLibs2
+/// BigEndian/LittleEndian init 0x1100dbc0 / 0x1100cf00, asm 0x1100cf89..cf9c). Byte-array items
+/// (`<Bytes>`, unsigned `Bits` >= 32) do not go through these classes and are not limited.
+fn check_spans(requests: &[Request], datas: &[DataDef]) -> Result<(), SpecError> {
+    for r in requests {
+        for item in r.sent_items.iter().chain(&r.received_items) {
+            let Some(d) = datas.iter().find(|d| d.name == item.name) else {
+                continue;
+            };
+            if d.is_byte_array() || d.bits_count == 0 {
+                continue;
+            }
+            let span = (item.bit_offset % 8 + d.bits_count - 1) / 8 + 1;
+            if span > 4 {
+                return Err(SpecError::SpanTooLong {
+                    request: r.name.clone(),
+                    item: item.name.clone(),
+                    span,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Insert, or replace an existing entry with the same key in place (Python dict semantics).
@@ -209,14 +277,17 @@ fn parse_can(can: Node) -> Result<Can, SpecError> {
     })
 }
 
-fn parse_data_item(n: Node) -> Result<DataItem, SpecError> {
+fn parse_data_item(n: Node, sem: Semantics) -> Result<DataItem, SpecError> {
     Ok(DataItem {
         name: n.attribute("Name").unwrap_or_default().to_string(),
-        // Present on all 2165 DataItems of our six files; a missing one is a broken file.
+        // Present on all 2165 DataItems of our six files.
         first_byte: match attr_parse::<u32>(n, "FirstByte")? {
             // Positions are 1-based; none of our files has 0 (ddt4all would never decode it).
             Some(0) => return Err(invalid_value(n, "attribute FirstByte", "0")),
             Some(b) => b,
+            // RE: KWP2000Diag4 FUN_2301d1d0: `local_44 = 1` before the read (On Error Resume
+            // Next). Reported as a ParseWarning::Defaulted.
+            None if sem == Semantics::Ddt2000 => 1,
             None => {
                 return Err(SpecError::MissingFirstByte {
                     item: n.attribute("Name").unwrap_or_default().to_string(),
@@ -230,11 +301,11 @@ fn parse_data_item(n: Node) -> Result<DataItem, SpecError> {
     })
 }
 
-fn parse_items(section: Option<Node>) -> Result<Vec<DataItem>, SpecError> {
+fn parse_items(section: Option<Node>, sem: Semantics) -> Result<Vec<DataItem>, SpecError> {
     let mut items = Vec::new();
     if let Some(s) = section {
         for di in descendants(s, "DataItem") {
-            upsert(&mut items, parse_data_item(di)?, |x| &x.name);
+            upsert(&mut items, parse_data_item(di, sem)?, |x| &x.name);
         }
     }
     Ok(items)
@@ -244,7 +315,12 @@ fn hex_text(n: Node) -> Result<HexBytes, SpecError> {
     HexBytes::from_hex(&text(n))
 }
 
-fn parse_request(r: Node) -> Result<Request, SpecError> {
+fn parse_request(r: Node, sem: Semantics) -> Result<Request, SpecError> {
+    // RE: KWP2000Diag4 FUN_2301b7f0: `local_48 = 1` before reading Received@MinBytes.
+    let default_min = match sem {
+        Semantics::Ddt2000 => 1,
+        Semantics::Ddt4all => 0,
+    };
     let sent = descendant(r, "Sent");
     let received = descendant(r, "Received");
     let sent_bytes = match sent.and_then(|s| descendant(s, "SentBytes")) {
@@ -266,8 +342,8 @@ fn parse_request(r: Node) -> Result<Request, SpecError> {
             .unwrap_or_default(),
         dossier_maintenabilite: descendant(r, "DossierMaintenabilite").is_some(),
         min_bytes: match received {
-            Some(rc) => attr_parse::<u32>(rc, "MinBytes")?.unwrap_or(0),
-            None => 0,
+            Some(rc) => attr_parse::<u32>(rc, "MinBytes")?.unwrap_or(default_min),
+            None => default_min,
         },
         reply_bytes: descendant(r, "ReplyBytes").map(hex_text).transpose()?,
         shift_bytes_count: match descendant(r, "ShiftBytesCount") {
@@ -279,14 +355,16 @@ fn parse_request(r: Node) -> Result<Request, SpecError> {
             ),
             None => None,
         },
-        sent_items: parse_items(sent)?,
-        received_items: parse_items(received)?,
+        sent_items: parse_items(sent, sem)?,
+        received_items: parse_items(received, sem)?,
     })
 }
 
-fn parse_data(d: Node) -> Result<DataDef, SpecError> {
+fn parse_data(d: Node, sem: Semantics) -> Result<DataDef, SpecError> {
     let mut def = DataDef {
         name: d.attribute("Name").unwrap_or_default().to_string(),
+        semantics: sem,
+        has_bits: false,
         description: descendant(d, "Description").map(text),
         comment: descendant(d, "Comment").map(text),
         mnemonic: descendant(d, "Mnemonic").map(text),
@@ -337,15 +415,24 @@ fn parse_data(d: Node) -> Result<DataDef, SpecError> {
                     .ok_or_else(|| invalid_value(bytes, "attribute count", &count))?;
             }
         }
-        def.ascii = bytes.attribute("ascii") == Some("1");
+        def.ascii = match sem {
+            // RE: KWP2000Diag4 FUN_2301e4d0: ascii = CBool(@ascii).
+            Semantics::Ddt2000 => vb_cbool(bytes.attribute("ascii")).unwrap_or(false),
+            Semantics::Ddt4all => bytes.attribute("ascii") == Some("1"),
+        };
     }
 
     if let Some(bits) = descendant(d, "Bits") {
+        def.has_bits = true;
         if let Some(n) = attr_parse::<u32>(bits, "count")? {
             def.bits_count = n;
             def.bytes_count = n.div_ceil(8);
         }
-        def.signed = attr(bits, "signed").is_some();
+        def.signed = match sem {
+            // RE: KWP2000Diag4 FUN_2301e4d0: signed = CBool(@signed), so "0" is false.
+            Semantics::Ddt2000 => vb_cbool(bits.attribute("signed")).unwrap_or(false),
+            Semantics::Ddt4all => attr(bits, "signed").is_some(),
+        };
         def.binary = descendant(bits, "Binary").is_some();
         if let Some(sc) = descendant(bits, "Scaled") {
             // Defaults as in ddt4all. Absent in our six files on 829 (Step), 906 (Offset) and

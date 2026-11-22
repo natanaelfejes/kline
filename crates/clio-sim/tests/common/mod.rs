@@ -41,7 +41,7 @@ pub fn cfg(def: &EcuDef) -> LinkConfig {
 pub fn sirius_scenario() -> Scenario {
     Scenario::new()
         .text("Calibration", "SIM-0001")
-        .set("Supplier code", Value::Hex("0a1b".into()))
+        .set("Supplier code", Value::Hex("0A1B".into()))
         .number("Engine speed", 850.0)
         .number("Vehicle speed", 0.0)
         .number("Injection time", 2400.0)

@@ -10,8 +10,18 @@ use clio_spec::{
 };
 use common::{display_of, fixture, number_of, raw_of};
 
+/// These tests pin the ddt4all interpretation (docs/spec-semantics.md); DDT2000 semantics are
+/// tested in tests/ddt2000.rs.
+fn ddt4all(b: &[u8]) -> Result<EcuDef, clio_spec::SpecError> {
+    EcuDef::from_xml_bytes_as(b, clio_spec::Semantics::Ddt4all)
+}
+
+fn ddt4all_report(b: &[u8]) -> Result<(EcuDef, clio_spec::ParseReport), clio_spec::SpecError> {
+    EcuDef::from_xml_bytes_with_report_as(b, clio_spec::Semantics::Ddt4all)
+}
+
 fn ecu() -> EcuDef {
-    EcuDef::from_xml_bytes(&fixture("minimal_ecu.xml")).expect("fixture parses")
+    ddt4all(&fixture("minimal_ecu.xml")).expect("fixture parses")
 }
 
 /// The frame used by `read_block_decodes` (also used by the Python crosscheck).
@@ -339,7 +349,7 @@ fn json_export() {
 
 #[test]
 fn windows_1252_fixture() {
-    let e = EcuDef::from_xml_bytes(&fixture("cp1252_ecu.xml")).unwrap();
+    let e = ddt4all(&fixture("cp1252_ecu.xml")).unwrap();
     assert_eq!(e.name, "Démo 1252");
     let k = e.k.as_ref().unwrap();
     assert_eq!(k.protocol(), KProtocol::Iso8);
@@ -379,38 +389,32 @@ fn addressing_fixture() {
 fn rejects_malformed_input() {
     let wrong_ns = br#"<xml><Target Name="x" xmlns="urn:other"/></xml>"#;
     assert!(matches!(
-        EcuDef::from_xml_bytes(wrong_ns),
+        ddt4all(wrong_ns),
         Err(SpecError::WrongDocument(_))
     ));
     let bad_endian = br#"<Target xmlns="http://www-diag.renault.com/2002/ECU"><Requests Endian="Middle"/></Target>"#;
     assert!(matches!(
-        EcuDef::from_xml_bytes(bad_endian),
+        ddt4all(bad_endian),
         Err(SpecError::InvalidValue { .. })
     ));
     let bad_hex = br#"<Target xmlns="http://www-diag.renault.com/2002/ECU"><Requests><Request Name="r"><Sent><SentBytes>215</SentBytes></Sent></Request></Requests></Target>"#;
-    assert!(matches!(
-        EcuDef::from_xml_bytes(bad_hex),
-        Err(SpecError::InvalidHex(_))
-    ));
+    assert!(matches!(ddt4all(bad_hex), Err(SpecError::InvalidHex(_))));
     let bad_kw = br#"<Target xmlns="http://www-diag.renault.com/2002/ECU"><K><ISO8><KW1 Value="300"/></ISO8></K></Target>"#;
     assert!(matches!(
-        EcuDef::from_xml_bytes(bad_kw),
+        ddt4all(bad_kw),
         Err(SpecError::InvalidValue { .. })
     ));
     // Declared UTF-8 but contains a lone 0xE9 (windows-1252 e acute).
     let mislabeled = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><Target xmlns=\"http://www-diag.renault.com/2002/ECU\" Name=\"D\xE9mo\"/>";
-    assert!(matches!(
-        EcuDef::from_xml_bytes(mislabeled),
-        Err(SpecError::Encoding(_))
-    ));
+    assert!(matches!(ddt4all(mislabeled), Err(SpecError::Encoding(_))));
     let unknown = b"<?xml version=\"1.0\" encoding=\"klingon\"?><Target/>";
     assert!(matches!(
-        EcuDef::from_xml_bytes(unknown),
+        ddt4all(unknown),
         Err(SpecError::UnknownEncoding(_))
     ));
     // Minimal valid document: everything optional is empty.
     let minimal = br#"<Target xmlns="http://www-diag.renault.com/2002/ECU" Name="m"/>"#;
-    let e = EcuDef::from_xml_bytes(minimal).unwrap();
+    let e = ddt4all(minimal).unwrap();
     assert!(e.k.is_none() && e.requests.is_empty() && e.datas.is_empty());
     assert_eq!(e.endian, Endian::Big);
 }
@@ -479,7 +483,7 @@ fn checked_decode_rejects_bad_responses() {
         Err(SpecError::TooShort { min: 2, len: 1 })
     ));
     // A SID without a positive response.
-    let ff = EcuDef::from_xml_bytes(&target(
+    let ff = ddt4all(&target(
         "<Requests><Request Name=\"r\"><Sent><SentBytes>FF00</SentBytes></Sent></Request></Requests>",
     ))
     .unwrap();
@@ -495,7 +499,7 @@ fn missing_first_byte_is_an_error() {
         r#"<Datas><Data Name="d"><Bits count="8"/></Data></Datas><Requests><Request Name="r"><Sent><SentBytes>2101</SentBytes></Sent><Received MinBytes="3"><DataItem Name="d" BitOffset="0"/></Received></Request></Requests>"#,
     );
     assert!(matches!(
-        EcuDef::from_xml_bytes(&xml),
+        ddt4all(&xml),
         Err(SpecError::MissingFirstByte { item }) if item == "d"
     ));
 }
@@ -505,7 +509,7 @@ fn misspelled_attribute_warns() {
     let xml = target(
         r#"<Datas><Data Name="speed"><Bits count="8"><Scaled Stepp="2" Unit="km/h"/></Bits></Data></Datas>"#,
     );
-    let (e, report) = EcuDef::from_xml_bytes_with_report(&xml).unwrap();
+    let (e, report) = ddt4all_report(&xml).unwrap();
     // The misspelled Step falls back to the default...
     assert_eq!(e.data("speed").unwrap().scaled.as_ref().unwrap().step, 1.0);
     // ...and the report says so.
@@ -518,7 +522,7 @@ fn misspelled_attribute_warns() {
     );
     // An unknown element is reported once, not its subtree.
     let xml = target(r#"<Datas><Data Name="x"><Bitz count="8"><Scaled/></Bitz></Data></Datas>"#);
-    let (_, report) = EcuDef::from_xml_bytes_with_report(&xml).unwrap();
+    let (_, report) = ddt4all_report(&xml).unwrap();
     assert_eq!(
         report.warnings,
         [ParseWarning::UnknownElement {
@@ -526,7 +530,7 @@ fn misspelled_attribute_warns() {
         }]
     );
     // Our hand-written fixture uses nothing the parser ignores.
-    let (_, report) = EcuDef::from_xml_bytes_with_report(&fixture("minimal_ecu.xml")).unwrap();
+    let (_, report) = ddt4all_report(&fixture("minimal_ecu.xml")).unwrap();
     assert_eq!(report.warnings, []);
 }
 
@@ -620,7 +624,7 @@ fn first_byte_zero_is_rejected_at_parse_time() {
         r#"<Datas><Data Name="d"><Bits count="8"/></Data></Datas><Requests><Request Name="r"><Sent><SentBytes>2101</SentBytes></Sent><Received MinBytes="3"><DataItem Name="d" FirstByte="0"/></Received></Request></Requests>"#,
     );
     assert!(matches!(
-        EcuDef::from_xml_bytes(&xml),
+        ddt4all(&xml),
         Err(SpecError::InvalidValue { what, value, .. }) if what == "attribute FirstByte" && value == "0"
     ));
 }
@@ -663,7 +667,7 @@ fn report_follows_the_recursive_lookup_of_the_parser() {
     let xml = target(
         r#"<Datas><Data Name="d"><Wrap><Bits count="16"><Scaled Stepp="2"/></Bits></Wrap></Data></Datas><Requests><Request Name="r"><Group><Sent><SentBytes>2101</SentBytes></Sent></Group><Received MinBytes="3"><Wrapper><DataItem Name="d" FirstByte="3" Bogus="1"/></Wrapper></Received></Request></Requests>"#,
     );
-    let (e, report) = EcuDef::from_xml_bytes_with_report(&xml).unwrap();
+    let (e, report) = ddt4all_report(&xml).unwrap();
     // What the parser reads...
     assert_eq!(e.data("d").unwrap().bits_count, 16);
     let r = e.request("r").unwrap();
@@ -698,7 +702,7 @@ fn report_follows_the_recursive_lookup_of_the_parser() {
     let xml = target(
         r#"<Datas><Data Name="d"><Bitz><Scaled Step="2"/></Bitz></Data></Datas><Requests><Request Name="r"><DataItem Name="d" FirstByte="3"/></Request></Requests>"#,
     );
-    let (e, report) = EcuDef::from_xml_bytes_with_report(&xml).unwrap();
+    let (e, report) = ddt4all_report(&xml).unwrap();
     assert!(e.data("d").unwrap().scaled.is_none());
     assert!(e.request("r").unwrap().received_items.is_empty());
     assert_eq!(report.warnings.len(), 2, "{:?}", report.warnings);
@@ -757,7 +761,7 @@ fn allow_short_relaxes_only_min_bytes() {
 #[test]
 fn little_endian_12_bit_insert_round_trips() {
     let xml = target(r#"<Datas><Data Name="d"><Bits count="12"><Scaled/></Bits></Data></Datas>"#);
-    let e = EcuDef::from_xml_bytes(&xml).unwrap();
+    let e = ddt4all(&xml).unwrap();
     let d = e.data("d").unwrap();
     let item = DataItem {
         name: "d".into(),

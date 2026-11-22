@@ -104,7 +104,7 @@ def max_reach(ecu, req):
 
 
 def ours(dump, path, request, frames):
-    args = [dump, path, "--request", request]
+    args = [dump, path, "--semantics", "ddt4all", "--request", request]
     for f in frames:
         args += ["--response", f.hex().upper()]
     out = subprocess.run(args, check=True, capture_output=True, text=True).stdout
@@ -208,7 +208,7 @@ def main():
                 continue
             ecu = EcuFile(path, True)
             ecus[f] = ecu
-            model = json.loads(subprocess.run([dump, path], check=True, capture_output=True,
+            model = json.loads(subprocess.run([dump, path, "--semantics", "ddt4all"], check=True, capture_output=True,
                                               text=True).stdout)
             k = model["k"] or {}
             kwp = k.get("kwp") or {}

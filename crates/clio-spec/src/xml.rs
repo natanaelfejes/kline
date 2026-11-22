@@ -130,3 +130,18 @@ pub(crate) fn attr_flag(node: Node, name: &str) -> Result<Option<bool>, SpecErro
         Some(v) => Err(invalid_value(node, &format!("attribute {name}"), v)),
     }
 }
+
+/// VB6 `CBool` of an attribute string, as DDT2000 reads `Bits@signed` and `Bytes@ascii`
+/// (RE: KWP2000Diag4 FUN_2301e4d0, `__vbaBoolVar`). `"True"`/`"False"` (any case) or a number
+/// (non-zero is true). Absent, empty or anything else gives `None`: VB raises "Type mismatch",
+/// which DDT2000's `On Error Resume Next` turns into "keep the default" (false).
+pub(crate) fn vb_cbool(value: Option<&str>) -> Option<bool> {
+    let v = value?.trim();
+    if v.eq_ignore_ascii_case("true") {
+        return Some(true);
+    }
+    if v.eq_ignore_ascii_case("false") {
+        return Some(false);
+    }
+    v.parse::<f64>().ok().map(|x| x != 0.0)
+}

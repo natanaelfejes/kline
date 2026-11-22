@@ -207,15 +207,13 @@ fn x65_addressing() {
 
 /// Every element and attribute of the six files that the parser does not read, by local name
 /// (`Element@attribute` for attributes). Changing the parser or the files changes this list.
-/// The ignored elements are DDT2000's screen layout (`Categories`), fault catalogue
-/// (`Devices`, `Failures`), `Language` and `DateOfficialisation`; the attributes are
-/// publication metadata.
+/// The ignored elements are DDT2000's screen layout (`Categories`), `Language` and
+/// `DateOfficialisation`; the attributes are publication metadata. No DDT2000 default is
+/// applied anywhere in the six files (no `Defaulted` warning).
 /// Cross-checked against an ElementTree listing of all element/attribute names in the files.
 const UNKNOWN_SNAPSHOT: &[&str] = &[
     "Categories",
     "DateOfficialisation",
-    "Devices",
-    "Failures",
     "Language",
     "Target@email",
     "Target@href",
@@ -242,6 +240,9 @@ fn unknown_names_snapshot() {
             seen.insert(match w {
                 ParseWarning::UnknownElement { path } => last(&path),
                 ParseWarning::UnknownAttribute { path, name } => format!("{}@{name}", last(&path)),
+                ParseWarning::Defaulted { path, name, .. } => {
+                    format!("DEFAULT {}@{name}", last(&path))
+                }
             });
         }
     }

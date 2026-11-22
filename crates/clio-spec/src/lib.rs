@@ -1,7 +1,8 @@
 //! DDT2000 ECU definition XML -> typed model, plus data decode/encode.
 //!
-//! Pure library: no I/O beyond the bytes passed in. Semantics follow the ddt4all reference
-//! decoder; every deviation and ambiguity is listed in `docs/spec-semantics.md`.
+//! Pure library: no I/O beyond the bytes passed in. Two interpretations ([`Semantics`]):
+//! DDT2000 itself (default, the author's DDT2000 behaviour notes) and the ddt4all reference decoder
+//! (docs/spec-semantics.md, used by the ddt4all crosscheck).
 //!
 //! ```no_run
 //! # fn main() -> Result<(), clio_spec::SpecError> {
@@ -17,6 +18,7 @@
 
 mod addressing;
 mod codec;
+mod ddt2000;
 mod error;
 mod model;
 mod parse;

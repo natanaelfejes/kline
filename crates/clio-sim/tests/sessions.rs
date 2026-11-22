@@ -35,7 +35,7 @@ fn sirius_full_session_round_trips_scenario() {
     let ident = positive(&d.request(&mut s, &[0x21, 0x80]).unwrap());
     let got = decode(&def, "Identification", &ident);
     assert_eq!(got["Calibration"], Value::Text("SIM-0001".into()));
-    assert_eq!(got["Supplier code"], Value::Hex("0a1b".into()));
+    assert_eq!(got["Supplier code"], Value::Hex("0A1B".into()));
 
     for name in ["Live A9", "Live AA"] {
         let lid = def.request(name).unwrap().sent_bytes.0.clone();

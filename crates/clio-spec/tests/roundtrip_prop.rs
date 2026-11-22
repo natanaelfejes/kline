@@ -1,11 +1,13 @@
 //! Property: for every scaled or list data of the three definitions used on the car,
 //! `encode(interpret(raw)) == raw` and `encode_exact(interpret(raw)) == raw` over the whole raw
-//! range.
+//! range, under both semantics (DDT2000: every numeric item, since all of them are scaled or
+//! listed).
 
 mod common;
 
+use clio_spec::Semantics;
 use clio_spec::{DataDef, Raw};
-use common::ddt_ecu;
+use common::ddt_ecu_as;
 use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
 
@@ -38,12 +40,20 @@ fn round_trips(d: &DataDef, raw: u64) -> Result<(), TestCaseError> {
 
 #[test]
 fn encode_inverts_decode_for_scaled_and_list_data() {
-    for file in FILES {
-        let Some(ecu) = ddt_ecu(file) else { continue };
+    for (file, sem) in FILES
+        .iter()
+        .flat_map(|f| [(f, Semantics::Ddt4all), (f, Semantics::Ddt2000)])
+    {
+        let Some(ecu) = ddt_ecu_as(file, sem) else {
+            continue;
+        };
         let defs: Vec<DataDef> = ecu
             .datas
             .iter()
-            .filter(|d| d.scaled.is_some() || !d.list.is_empty())
+            .filter(|d| match sem {
+                Semantics::Ddt4all => d.scaled.is_some() || !d.list.is_empty(),
+                Semantics::Ddt2000 => !d.is_byte_array(),
+            })
             .cloned()
             .collect();
         assert!(!defs.is_empty(), "{file}");

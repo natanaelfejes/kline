@@ -3,8 +3,9 @@
 
 use serde::Serialize;
 
+use crate::ddt2000;
 use crate::error::SpecError;
-use crate::model::{DataDef, DataItem, EcuDef, Endian, HexBytes, Request};
+use crate::model::{DataDef, DataItem, EcuDef, Endian, HexBytes, Request, Scaled, Semantics};
 
 /// A decoded (or to-be-encoded) value.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -14,8 +15,9 @@ pub enum Value {
     Number(f64),
     /// A `<List>` label, or the text of an ASCII `<Bytes>` item.
     Text(String),
-    /// Unscaled value with no matching list entry: lowercase hex of the raw bytes, exactly as
-    /// ddt4all displays it.
+    /// Hex text. DDT2000: a byte-array item (uppercase, `ByteArray.Text`) or a value missing
+    /// from the List (VB `Hex()` of the value; the display adds `##..##`). ddt4all: an unscaled
+    /// value with no matching list entry, lowercase hex of the raw bytes.
     Hex(String),
 }
 
@@ -36,16 +38,15 @@ pub struct DecodedItem {
     /// `None` when the response is too short for this item (ddt4all returns `None` too).
     pub raw: Option<Raw>,
     pub value: Option<Value>,
-    /// The string ddt4all's `getDisplayValue` would show.
+    /// The string DDT2000's `DiagItem.Text` (or, under [`Semantics::Ddt4all`], ddt4all's
+    /// `getDisplayValue`) would show.
     pub display: Option<String>,
     pub unit: Option<String>,
 }
 
 impl DecodedItem {
-    /// The raw integer of a numeric item (`None` for ASCII or wider than 8 bytes, or when the
-    /// frame was too short). The display ignores `Format="bin"` / `Format="00"`
-    /// (docs/spec-semantics.md), so a caller that wants binary or zero-padded output formats
-    /// this value itself.
+    /// The raw integer of a numeric item (`None` for byte-array items, or when the frame was
+    /// too short).
     pub fn raw_int(&self) -> Option<u64> {
         match self.raw {
             Some(Raw::Int(v)) => Some(v),
@@ -223,22 +224,66 @@ fn effective_endian(item: &DataItem, request_endian: Endian) -> Endian {
     item.endian.unwrap_or(request_endian)
 }
 
+const UNIT_SCALE: Scaled = Scaled {
+    step: 1.0,
+    offset: 0.0,
+    divide_by: 1.0,
+    format: None,
+    unit: None,
+};
+
 impl DataDef {
     /// Length in bytes of the raw value (`ceil(bits_count / 8)`).
     pub fn raw_len(&self) -> usize {
         (self.bits_count as usize).div_ceil(8)
     }
 
-    /// Unit of a scaled value.
-    pub fn unit(&self) -> Option<&str> {
-        self.scaled.as_ref().and_then(|s| s.unit.as_deref())
+    /// The item is a byte array (shown as text or hex, never scaled).
+    ///
+    /// DDT2000 (RE: KWP2000Diag4 FUN_2301e4d0): with `<Bits>`, only an unsigned item of 32 bits
+    /// or more; without `<Bits>`, a `<Bytes>` item. ddt4all: ASCII items and items over 8 bytes
+    /// (the [`Raw::Bytes`] cases).
+    pub fn is_byte_array(&self) -> bool {
+        match self.semantics {
+            Semantics::Ddt2000 if self.has_bits => self.bits_count >= 32 && !self.signed,
+            Semantics::Ddt2000 => self.is_bytes,
+            Semantics::Ddt4all => self.ascii || self.raw_len() > 8,
+        }
     }
 
-    /// Width used for sign extension: ddt4all only handles 1- and 2-byte signed values.
+    /// The linear conversion actually applied, if any.
+    ///
+    /// DDT2000: a numeric item without `<List>` and with more than 1 bit is always scaled, with
+    /// Step 1 / Offset 0 / DivideBy 1 when `<Scaled>` is absent; a `<List>` wins over
+    /// `<Scaled>` (RE: KWP2000Diag4 FUN_2301e4d0, list kind called without coefficients) and a
+    /// 1-bit item is never scaled (RE: KWP2000Diag4 InitNumeric 0x2306e1a0, `1 < bits`).
+    /// ddt4all: `<Scaled>` as written.
+    pub fn scaling(&self) -> Option<&Scaled> {
+        match self.semantics {
+            Semantics::Ddt4all => self.scaled.as_ref(),
+            Semantics::Ddt2000 => {
+                if self.is_byte_array() || !self.list.is_empty() || self.bits_count <= 1 {
+                    None
+                } else {
+                    Some(self.scaled.as_ref().unwrap_or(&UNIT_SCALE))
+                }
+            }
+        }
+    }
+
+    /// Unit of a scaled value.
+    pub fn unit(&self) -> Option<&str> {
+        self.scaling().and_then(|s| s.unit.as_deref())
+    }
+
+    /// Width used for sign extension: ddt4all only handles 1- and 2-byte signed values at bit
+    /// 7/15; DDT2000 sign-extends at the field width.
     fn sign_width(&self) -> Option<u32> {
-        match (self.signed, self.bytes_count) {
-            (true, 1) => Some(8),
-            (true, 2) => Some(16),
+        match (self.semantics, self.signed, self.bytes_count) {
+            (Semantics::Ddt2000, true, _) if !self.is_byte_array() => Some(self.bits_count),
+            (Semantics::Ddt2000, _, _) => None,
+            (Semantics::Ddt4all, true, 1) => Some(8),
+            (Semantics::Ddt4all, true, 2) => Some(16),
             _ => None,
         }
     }
@@ -260,6 +305,15 @@ impl DataDef {
             return None;
         }
         let start = item.first_byte as usize - 1;
+        if self.semantics == Semantics::Ddt2000 {
+            if self.is_byte_array() {
+                return frame.get(start..start.checked_add(n)?).map(<[u8]>::to_vec);
+            }
+            if effective_endian(item, request_endian) == Endian::Little {
+                let v = ddt2000::le_get(frame, item.first_byte, item.bit_offset, self.bits_count)?;
+                return Some(v.to_be_bytes()[8 - n..].to_vec());
+            }
+        }
         let span = frame.get(start..start.checked_add(span_len)?)?;
         let mut out = vec![0u8; n];
         match effective_endian(item, request_endian) {
@@ -283,7 +337,7 @@ impl DataDef {
 
     /// Wrap raw bytes (as returned by [`extract`](Self::extract)) in a [`Raw`].
     pub fn raw_from_bytes(&self, raw: &[u8]) -> Raw {
-        if self.ascii || raw.len() > 8 {
+        if self.is_byte_array() || raw.len() > 8 {
             Raw::Bytes(HexBytes(raw.to_vec()))
         } else {
             Raw::Int(raw.iter().fold(0u64, |a, &x| a << 8 | x as u64))
@@ -315,9 +369,55 @@ impl DataDef {
         }
     }
 
-    /// Convert raw bytes to a value and its ddt4all display string (`getDisplayValue`).
+    /// DDT2000 `DiagItem.Text` (RE: KWP2000Diag4 0x2306f520).
+    fn interpret_ddt2000(&self, raw: &[u8]) -> Option<(Value, String)> {
+        if self.is_byte_array() {
+            if self.ascii {
+                let s = ddt2000::cp1252(raw);
+                return Some((Value::Text(s.clone()), s));
+            }
+            let h = ddt2000::hex_upper(raw);
+            return Some((Value::Hex(h.clone()), h));
+        }
+        let u = raw.iter().fold(0u64, |a, &x| a << 8 | u64::from(x));
+        let v = match self.sign_width() {
+            Some(w) => ddt2000::sign_extend(u, w),
+            None => u as i64,
+        };
+        if !self.list.is_empty() {
+            return Some(match self.list.iter().rev().find(|i| i.value == v) {
+                Some(item) => (Value::Text(item.text.clone()), item.text.clone()),
+                None => {
+                    let h = ddt2000::vb_hex(v);
+                    let d = format!("##{h}##");
+                    (Value::Hex(h), d)
+                }
+            });
+        }
+        let Some(sc) = self.scaling() else {
+            // 1-bit item: CStr(value).
+            return Some((Value::Number(v as f64), v.to_string()));
+        };
+        if sc.divide_by == 0.0 {
+            // VB raises a division-by-zero error; no value.
+            return None;
+        }
+        let res = (v as f64 * sc.step + sc.offset) / sc.divide_by;
+        let text = match sc.format.as_deref() {
+            Some("bin") => ddt2000::bin_string(res, self.bits_count),
+            Some(f) => ddt2000::vb_format(res, f),
+            None => ddt2000::vb_general(res),
+        };
+        Some((Value::Number(res), text))
+    }
+
+    /// Convert raw bytes to a value and its display string: DDT2000 `DiagItem.Text`, or
+    /// ddt4all `getDisplayValue` under [`Semantics::Ddt4all`].
     /// Returns `None` only for a scaled item with `DivideBy` 0 (ddt4all returns `None` too).
     pub fn interpret(&self, raw: &[u8]) -> Option<(Value, String)> {
+        if self.semantics == Semantics::Ddt2000 {
+            return self.interpret_ddt2000(raw);
+        }
         if self.ascii {
             let s = utf8_ignore(raw);
             return Some((Value::Text(s.clone()), s));
@@ -393,7 +493,7 @@ impl DataDef {
     /// and ASCII data, `Hex` for raw hex input.
     pub fn encode(&self, value: &Value) -> Result<Raw, SpecError> {
         match value {
-            Value::Text(s) if self.ascii => {
+            Value::Text(s) if self.ascii && self.is_byte_array_for_text() => {
                 if !s.is_ascii() {
                     return Err(encode_err(self, "ASCII data accepts only ASCII text"));
                 }
@@ -442,7 +542,7 @@ impl DataDef {
                 if !x.is_finite() {
                     return Err(encode_err(self, "value is not finite"));
                 }
-                let r = match &self.scaled {
+                let r = match self.scaling() {
                     Some(sc) => {
                         if sc.step == 0.0 || sc.divide_by == 0.0 {
                             return Err(encode_err(self, "Step or DivideBy is 0"));
@@ -473,7 +573,7 @@ impl DataDef {
         // Range first, so an out-of-range value is an Encode error and `nearest` of OffGrid is
         // always encodable.
         let raw = self.encode(value)?;
-        if let (Value::Number(x), Some(sc)) = (value, &self.scaled) {
+        if let (Value::Number(x), Some(sc)) = (value, self.scaling()) {
             if x.is_finite() && sc.step != 0.0 && sc.divide_by != 0.0 {
                 let r = (x * sc.divide_by - sc.offset) / sc.step;
                 if (r - r.round()).abs() > Self::GRID_TOLERANCE {
@@ -492,6 +592,10 @@ impl DataDef {
     /// accepts. Every decoded value of the car's definitions re-encodes with it
     /// (tests/roundtrip_prop.rs).
     pub const GRID_TOLERANCE: f64 = 1e-6;
+
+    fn is_byte_array_for_text(&self) -> bool {
+        self.semantics == Semantics::Ddt4all || self.is_byte_array()
+    }
 
     /// Write a raw value into a frame at `item`'s position (inverse of
     /// [`extract`](Self::extract)). Bits outside the item are left untouched.
@@ -517,6 +621,33 @@ impl DataDef {
             return Err(out_of_frame(0));
         }
         let start = item.first_byte as usize - 1;
+        if self.semantics == Semantics::Ddt2000 {
+            if self.is_byte_array() {
+                let end = start + val.len();
+                frame
+                    .get_mut(start..end)
+                    .ok_or(out_of_frame(end))?
+                    .copy_from_slice(&val);
+                return Ok(());
+            }
+            if effective_endian(item, request_endian) == Endian::Little {
+                let v = val.iter().fold(0u64, |a, &x| a << 8 | u64::from(x));
+                if v > ddt2000::mask(self.bits_count) {
+                    return Err(encode_err(self, "raw wider than bit count"));
+                }
+                let end = start
+                    + ((item.bit_offset % 8 + self.bits_count - 1) / 8 + 1) as usize
+                    + (item.bit_offset / 8) as usize;
+                return ddt2000::le_set(
+                    frame,
+                    item.first_byte,
+                    item.bit_offset,
+                    self.bits_count,
+                    v,
+                )
+                .ok_or(out_of_frame(end));
+            }
+        }
         let end = start + span_len;
         let span = frame.get_mut(start..end).ok_or(out_of_frame(end))?;
         let n = val.len();
