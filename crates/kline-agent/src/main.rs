@@ -8,8 +8,6 @@
 
 #![forbid(unsafe_code)]
 
-use std::sync::atomic::Ordering;
-
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
 use kline_core::safety::{self, Tier};
@@ -103,7 +101,10 @@ fn prepare(ctx: &mut Ctx, a: &PrepareArgs) -> Result<(), CliError> {
 fn main() -> anyhow::Result<()> {
     let mut env = Env::system();
     let stop = env.stop.clone();
-    ctrlc::set_handler(move || stop.store(true, Ordering::SeqCst))
+    // Ctrl-C, SIGTERM and SIGHUP (ctrlc `termination`) end `live`/`scan` cleanly: the session
+    // is stopped and the capture is complete; an init schedule stops before its next attempt. A
+    // second one releases K and exits at once (final critique F05).
+    ctrlc::set_handler(move || kline_host::transport::on_interrupt(&stop))
         .context("installing the Ctrl-C handler")?;
     if safety::APPROVALS_COMPILED {
         // Cargo unified kline-core's feature in from another member (e.g. a joint build with

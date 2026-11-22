@@ -160,6 +160,59 @@ impl Transport for BlindBreak {
     }
 }
 
+/// Presses Ctrl-C (sets the stop flag) at the first write after an init attempt has ended (the
+/// first request of the session), so the init schedule, which stops before its next attempt
+/// (final critique F05), runs as before and the command sees the flag mid-session.
+pub struct CtrlCAtInit {
+    pub inner: Box<dyn Transport>,
+    pub stop: Arc<std::sync::atomic::AtomicBool>,
+    /// An init attempt has ended (guard switched off).
+    pub after_init: bool,
+}
+
+impl Transport for CtrlCAtInit {
+    fn now_ms(&self) -> u64 {
+        self.inner.now_ms()
+    }
+    fn now_us(&self) -> u64 {
+        self.inner.now_us()
+    }
+    fn set_dtr(&mut self, on: bool) -> io::Result<()> {
+        self.inner.set_dtr(on)
+    }
+    fn set_rts(&mut self, on: bool) -> io::Result<()> {
+        self.inner.set_rts(on)
+    }
+    fn set_break(&mut self, on: bool) -> io::Result<()> {
+        self.inner.set_break(on)
+    }
+    fn break_loopback_seen(&mut self) -> io::Result<bool> {
+        self.inner.break_loopback_seen()
+    }
+    fn sleep_ms(&mut self, ms: u32) {
+        self.inner.sleep_ms(ms)
+    }
+    fn flush_rx(&mut self) -> io::Result<()> {
+        self.inner.flush_rx()
+    }
+    fn write(&mut self, bytes: &[u8], inter_byte_ms: u32) -> io::Result<()> {
+        if self.after_init {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.inner.write(bytes, inter_byte_ms)
+    }
+    fn read(&mut self, count: usize, timeout_ms: u32) -> io::Result<Vec<u8>> {
+        self.inner.read(count, timeout_ms)
+    }
+    fn baud_rate(&self) -> Option<u32> {
+        self.inner.baud_rate()
+    }
+    fn set_init_guard(&mut self, on: bool) {
+        self.after_init = !on;
+        self.inner.set_init_guard(on)
+    }
+}
+
 /// Like [`run`] on a line that never reports the break loopback.
 pub fn run_blind_break(ecu: SpecEcu, args: &[&str]) -> (Run, Journal) {
     let j = ecu.journal();
@@ -267,7 +320,7 @@ pub struct Opts {
     pub sys_root: Option<PathBuf>,
     /// Host clock sleeps wake up this late (us), for selftest's sleep-jitter check.
     pub clock_late_us: u64,
-    /// Ctrl-C already pressed when the command starts.
+    /// Ctrl-C pressed during the init ([`CtrlCAtInit`]); a command that opens no port never sees it.
     pub ctrl_c: bool,
     /// What the port listing returns (default: nothing).
     pub ports: Vec<kline_host::ports::PortInfo>,
@@ -345,6 +398,8 @@ fn run_line_inner(line: VirtualLine, port: &str, args: &[&str], o: Opts, blind: 
     let human = o.human;
     let clock_late_us = o.clock_late_us;
     let ctrl_c = o.ctrl_c;
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop2 = stop.clone();
     let ports = o.ports.clone();
     let sys_root = o
         .sys_root
@@ -357,14 +412,23 @@ fn run_line_inner(line: VirtualLine, port: &str, args: &[&str], o: Opts, blind: 
             opener: Box::new(move |_spec, _baud, _trace| {
                 *opened2.lock().unwrap() = true;
                 let l = line.lock().unwrap().take().expect("port opened twice");
-                if blind {
-                    Ok(Box::new(BlindBreak(Virtual(l))) as Box<dyn Transport>)
+                let t = if blind {
+                    Box::new(BlindBreak(Virtual(l))) as Box<dyn Transport>
                 } else {
-                    Ok(Box::new(Virtual(l)) as Box<dyn Transport>)
+                    Box::new(Virtual(l)) as Box<dyn Transport>
+                };
+                if ctrl_c {
+                    Ok(Box::new(CtrlCAtInit {
+                        inner: t,
+                        stop: stop2.clone(),
+                        after_init: false,
+                    }) as Box<dyn Transport>)
+                } else {
+                    Ok(t)
                 }
             }),
             list_ports: Box::new(move || Ok(ports.clone())),
-            stop: Arc::new(std::sync::atomic::AtomicBool::new(ctrl_c)),
+            stop,
             host_clock: Box::new(move || {
                 Box::new(LateClock {
                     now: 0,

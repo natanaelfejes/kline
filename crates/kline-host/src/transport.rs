@@ -314,6 +314,142 @@ impl<P: SerialIo, C: Clock> KklLine<P, C> {
     }
 }
 
+/// Release K when the line goes away with break asserted or mid-chain (a panic or an early
+/// return inside an init, final critique F05): break off, DTR high (idle). Errors are ignored:
+/// this is the last thing done with the port.
+impl<P: SerialIo, C: Clock> Drop for KklLine<P, C> {
+    fn drop(&mut self) {
+        if self.break_on {
+            let _ = self.port.set_break(false);
+            self.break_on = false;
+            let _ = self.port.set_dtr(true);
+            self.t("  line dropped with break on: K released, DTR high");
+        }
+    }
+}
+
+/// The port [`release_k_line_now`] releases: the one open K line of this process.
+type SharedPort = std::sync::Arc<std::sync::Mutex<dyn SerialIo + Send>>;
+
+static EMERGENCY_PORT: std::sync::Mutex<
+    Option<std::sync::Weak<std::sync::Mutex<dyn SerialIo + Send>>>,
+> = std::sync::Mutex::new(None);
+
+fn lock_ignore_poison<T: ?Sized>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// A [`SerialIo`] that [`release_k_line_now`] can reach from another thread (the signal
+/// handler, final critique F05): the port sits behind a mutex and is registered while this
+/// value lives. Each call takes the (uncontended) lock once.
+pub struct Released {
+    port: SharedPort,
+}
+
+impl Released {
+    pub fn register<P: SerialIo + Send + 'static>(port: P) -> Released {
+        let port: SharedPort = std::sync::Arc::new(std::sync::Mutex::new(port));
+        *lock_ignore_poison(&EMERGENCY_PORT) = Some(std::sync::Arc::downgrade(&port));
+        Released { port }
+    }
+
+    fn with<R>(&self, f: impl FnOnce(&mut (dyn SerialIo + Send)) -> R) -> R {
+        f(&mut *lock_ignore_poison(&self.port))
+    }
+}
+
+impl Drop for Released {
+    fn drop(&mut self) {
+        let mut slot = lock_ignore_poison(&EMERGENCY_PORT);
+        let ours = slot
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .is_some_and(|p| std::sync::Arc::ptr_eq(&p, &self.port));
+        if ours {
+            *slot = None;
+        }
+    }
+}
+
+impl SerialIo for Released {
+    fn set_break(&mut self, on: bool) -> io::Result<()> {
+        self.with(|p| p.set_break(on))
+    }
+    fn set_dtr(&mut self, on: bool) -> io::Result<()> {
+        self.with(|p| p.set_dtr(on))
+    }
+    fn set_rts(&mut self, on: bool) -> io::Result<()> {
+        self.with(|p| p.set_rts(on))
+    }
+    fn break_seen(&mut self) -> io::Result<Option<bool>> {
+        self.with(|p| p.break_seen())
+    }
+    fn bytes_to_read(&mut self) -> io::Result<usize> {
+        self.with(|p| p.bytes_to_read())
+    }
+    fn read_some(&mut self, buf: &mut [u8], timeout: Duration) -> io::Result<usize> {
+        self.with(|p| p.read_some(buf, timeout))
+    }
+    fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.with(|p| p.write_all(bytes))
+    }
+    fn clear_input(&mut self) -> io::Result<()> {
+        self.with(|p| p.clear_input())
+    }
+    fn baud_rate(&self) -> Option<u32> {
+        self.with(|p| p.baud_rate())
+    }
+}
+
+/// Clear break and raise DTR on the open K line, from any thread (a second Ctrl-C, just before
+/// the process exits without unwinding, final critique F05). Waits up to 300 ms for the main
+/// thread to finish its current port call (a write is bounded at about 200 ms). Returns whether
+/// a port was released.
+pub fn release_k_line_now() -> bool {
+    let Some(port) = lock_ignore_poison(&EMERGENCY_PORT)
+        .as_ref()
+        .and_then(std::sync::Weak::upgrade)
+    else {
+        return false;
+    };
+    let deadline = std::time::Instant::now() + Duration::from_millis(300);
+    loop {
+        let guard = match port.try_lock() {
+            Ok(g) => Some(g),
+            Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        };
+        if let Some(mut p) = guard {
+            let _ = p.set_break(false);
+            let _ = p.set_dtr(true);
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// The Ctrl-C / SIGTERM / SIGHUP handler both binaries install (final critique F05). The first
+/// signal sets `stop`: commands end cleanly (StopCommunication, capture complete) and the init
+/// schedule stops before its next attempt. A second one releases K on the open port and exits
+/// at once with 130.
+pub fn on_interrupt(stop: &std::sync::atomic::AtomicBool) {
+    if stop.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        let released = release_k_line_now();
+        eprintln!(
+            "kline: second interrupt, exiting now{}",
+            if released {
+                " (K released, DTR high)"
+            } else {
+                ""
+            }
+        );
+        std::process::exit(130);
+    }
+}
+
 impl<P: SerialIo, C: Clock> Transport for KklLine<P, C> {
     fn baud_rate(&self) -> Option<u32> {
         self.port.baud_rate()
@@ -798,7 +934,7 @@ impl SerialIo for SimIo {
 pub fn open(spec: &PortSpec, baud: u32, trace: Tracer) -> io::Result<Box<dyn Transport>> {
     match spec {
         PortSpec::Serial(p) => Ok(Box::new(KklLine::new(
-            SerialportIo::open(p, baud)?,
+            Released::register(SerialportIo::open(p, baud)?),
             SystemClock::new(),
             trace,
         ))),
@@ -1447,6 +1583,7 @@ mod tests {
                 kline_core::InitVariant::MultiEcu,
             ],
             &policy,
+            &std::sync::atomic::AtomicBool::new(false),
             &mut |a| seen.push((a.variant, a.error.clone())),
         );
         assert!(r.is_err(), "the mock has no ECU");
@@ -1463,6 +1600,110 @@ mod tests {
         // A receiver saw only the second attempt's complete address (no Multipoint in the
         // default timing, so 0x7A again), and no byte from the aborted one.
         assert_eq!(decoded_addresses(&m).0, vec![0x7A]);
+    }
+
+    #[test]
+    fn connect_checks_the_stop_flag_between_attempts() {
+        // Final critique F05: Ctrl-C during the init schedule (up to 19 s) waited for every
+        // attempt. The flag is checked before each attempt and each retry round.
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let (l, _m) = line(500);
+        let mut link = crate::link::Link::new(Box::new(l), Tracer::off(), None);
+        let cfg = kline_core::LinkConfig::new(0x7A, kline_core::KTiming::default());
+        let policy = kline_core::RetryPolicy::default();
+        let mut seen = 0;
+        let r = crate::link::connect(
+            &mut link,
+            &cfg,
+            &[
+                kline_core::InitVariant::SingleEcu,
+                kline_core::InitVariant::MultiEcu,
+            ],
+            &policy,
+            &stop,
+            &mut |_| {
+                seen += 1;
+                stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            },
+        );
+        let e = r.unwrap_err();
+        assert_eq!(seen, 1, "no attempt after the stop flag");
+        assert!(e.to_string().contains("stopped"), "{e}");
+        // Set before the first attempt: nothing is sent at all.
+        let (l, m) = line(500);
+        let mut link = crate::link::Link::new(Box::new(l), Tracer::off(), None);
+        let r = crate::link::connect(
+            &mut link,
+            &cfg,
+            &[kline_core::InitVariant::SingleEcu],
+            &policy,
+            &stop,
+            &mut |_| panic!("no attempt"),
+        );
+        assert!(r.is_err());
+        assert!(break_times(&m).is_empty());
+    }
+
+    #[test]
+    fn dropping_the_line_with_break_on_releases_k_and_raises_dtr() {
+        // Final critique F05: a panic or an early return mid-init dropped the transport with
+        // K held low.
+        let (mut l, m) = line(500);
+        l.set_dtr(false).unwrap();
+        l.set_break(true).unwrap();
+        drop(l);
+        let calls = m.0.borrow().calls.clone();
+        let n = calls.len();
+        assert!(matches!(calls[n - 2], Call::Break(false, _)), "{calls:?}");
+        assert!(matches!(calls[n - 1], Call::Dtr(true, _)), "{calls:?}");
+        // Idle line: drop sends nothing.
+        let (l, m) = line(500);
+        drop(l);
+        assert!(m.0.borrow().calls.is_empty());
+    }
+
+    #[test]
+    fn emergency_release_clears_break_on_the_registered_port() {
+        // Final critique F05 (second Ctrl-C): the signal thread releases K on the open port
+        // before the process exits, without the main thread.
+        use std::sync::{Arc, Mutex};
+        #[derive(Clone, Default)]
+        struct SendMock(Arc<Mutex<Vec<String>>>);
+        impl SerialIo for SendMock {
+            fn set_break(&mut self, on: bool) -> io::Result<()> {
+                self.0.lock().unwrap().push(format!("break {on}"));
+                Ok(())
+            }
+            fn set_dtr(&mut self, on: bool) -> io::Result<()> {
+                self.0.lock().unwrap().push(format!("dtr {on}"));
+                Ok(())
+            }
+            fn set_rts(&mut self, _on: bool) -> io::Result<()> {
+                Ok(())
+            }
+            fn bytes_to_read(&mut self) -> io::Result<usize> {
+                Ok(0)
+            }
+            fn read_some(&mut self, _b: &mut [u8], _t: Duration) -> io::Result<usize> {
+                Ok(0)
+            }
+            fn write_all(&mut self, _b: &[u8]) -> io::Result<()> {
+                Ok(())
+            }
+            fn clear_input(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let m = SendMock::default();
+        let mut p = Released::register(m.clone());
+        p.set_break(true).unwrap();
+        assert!(release_k_line_now());
+        assert_eq!(
+            *m.0.lock().unwrap(),
+            vec!["break true", "break false", "dtr true"]
+        );
+        drop(p);
+        assert!(!release_k_line_now(), "unregistered on drop");
     }
 
     #[cfg(unix)]

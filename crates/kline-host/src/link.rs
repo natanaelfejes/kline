@@ -468,8 +468,19 @@ pub fn connect(
     base: &LinkConfig,
     variants: &[InitVariant],
     policy: &kline_core::RetryPolicy,
+    stop: &std::sync::atomic::AtomicBool,
     on_attempt: &mut dyn FnMut(&Attempt),
 ) -> Result<(Session, Connected), CliError> {
+    // Ctrl-C (or SIGTERM/SIGHUP) ends the schedule before the next attempt or retry round,
+    // instead of after up to 19 s of attempts (final critique F05).
+    let stopped = || stop.load(std::sync::atomic::Ordering::SeqCst);
+    let interrupted = || {
+        CliError::new(
+            crate::error::exit::INIT,
+            "init",
+            "init stopped by Ctrl-C before the next attempt",
+        )
+    };
     let mut attempts = Vec::new();
     let rounds = policy.init_attempts.max(1);
     let schedule: Vec<(u8, InitVariant)> = (1..=rounds)
@@ -477,9 +488,15 @@ pub fn connect(
         .collect();
     let mut last_round = 1;
     for (round, v) in schedule {
+        if stopped() {
+            return Err(interrupted());
+        }
         if round != last_round {
             last_round = round;
             link.sleep_ms(policy.init_retry_ms);
+            if stopped() {
+                return Err(interrupted());
+            }
         }
         let mut cfg = base.clone();
         cfg.variant = v;

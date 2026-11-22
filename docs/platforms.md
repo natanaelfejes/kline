@@ -83,6 +83,18 @@ AppleUSBFTDI refuses it in `tcsetattr` with EINVAL (measured, FT232R, macOS 27; 
 earlier version hit exactly this). Windows has no such flag; whether the FTDI VCP driver delivers a looped-back break as a
 `00` byte is NOT VERIFIED (without it the 5-baud init warns, unless `--strict-loopback`).
 
+Stopping, and K on exit (final critique F05): `kline` and `kline-agent` handle Ctrl-C, SIGTERM
+and SIGHUP alike (ctrlc `termination`): the first sets the stop flag, so `live`/`scan` send
+StopCommunication and close the capture, and an init schedule stops before its next attempt or
+retry round (exit 4, `init stopped by Ctrl-C before the next attempt`). A second one releases K
+on the open cable (break off, DTR high; the port is reachable from the signal thread behind a
+mutex, `transport::release_k_line_now`) and exits at once with 130. Dropping the line while
+break is on (a panic or an early return mid-init) also clears break and raises DTR. SIGKILL
+cannot be caught: after one, replug the cable before the next command. Windows: `ctrlc`
+installs `SetConsoleCtrlHandler`, which covers Ctrl-C and Ctrl-Break the same way; closing the
+console window lets Windows end the process shortly after the handler returns, so K is not
+guaranteed to be released then (NOT VERIFIED; replug the cable).
+
 ## Permissions
 
 - Linux: the port belongs to group `dialout` (Debian, Ubuntu, Fedora) or `uucp` (Arch):

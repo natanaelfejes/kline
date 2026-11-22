@@ -447,49 +447,57 @@ pub fn open_session(
         b.map(|b| format!("byte {b:02X}"))
             .unwrap_or_else(|| "fast init".into())
     };
-    let (mut session, connected) = link::connect(&mut link, &cfg, &variants, &policy, &mut |a| {
-        let retry = if a.round > 1 {
-            format!(
-                "retry {}/{} ",
-                a.round - 1,
-                policy.init_attempts.saturating_sub(1)
-            )
-        } else {
-            String::new()
-        };
-        let next = schedule
-            .iter()
-            .position(|&(r, v)| r == a.round && v == a.variant)
-            .and_then(|i| schedule.get(i + 1));
-        let head = format!("init {:<6} {retry}", link::variant_label(a.variant));
-        let human = match &a.error {
-            None => format!("{head}{}: ok", what(a.address_byte)),
-            // Not the last attempt: information, not an error (the next variant may work).
-            Some(e) => {
-                let then = match next {
-                    Some(&(r, v)) if r == a.round => match address_of(v) {
-                        Some(b) => format!("trying 5-baud byte {b:02X}"),
-                        None => "trying fast init".into(),
-                    },
-                    Some(&(r, _)) => format!(
-                        "next round {r}/{} in {} ms",
-                        policy.init_attempts, policy.init_retry_ms
-                    ),
-                    None => String::new(),
-                };
-                if next.is_none() {
-                    format!("{head}{}: {e}", what(a.address_byte))
-                } else if a.address_byte.is_none()
-                    && *e == kline_core::LinkError::NoReply.to_string()
-                {
-                    format!("{head}fast init not answered (normal for many Renault K-line ECUs), {then}")
-                } else {
-                    format!("{head}{}: {e}, {then}", what(a.address_byte))
+    let stop = ctx.env.stop.clone();
+    let (mut session, connected) = link::connect(
+        &mut link,
+        &cfg,
+        &variants,
+        &policy,
+        &stop,
+        &mut |a| {
+            let retry = if a.round > 1 {
+                format!(
+                    "retry {}/{} ",
+                    a.round - 1,
+                    policy.init_attempts.saturating_sub(1)
+                )
+            } else {
+                String::new()
+            };
+            let next = schedule
+                .iter()
+                .position(|&(r, v)| r == a.round && v == a.variant)
+                .and_then(|i| schedule.get(i + 1));
+            let head = format!("init {:<6} {retry}", link::variant_label(a.variant));
+            let human = match &a.error {
+                None => format!("{head}{}: ok", what(a.address_byte)),
+                // Not the last attempt: information, not an error (the next variant may work).
+                Some(e) => {
+                    let then = match next {
+                        Some(&(r, v)) if r == a.round => match address_of(v) {
+                            Some(b) => format!("trying 5-baud byte {b:02X}"),
+                            None => "trying fast init".into(),
+                        },
+                        Some(&(r, _)) => format!(
+                            "next round {r}/{} in {} ms",
+                            policy.init_attempts, policy.init_retry_ms
+                        ),
+                        None => String::new(),
+                    };
+                    if next.is_none() {
+                        format!("{head}{}: {e}", what(a.address_byte))
+                    } else if a.address_byte.is_none()
+                        && *e == kline_core::LinkError::NoReply.to_string()
+                    {
+                        format!("{head}fast init not answered (normal for many Renault K-line ECUs), {then}")
+                    } else {
+                        format!("{head}{}: {e}, {then}", what(a.address_byte))
+                    }
                 }
-            }
-        };
-        out.emit(a.to_json(), human)
-    })?;
+            };
+            out.emit(a.to_json(), human)
+        },
+    )?;
     if connected.break_loopback == Some(false) {
         ctx.out.emit(
             json!({"event": "warning", "kind": "break_loopback_not_seen",
