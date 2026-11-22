@@ -82,6 +82,14 @@ pub fn check_explicit_port(path: &str) -> Result<(), String> {
     }
 }
 
+/// For a macOS callin device `/dev/tty.X` whose callout twin `/dev/cu.X` is listed too: that
+/// twin (kline uses the `cu.*` one; the `tty.*` one blocks on carrier detect).
+pub fn callout_twin(p: &PortInfo, all: &[PortInfo]) -> Option<String> {
+    let rest = p.path.strip_prefix("/dev/tty.")?;
+    let cu = format!("/dev/cu.{rest}");
+    all.iter().any(|q| q.path == cu).then_some(cu)
+}
+
 /// The one candidate, or why there is none.
 pub fn auto_detect(ports: &[PortInfo]) -> Result<String, String> {
     let c: Vec<&PortInfo> = ports.iter().filter(|p| is_candidate(p)).collect();

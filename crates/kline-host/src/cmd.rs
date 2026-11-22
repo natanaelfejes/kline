@@ -586,14 +586,16 @@ pub fn ports(ctx: &mut Ctx) -> Result<(), CliError> {
     let list = (ctx.env.list_ports)()
         .map_err(|e| CliError::port(format!("cannot list serial ports: {e}")))?;
     for p in &list {
+        let twin = ports::callout_twin(p, &list);
         ctx.out.emit(
             {
                 let mut j = p.to_json();
                 j["event"] = json!("port");
+                j["use_instead"] = json!(twin);
                 j
             },
             format!(
-                "{} {}{}",
+                "{} {}{}{}",
                 if ports::is_candidate(p) { "*" } else { " " },
                 p.path,
                 p.usb
@@ -603,6 +605,9 @@ pub fn ports(ctx: &mut Ctx) -> Result<(), CliError> {
                         u.1,
                         p.product.clone().unwrap_or_default()
                     ))
+                    .unwrap_or_default(),
+                twin.as_ref()
+                    .map(|c| format!("  (not used, use {c})"))
                     .unwrap_or_default()
             ),
         );

@@ -1984,3 +1984,49 @@ fn read_retries_once_after_a_bad_checksum_or_a_short_frame() {
     let (r, _) = run(ecu, &["read", "--xml", &sx, "21A9"]);
     assert_eq!(r.code, 5);
 }
+
+#[test]
+fn ports_marks_the_macos_callin_twin_as_not_used() {
+    let ports = vec![
+        ftdi_port("/dev/cu.usbserial-AM6KP9MU"),
+        ftdi_port("/dev/tty.usbserial-AM6KP9MU"),
+        ftdi_port("/dev/tty.usbserial-LONE"),
+    ];
+    let o = || Opts {
+        ports: ports.clone(),
+        ..Opts::default()
+    };
+    let r = run_line_port(
+        VirtualLine::with_ecu(sirius_ecu()),
+        "virtual",
+        &["ports"],
+        o(),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stdout
+            .contains("/dev/tty.usbserial-AM6KP9MU  usb 0403:6001 FT232R USB UART  (not used, use /dev/cu.usbserial-AM6KP9MU)"),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout
+            .contains("LONE  usb 0403:6001 FT232R USB UART  (not used"),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("cable: /dev/cu.usbserial-AM6KP9MU"),
+        "{}",
+        r.stdout
+    );
+    let r = run_line_port(
+        VirtualLine::with_ecu(sirius_ecu()),
+        "virtual",
+        &["--json", "ports"],
+        o(),
+    );
+    let p = r.event("port");
+    assert_eq!(p[1]["use_instead"], "/dev/cu.usbserial-AM6KP9MU");
+    assert!(p[0]["use_instead"].is_null() && p[2]["use_instead"].is_null());
+}
