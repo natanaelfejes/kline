@@ -14,7 +14,7 @@ use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
 use kline_core::safety::{self, Tier};
 use kline_host::cmd::{
-    self, Ctx, Env, GlobalArgs, LinkArgs, LiveArgs, ReadArgs, ReplayArgs, RiskArgs,
+    self, Ctx, DtcArgs, Env, GlobalArgs, LinkArgs, LiveArgs, ReadArgs, ReplayArgs, RiskArgs,
 };
 use kline_host::defs::Ecu;
 use kline_host::error::{exit, CliError};
@@ -41,7 +41,7 @@ enum Command {
     Ident(LinkArgs),
     Read(ReadArgs),
     Live(LiveArgs),
-    Dtc(LinkArgs),
+    Dtc(DtcArgs),
     Risk(RiskArgs),
     /// Prepare a non-read request for a human: RiskInfo and the exact `kline exec` command.
     Prepare(PrepareArgs),

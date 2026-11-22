@@ -1903,3 +1903,47 @@ fn selftest_on_a_port_that_is_not_a_kkl_cable_says_the_verdicts_mean_nothing() {
     assert_eq!(r.code, 0);
     assert!(!r.stdout.contains("not a KKL cable"), "{}", r.stdout);
 }
+
+#[test]
+fn dtc_counts_present_and_memorized_and_shows_the_clear_plan_only_on_request() {
+    let alt = xml("bmt_cli_alt.xml");
+    let ecu = || {
+        let sc = kline_sim::scenario::Scenario::new()
+            .text("Door switch fault", "present")
+            .number("Défaut présent porte", 1.0)
+            .number("Défaut mémorisé porte", 1.0);
+        SpecEcu::new(EcuProfile::bmt(), fixture("bmt_cli_alt.xml"), sc).unwrap()
+    };
+    let (r, j) = run(ecu(), &["dtc", "--xml", &alt]);
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout
+            .contains("Lecture des defauts (21 A8): 3 set (present: 1, memorized: 1, other: 1)"),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout
+            .contains("3 fault flag(s) set (present: 1, memorized: 1, other: 1)"),
+        "{}",
+        r.stdout
+    );
+    assert!(!r.stdout.contains(" active"), "{}", r.stdout);
+    assert!(!r.stdout.contains("clear-dtc would send"), "{}", r.stdout);
+    j.assert_no_writes();
+    let (r, _) = run(ecu(), &["dtc", "--xml", &alt, "--show-clear"]);
+    assert!(
+        r.stdout.contains("kline clear-dtc would send 14 FF 00"),
+        "{}",
+        r.stdout
+    );
+    // JSON keeps the clear plan and "active", and adds the counts.
+    let (r, _) = run(ecu(), &["--json", "dtc", "--xml", &alt]);
+    let s = &r.event("dtc_summary")[0];
+    assert_eq!(s["active"], 3);
+    assert_eq!(
+        (s["present"].as_u64(), s["memorized"].as_u64()),
+        (Some(1), Some(1))
+    );
+    assert!(s["clear_plan"].is_object(), "{s}");
+}

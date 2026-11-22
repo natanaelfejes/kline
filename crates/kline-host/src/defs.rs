@@ -642,6 +642,11 @@ pub fn fault_item_requests<'a>(def: &'a EcuDef, target: &Target) -> Vec<&'a Requ
         .collect()
 }
 
+/// Lower case without French accents, for name matching.
+pub fn fold_name(s: &str) -> String {
+    fold(s)
+}
+
 fn fold(s: &str) -> String {
     s.to_lowercase()
         .replace(['é', 'è', 'ê'], "e")

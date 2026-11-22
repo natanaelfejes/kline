@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Hand-written kline-cli fixture (not derived from any Renault file): bmt_cli.xml with a
-     different 21 A1 layout, the second BMT candidate of the definition-choice tests. Names,
+     different 21 A1 layout and present/memorized fault items in 21 A8, the second BMT candidate of the definition-choice tests. Names,
      positions and scaling are invented. -->
 <Target Name="CLI fixture BMT alternative" xmlns="http://www-diag.renault.com/2002/ECU">
 <Function Name="Body" Address="38"/>
@@ -21,6 +21,8 @@
 <Data Name="Remote frame received"><Bits count="1"><List><Item Value="0" Text="no"/><Item Value="1" Text="yes"/></List></Bits></Data>
 <Data Name="Remote count"><Bits count="4"><Scaled/></Bits></Data>
 <Data Name="Door switch fault"><Bits count="1"><List><Item Value="0" Text="absent"/><Item Value="1" Text="present"/></List></Bits></Data>
+<Data Name="Défaut présent porte"><Bits count="1"><Scaled/></Bits></Data>
+<Data Name="Défaut mémorisé porte"><Bits count="1"><Scaled/></Bits></Data>
 <Data Name="Option B"><Bits count="1"><Scaled/></Bits></Data>
 <Data Name="Option C"><Bits count="1"><Scaled/></Bits></Data>
 </Datas>
@@ -46,7 +48,7 @@
 </Request>
 <Request Name="Lecture des defauts">
 <Sent><SentBytes>21A8</SentBytes></Sent>
-<Received MinBytes="3"><DataItem Name="Door switch fault" Ref="1" FirstByte="3" BitOffset="7"/></Received>
+<Received MinBytes="3"><DataItem Name="Door switch fault" Ref="1" FirstByte="3" BitOffset="7"/><DataItem Name="Défaut présent porte" Ref="1" FirstByte="3" BitOffset="6"/><DataItem Name="Défaut mémorisé porte" Ref="1" FirstByte="3" BitOffset="5"/></Received>
 </Request>
 <Request Name="Erase remotes and learn remote key 1">
 <Sent><SentBytes>31C7000000</SentBytes></Sent>

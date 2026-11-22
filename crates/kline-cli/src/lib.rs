@@ -17,8 +17,8 @@ use std::time::Duration;
 use clap::{Args, Parser, Subcommand};
 use kline_core::safety::{self, Approval, Tier};
 use kline_host::cmd::{
-    self, Ctx, Env, GlobalArgs, LinkArgs, LiveArgs, ReadArgs, ReplayArgs, RiskArgs, ScanArgs,
-    SelftestArgs, SetupArgs,
+    self, Ctx, DtcArgs, Env, GlobalArgs, LinkArgs, LiveArgs, ReadArgs, ReplayArgs, RiskArgs,
+    ScanArgs, SelftestArgs, SetupArgs,
 };
 use kline_host::defs::{self, Ecu};
 use kline_host::error::{exit, CliError};
@@ -63,7 +63,7 @@ pub enum Command {
     /// Read frames repeatedly, decoded (Ctrl-C to stop).
     Live(LiveArgs),
     /// Read the fault-flag frames and show the flags that are set.
-    Dtc(LinkArgs),
+    Dtc(DtcArgs),
     /// Read-only identifier scan (21/1A only, 200 ms spacing, stops after 3 missing replies).
     Scan(ScanArgs),
     /// What a request would do (tier, RiskInfo) without sending anything.

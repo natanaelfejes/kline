@@ -1531,8 +1531,47 @@ pub fn live(ctx: &mut Ctx, a: &LiveArgs) -> Result<(), CliError> {
 /// with their devices (DDT2000 DiagFailures "Reading flags"); otherwise the Tier 0 requests named
 /// like faults and every non-zero item. Ends with the clear plan (what `kline clear-dtc` would send
 /// and what DDT2000 would send); nothing is cleared here.
-pub fn dtc(ctx: &mut Ctx, a: &LinkArgs) -> Result<(), CliError> {
-    with_session(ctx, a, "dtc", |ctx, o| {
+#[derive(Debug, Clone, Default, Args)]
+pub struct DtcArgs {
+    #[command(flatten)]
+    pub link: LinkArgs,
+    /// Also print what `kline clear-dtc` would send (and DDT2000's choice); JSON always has it.
+    #[arg(long)]
+    pub show_clear: bool,
+}
+
+/// Present / memorized / other counts of set fault items, by item name (French `présent`,
+/// `mémorisé`; English too).
+fn fault_counts(active: &[Json]) -> (usize, usize, usize) {
+    let (mut p, mut m) = (0, 0);
+    for a in active {
+        let n = defs::fold_name(a["name"].as_str().unwrap_or(""));
+        if n.contains("memoris") || n.contains("memoriz") || n.contains("stored") {
+            m += 1;
+        } else if n.contains("present") {
+            p += 1;
+        }
+    }
+    (p, m, active.len() - p - m)
+}
+
+/// `N set (present: a, memorized: b[, other: c])`, or `N set` when no name says either.
+fn fault_count_text(active: &[Json]) -> String {
+    let (p, m, o) = fault_counts(active);
+    if p + m == 0 {
+        return format!("{} set", active.len());
+    }
+    let mut s = format!("{} set (present: {p}, memorized: {m}", active.len());
+    if o > 0 {
+        s.push_str(&format!(", other: {o}"));
+    }
+    s.push(')');
+    s
+}
+
+pub fn dtc(ctx: &mut Ctx, a: &DtcArgs) -> Result<(), CliError> {
+    let show_clear = a.show_clear;
+    with_session(ctx, &a.link, "dtc", |ctx, o| {
         let t = o.target();
         let def = o.ecu.def();
         let flag_reqs: Vec<&kline_spec::Request> = def
@@ -1576,7 +1615,7 @@ pub fn dtc(ctx: &mut Ctx, a: &LinkArgs) -> Result<(), CliError> {
                 format!("note: {method}"),
             );
         }
-        let mut total = 0usize;
+        let mut all_active: Vec<Json> = Vec::new();
         let mut done: Vec<Vec<u8>> = Vec::new();
         for (name, p) in reqs {
             if done.contains(&p) {
@@ -1607,11 +1646,11 @@ pub fn dtc(ctx: &mut Ctx, a: &LinkArgs) -> Result<(), CliError> {
                     }
                 }
             }
-            total += active.len();
+            let (pc, mc, _) = fault_counts(&active);
             let human = format!(
-                "{name} ({}): {} active{}",
+                "{name} ({}): {}{}",
                 hex_sp(&p),
-                active.len(),
+                fault_count_text(&active),
                 active
                     .iter()
                     .map(|a| format!(
@@ -1634,15 +1673,28 @@ pub fn dtc(ctx: &mut Ctx, a: &LinkArgs) -> Result<(), CliError> {
             );
             ctx.out.emit(
                 json!({"event": "dtc", "request": hex(&p), "name": name, "reply": hex(&reply),
-                       "active": active, "decoded": defs::decoded_json(&decoded)}),
+                       "active": active, "present": pc, "memorized": mc,
+                       "decoded": defs::decoded_json(&decoded)}),
                 human,
             );
+            all_active.extend(active);
         }
         let plan = o.ecu.def().clear_plan();
+        let total = all_active.len();
+        let (pc, mc, _) = fault_counts(&all_active);
+        let count = fault_count_text(&all_active);
+        let count = count.strip_prefix(&format!("{total} set")).unwrap_or("");
         ctx.out.emit(
-            json!({"event": "dtc_summary", "active": total, "method": method,
-                   "clear_plan": clear_plan_json(&plan)}),
-            format!("{total} fault flag(s) set\n{}", clear_plan_human(&plan)),
+            json!({"event": "dtc_summary", "active": total, "present": pc, "memorized": mc,
+                   "method": method, "clear_plan": clear_plan_json(&plan)}),
+            if show_clear {
+                format!(
+                    "{total} fault flag(s) set{count}\n{}",
+                    clear_plan_human(&plan)
+                )
+            } else {
+                format!("{total} fault flag(s) set{count}")
+            },
         );
         Ok(())
     })
