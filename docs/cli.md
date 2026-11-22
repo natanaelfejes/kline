@@ -7,6 +7,7 @@ first test at the car. Run `kline --help` or `kline <command> --help` for the sh
 ## Contents
 
 - [Building kline and kline-agent](#building-kline-and-kline-agent)
+- [Installing on the Mac (binary and definitions)](#installing-on-the-mac-binary-and-definitions)
 - [Common options](#common-options)
 - [Selecting the ECU](#selecting-the-ecu)
 - [Commands](#commands)
@@ -43,6 +44,26 @@ links that copy into kline-agent too. kline-agent has no code path to an approva
 so kline-agent **refuses to start** (exit 7, message on stderr) when `safety::APPROVALS_COMPILED`
 is set. Always build it alone: `cargo build --release -p kline-agent`. In a joint `cargo test`
 the agent's session tests are skipped with a message; `cargo test -p kline-agent` runs them.
+
+## Installing on the Mac (binary and definitions)
+
+kline needs two things on the machine: the binary in `PATH`, and the DDT2000 definition files in
+the definitions directory that `--ecu` reads (default `~/.local/share/kline/ecus`;
+`%APPDATA%\kline\ecus` on Windows). The definitions are Renault data: they never go into this
+repository (SAFETY.md rule 1).
+
+```
+cargo build --release -p kline-cli
+mkdir -p ~/.local/bin && cp target/release/kline ~/.local/bin/    # or ~/bin; must be in PATH
+kline setup --defs-from ~/Documents/Clio/ddt-extract/ecus         # copies *.xml, once
+```
+
+`kline setup --defs-from DIR` copies every `*.xml` file of `DIR` into the definitions
+directory (`--defs` if given, else `$KLINE_DDT_XML`, else the default), refuses a destination
+inside a git work tree (exit 8), opens no port, and lists which `--ecu` files are now present.
+Without it, a missing definition is exit 8 with the fix in the message
+(`kline setup --defs-from DIR`, `--defs DIR` or `KLINE_DDT_XML=DIR`, and the default path).
+If `~/.local/bin` is not in `PATH`: `export PATH="$HOME/.local/bin:$PATH"` (add it to `~/.zshrc`).
 
 ## Common options
 
@@ -82,6 +103,7 @@ is refused: "CAN not supported by a KKL cable yet" (exit 8).
 | Command | Does | Notes |
 |---|---|---|
 | `ports` | lists ports, marks candidates `*`, says which cable would be used | |
+| `setup --defs-from DIR` | copies `DIR/*.xml` into the definitions directory ([above](#installing-on-the-mac-binary-and-definitions)) | `kline` only; opens no port |
 | `selftest [--echo-rtt] [--set-latency MS]` | without the car: first measures the host's sleep precision with no port open (`selftest_timing`: 10 sleeps each of 1, 25 and 200 ms, late min/mean/max and early count against +-1 ms, +-1 ms and +-10 ms; [platforms.md](platforms.md#timing-precision)), so it reports even without a cable (then exit 3). Then opens the port at 10400, shows the USB id and the baud the driver reports (`baud_reported_source`: on macOS the termios output speed read back with `tcgetattr` after `IOSSIOSPEED`, the tty layer's record, not the FTDI divisor), toggles break 20 times (10 ms half-period, nothing written) and reports the edge jitter against the 5-baud (+-10 ms) and fast-init (+-1 ms) tolerances; when TiniL fails, `fast_init_cause` says whether the break call itself was slow (USB round trip, e.g. VM passthrough) or the sleeps woke late. `--echo-rtt` also writes a single `FF` byte 10 times and times its echo (USB latency, `kw2_handshake_ok` when every byte is back in < 25 ms; a write the driver does not take stops it with `write_error` and exit 0); it needs a looped-back K line (cable on the car's OBD socket, no init sent, or TX wired to RX). Linux: also reports the ttyUSB port's FTDI `latency_timer`; `--set-latency 1` writes it first (root or udev rule, [platforms.md](platforms.md#ftdi-latency-timer); elsewhere exit 2) | `kline` only; without `--echo-rtt` unplug the cable from the car |
 | `connect` | init (variants), session start, Stop | reports sync, KW1 KW2, ~address, key-byte match |
 | `ident` | `21 80` (KWP; else Tier 0 requests named like "ident"; NRC 21/23 retried like DDT2000), chooses the definition | DDT2000 AutoIdent ladder (exact, unique, soft, diag, soft+diag; DiagVersion numeric, Supplier/Soft/Version whitespace-normalized, case-sensitive) when the candidates have `<AutoIdents>`; else the first candidate whose key bytes match and whose identification requests decode. A reply shorter than MinBytes is decoded anyway and flagged; `ddt2000_diagfailures_accepts` says whether DiagFailures (exactly 26 bytes) would take it |

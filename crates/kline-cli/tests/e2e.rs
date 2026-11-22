@@ -1465,3 +1465,100 @@ fn an_unanswered_fast_init_before_a_working_5_baud_reads_as_information() {
     );
     assert_eq!(r.event("init_attempt")[0]["error"], "no reply from ECU");
 }
+
+#[test]
+fn missing_definitions_say_how_to_fix_it() {
+    let (r, _) = run(
+        sirius_ecu(),
+        &[
+            "--defs",
+            "/nonexistent-kline-defs",
+            "connect",
+            "--ecu",
+            "bmt",
+        ],
+    );
+    assert_eq!(r.code, 8, "{}", r.stderr);
+    assert!(!r.opened);
+    for needle in [
+        "BMT_X65_ph1_p.xml",
+        "/nonexistent-kline-defs does not exist",
+        "kline setup --defs-from DIR",
+        "--defs DIR",
+        "KLINE_DDT_XML",
+        ".local/share/kline/ecus",
+    ] {
+        assert!(
+            r.stderr.contains(needle),
+            "missing {needle:?} in\n{}",
+            r.stderr
+        );
+    }
+}
+
+#[test]
+fn setup_copies_the_definitions_and_then_ecu_works() {
+    let src = temp_dir("setup-src");
+    let dest = temp_dir("setup-dest").join("ecus");
+    std::fs::copy(
+        fixture_path("sirius_cli.xml"),
+        src.join("SIRIUS32___EMS3132___Soft_RE1_maj.xml"),
+    )
+    .unwrap();
+    std::fs::write(src.join("notes.txt"), "not a definition").unwrap();
+    let d = path_str(&dest);
+    let (r, j) = run(
+        sirius_ecu(),
+        &[
+            "--json",
+            "--defs",
+            &d,
+            "setup",
+            "--defs-from",
+            &path_str(&src),
+        ],
+    );
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    assert!(!r.opened, "setup opens no port");
+    let e = &r.event("setup")[0];
+    assert_eq!(
+        e["copied"],
+        json!(["SIRIUS32___EMS3132___Soft_RE1_maj.xml"])
+    );
+    assert_eq!(e["ecus"]["sirius"], true);
+    assert_eq!(e["ecus"]["bmt"], false);
+    assert!(!dest.join("notes.txt").exists());
+    j.assert_no_writes();
+    let (r, _) = run(
+        sirius_ecu(),
+        &["--json", "--defs", &d, "connect", "--ecu", "sirius"],
+    );
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    // Never into a git work tree (SAFETY.md rule 1).
+    let repo = temp_dir("setup-git");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    let inside = repo.join("ddt-xml");
+    let (r, _) = run(
+        sirius_ecu(),
+        &[
+            "--defs",
+            &path_str(&inside),
+            "setup",
+            "--defs-from",
+            &path_str(&src),
+        ],
+    );
+    assert_eq!(r.code, 8, "{}", r.stderr);
+    assert!(r.stderr.contains("git work tree"), "{}", r.stderr);
+    assert!(!inside
+        .join("SIRIUS32___EMS3132___Soft_RE1_maj.xml")
+        .exists());
+    // A source without XML files.
+    let empty = temp_dir("setup-empty");
+    let (r, _) = run(
+        sirius_ecu(),
+        &["--defs", &d, "setup", "--defs-from", &path_str(&empty)],
+    );
+    assert_eq!(r.code, 8, "{}", r.stderr);
+    assert!(r.stderr.contains("no .xml files"), "{}", r.stderr);
+}

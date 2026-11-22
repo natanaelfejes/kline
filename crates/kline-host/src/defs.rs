@@ -143,6 +143,40 @@ pub fn data_dir_from(windows: bool, env: impl Fn(&str) -> Option<std::ffi::OsStr
         .join(".local/share/kline")
 }
 
+/// Exit 8 for `--ecu` when its definition file is not in the definitions directory: what is
+/// missing and the three ways to fix it.
+pub fn missing_definition(dir: &Path, file: &str) -> CliError {
+    let state = if dir.is_dir() {
+        format!("{} has no {file}", dir.display())
+    } else {
+        format!("{} does not exist", dir.display())
+    };
+    CliError::definition(format!(
+        "definition {file} not found: {state}. Fix: copy the DDT2000 XML files there once with `kline setup --defs-from DIR`, or name their folder with --defs DIR or KLINE_DDT_XML=DIR (default definitions directory: {})",
+        data_dir().join("ecus").display()
+    ))
+}
+
+/// The car's definition files expected by `--ecu`, for `setup`'s report.
+pub fn car_files() -> Vec<(&'static str, &'static str)> {
+    EcuName::value_variants()
+        .iter()
+        .map(|e| (e.label(), e.files()[0]))
+        .collect()
+}
+
+/// The git work tree `dir` (or its nearest existing ancestor) lies in, if any.
+pub fn git_work_tree(dir: &Path) -> Option<PathBuf> {
+    let abs = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(dir)
+    };
+    abs.ancestors()
+        .find(|a| a.join(".git").exists())
+        .map(Path::to_path_buf)
+}
+
 fn load(path: &Path) -> Result<EcuDef, CliError> {
     let bytes = std::fs::read(path).map_err(|e| {
         CliError::definition(format!("cannot read definition {}: {e}", path.display()))
@@ -158,6 +192,9 @@ impl Ecu {
         } else if let Some(e) = a.ecu {
             let files = e.files();
             let mut v: Vec<PathBuf> = files.iter().map(|f| defs_dir.join(f)).collect();
+            if !v[0].exists() {
+                return Err(missing_definition(defs_dir, files[0]));
+            }
             // Only the preferred file is required; the alternatives are ident candidates.
             let first = v.remove(0);
             v.retain(|p| p.exists());

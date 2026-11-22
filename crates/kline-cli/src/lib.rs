@@ -18,7 +18,7 @@ use clap::{Args, Parser, Subcommand};
 use kline_core::safety::{self, Approval, Tier};
 use kline_host::cmd::{
     self, Ctx, Env, GlobalArgs, LinkArgs, LiveArgs, ReadArgs, ReplayArgs, RiskArgs, ScanArgs,
-    SelftestArgs,
+    SelftestArgs, SetupArgs,
 };
 use kline_host::defs::{self, Ecu};
 use kline_host::error::{exit, CliError};
@@ -48,6 +48,9 @@ pub struct Cli {
 pub enum Command {
     /// List serial ports and the detected KKL cable.
     Ports,
+    /// Copy the DDT2000 definition files (*.xml) from a folder into the definitions directory
+    /// that --ecu reads (never into a git work tree). Opens no port.
+    Setup(SetupArgs),
     /// Cable check: open at 10400, driver baud, break-toggle jitter (writes nothing); with
     /// --echo-rtt also the TX->RX echo latency (needs a looped-back K line).
     Selftest(SelftestArgs),
@@ -225,6 +228,7 @@ pub fn run(cli: Cli, env: &mut CliEnv) -> u8 {
     let mut ctx = Ctx::new(&cli.g, host, "kline");
     let r = match &cli.cmd {
         Command::Ports => cmd::ports(&mut ctx),
+        Command::Setup(a) => cmd::setup(&mut ctx, a),
         Command::Selftest(a) => cmd::selftest(&mut ctx, a),
         Command::Connect(a) => cmd::connect(&mut ctx, a),
         Command::Ident(a) => cmd::ident(&mut ctx, a),

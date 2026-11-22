@@ -834,6 +834,92 @@ pub fn selftest(ctx: &mut Ctx, a: &SelftestArgs) -> Result<(), CliError> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Args)]
+pub struct SetupArgs {
+    /// Folder with the DDT2000 ECU definition files (*.xml) to copy into the definitions
+    /// directory (--defs, else $KLINE_DDT_XML, else the default).
+    #[arg(long, value_name = "DIR")]
+    pub defs_from: PathBuf,
+}
+
+/// `setup --defs-from DIR`: copy `DIR/*.xml` into the definitions directory `--ecu` reads,
+/// never into a git work tree (SAFETY.md rule 1: Renault data never enters git). Opens no port.
+pub fn setup(ctx: &mut Ctx, a: &SetupArgs) -> Result<(), CliError> {
+    let dest = ctx.g.defs_dir();
+    let src = &a.defs_from;
+    let rd = std::fs::read_dir(src).map_err(|e| {
+        CliError::definition(format!("cannot read --defs-from {}: {e}", src.display()))
+    })?;
+    let mut files: Vec<PathBuf> = rd
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("xml")))
+        .collect();
+    files.sort();
+    if files.is_empty() {
+        return Err(CliError::definition(format!(
+            "{} has no .xml files (DDT2000 ECU definitions, e.g. {})",
+            src.display(),
+            defs::car_files()[0].1
+        )));
+    }
+    if let Some(repo) = defs::git_work_tree(&dest) {
+        return Err(CliError::definition(format!(
+            "refusing to copy Renault definitions into {}: it is inside the git work tree {} (SAFETY.md rule 1); use the default directory {} or another --defs outside any repository",
+            dest.display(),
+            repo.display(),
+            defs::data_dir().join("ecus").display()
+        )));
+    }
+    std::fs::create_dir_all(&dest)
+        .map_err(|e| CliError::definition(format!("cannot create {}: {e}", dest.display())))?;
+    let mut copied = Vec::new();
+    for f in &files {
+        let name = f
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let to = dest.join(&name);
+        if std::fs::canonicalize(f).ok() != std::fs::canonicalize(&to).ok() || !to.exists() {
+            std::fs::copy(f, &to).map_err(|e| {
+                CliError::definition(format!(
+                    "cannot copy {} to {}: {e}",
+                    f.display(),
+                    to.display()
+                ))
+            })?;
+        }
+        copied.push(name);
+    }
+    let ecus: Vec<(&str, &str, bool)> = defs::car_files()
+        .into_iter()
+        .map(|(l, f)| (l, f, dest.join(f).exists()))
+        .collect();
+    let mut human = format!(
+        "copied {} definition file(s) from {} to {}",
+        copied.len(),
+        src.display(),
+        dest.display()
+    );
+    for (l, f, ok) in &ecus {
+        human.push_str(&format!(
+            "
+--ecu {l:<9} {f}: {}",
+            if *ok { "present" } else { "MISSING" }
+        ));
+    }
+    let map: serde_json::Map<String, Json> = ecus
+        .iter()
+        .map(|(l, _, ok)| (l.to_string(), json!(ok)))
+        .collect();
+    ctx.out.emit(
+        json!({"event": "setup", "from": src.display().to_string(),
+               "to": dest.display().to_string(), "copied": copied, "ecus": map}),
+        human,
+    );
+    Ok(())
+}
+
 pub fn connect(ctx: &mut Ctx, a: &LinkArgs) -> Result<(), CliError> {
     with_session(ctx, a, "connect", |_, _| Ok(()))
 }
