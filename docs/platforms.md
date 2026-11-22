@@ -1,10 +1,29 @@
-# Platforms: Linux, macOS, Windows
+# Running kline on Linux, macOS and Windows
+
+How to set up a KKL cable for kline on each operating system: build tools, FTDI driver, port
+names, permissions, the FTDI latency timer, timing precision for the 5-baud and fast init, and
+where kline keeps its files.
+
+## Contents
+
+- [Build](#build)
+- [Cable, driver, port name](#cable-driver-port-name)
+- [Break, DTR and serial timeouts](#break-dtr-and-serial-timeouts)
+- [Permissions](#permissions)
+- [FTDI latency timer](#ftdi-latency-timer)
+- [Timing precision](#timing-precision)
+- [Data directories](#data-directories)
+- [Approval terminal](#approval-terminal)
+- [Simulator transports](#simulator-transports)
+- [Not verified](#not-verified)
+
+## Summary
 
 kline builds and its full test suite runs natively on all three (CI: `.github/workflows/ci.yml`,
 matrix `ubuntu-latest`, `macos-latest`, `windows-latest`). What differs is the cable driver, the
 port name, permissions, the FTDI latency timer, timing precision and where data lives. Nothing
 in this file has been verified with the real FTDI cable on a car; on Windows only the
-Parallels VM with the cable on the Mac's USB (no K-line power) was measured; see "NOT VERIFIED".
+Parallels VM with the cable on the Mac's USB (no K-line power) was measured; see [Not verified](#not-verified).
 
 ## Build
 
@@ -34,6 +53,8 @@ Build the C++ workload once on Windows, e.g. unattended:
 Windows: `COM10` and above are typed as is; `serialport` opens every name as `\\.\COMn`, and the
 explicit `\\.\COM12` form is accepted too. A cheap clone cable with a counterfeit FT232 may be
 disabled by some FTDI driver versions; that is a driver matter, not kline's.
+
+## Break, DTR and serial timeouts
 
 Break (5-baud init) is `ioctl(TIOCSBRK/TIOCCBRK)` on Linux and macOS and
 `SetCommBreak`/`ClearCommBreak` on Windows, DTR is `TIOCMBIS/TIOCMBIC` resp.
@@ -71,7 +92,7 @@ ab8de98/bff9da7). Windows has no such flag; whether the FTDI VCP driver delivers
 - Windows: none; only one program can hold a COM port (close DDT2000/Renolink/terminals first,
   otherwise "Access is denied").
 
-## Latency timer
+## FTDI latency timer
 
 The FTDI chip sends received bytes to the host when its buffer fills or its latency timer
 expires (default 16 ms). The ~KW2 answer of a 5-baud init must leave 25..50 ms after KW2 (W4,
@@ -97,7 +118,7 @@ line measures the real round trip on every OS.
   AppleUSBFTDI` (FT232R, macOS 27) shows only USB ids, `IOTTYSuffix` and the callout/dialin
   paths, no `LatencyTimer`. Measure with `--echo-rtt`.
 
-## Timing
+## Timing precision
 
 The 5-baud init is bit-banged with break (200 ms bits, +-10 ms, ISO 9141-2) and the fast-init low
 pulse TiniL is 25 +- 1 ms (ISO 14230-2). kline's clock (`kline_host::hrtimer`) sleeps with the OS
@@ -157,7 +178,7 @@ VERIFIED.
 Tier 1-3 requests (`kline exec`) show the `RiskInfo` and read the confirmation code from the
 controlling terminal, never stdin: `/dev/tty` on Linux and macOS, the console buffers `CONIN$` and
 `CONOUT$` on Windows (they reach the console window even when stdin/stdout are redirected). As on
-Unix this is an anti-accident gate, not authentication (SAFETY.md rule 2). A Windows process
+Unix this is an anti-accident gate, not authentication ([SAFETY.md](SAFETY.md) rule 2). A Windows process
 without a console should fail to open `CONIN$`, so the request is refused (exit 7) and nothing is
 sent (NOT VERIFIED on Windows).
 
@@ -170,7 +191,7 @@ sent (NOT VERIFIED on Windows).
   sessions) are compiled only on Unix; on Windows `kline-sim/tests/pty_unix_only.rs` prints
   `SKIPPED` and `--sim-control` fails with "the simulator transport needs a Unix pty".
 
-## NOT VERIFIED
+## Not verified
 
 - Anything with the real FTDI cable on a car (powered K line), on any OS: looped-back break as
   a `00` byte (Windows VCP), echo RTT, DTR behaviour, 10400 baud accuracy, latency timer effect.

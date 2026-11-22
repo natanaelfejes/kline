@@ -1,7 +1,18 @@
-# kline-sim: ECU simulator
+# kline-sim: a K-line ECU simulator for testing without a car
 
-`crates/kline-sim` behaves like the car on the K line so that the core (and later the CLI) can be
-tested end to end without the car. Nothing in it is measured on the car.
+`crates/kline-sim` behaves like the car on the K line: it echoes bytes like a KKL cable, detects
+5-baud and fast-init wake-ups from break edges, and answers KWP2000 and ISO 9141 requests from a
+DDT2000 definition. It lets the protocol core and the `kline` CLI be tested end to end without
+the car. Nothing in it is measured on the car, and the last section says plainly what that
+means.
+
+## Contents
+
+- [Pieces](#pieces)
+- [Wire behaviour](#wire-behaviour)
+- [pty transport: how break and DTR are represented](#pty-transport-how-break-and-dtr-are-represented)
+- [Replay log (JSONL)](#replay-log-jsonl)
+- [What the simulator proves and what it cannot](#what-the-simulator-proves-and-what-it-cannot)
 
 ## Pieces
 
@@ -14,9 +25,11 @@ tested end to end without the car. Nothing in it is measured on the car.
 | `replay::ReplayEcu` | Plays back a JSONL capture as the ECU. |
 | `line::VirtualLine` | In-process duplex with a virtual millisecond clock (a 5-baud init costs no real time). |
 | `pty::PtySim` | The bus behind a pseudo-terminal plus a control socket (Linux/macOS). |
-| `driver::Driver` | Runs kline-core's `FiveBaudInit` / `FastInit` / `Session` over any `Line`, optionally capturing the JSONL log. A test driver; the CLI will own the real one. |
+| `driver::Driver` | Runs kline-core's `FiveBaudInit` / `FastInit` / `Session` over any `Line`, optionally capturing the JSONL log. A test driver; the CLI uses its own runner in `kline-host` (`link`). |
 
 ## Wire behaviour
+
+### Wake-up and handshake
 
 - **Wake-up.** A falling edge starts a frame. A rising edge within the fast-init window
   (strict 24..26 ms, lenient 15..40) is a fast init. Otherwise, in the middle of the stop bit
@@ -29,6 +42,8 @@ tested end to end without the car. Nothing in it is measured on the car.
   `accept_fast_init`.
 - **KWP handshake.** ~KW2 must come within W4 (strict 25..50 ms after KW2, lenient 0..1000);
   the ECU sends `~(received address byte)` W4 (30) later: 0x85 / 0xD9 plain, 0x05 / 0x59 XOR'ed.
+### Requests and answers
+
 - **Requests.** Frames are parsed by the simulator's own codec (`frame`, not kline-core's).
   Bad checksum, length or a non-physical format byte: ignored (violation `BadFrame`). A KWP
   header whose target is not the ECU address is ignored. Strict mode ignores a request that
@@ -45,12 +60,14 @@ tested end to end without the car. Nothing in it is measured on the car.
   - no received items: SID + 0x40 and `sent[1..]`, padded to MinBytes (`10 A0` -> `50 A0`);
   - unknown service: `7F sid 11`; known service, unknown parameters: `7F sid 12`.
   - The ECU sleeps after 5000 ms of silence (ISO 14230-2 P3max), so TesterPresent matters.
+### Failure modes and the ECU write log
+
 - **Failure modes.** Init: `Silent`, `WrongKeywords`, `NoAddressComplement`. Replies (per payload
   prefix, optionally once): `BadChecksum`, `ResponsePending { count }`, `Negative { nrc }`,
   `DropBytes { count }`, `Slow { delay_ms }`, `NoReply`. Timing: `Tolerance::strict` /
   `lenient`; `EcuTiming` sets the ECU's own W1..W4, P1, P2.
 - **ECU write log.** Every request that is not a read (by the simulator's own list, written
-  from SAFETY.md rules 2 and 3) is recorded and printed to stderr as `kline-sim: ECU WRITE LOG:`,
+  from [SAFETY.md](SAFETY.md) rules 2 and 3) is recorded and printed to stderr as `kline-sim: ECU WRITE LOG:`,
   whether or not the definition knows it; this includes BMT `21 A4 ..` with extra bytes (the exact
   2-byte transponder *status* read is Tier 0 and not logged) and the
   approved BMT routines. `Journal::assert_no_writes()` panics with the whole log.
@@ -81,11 +98,11 @@ One object per line: `{"t_ms":300,"dir":"tx","kind":"five_baud","hex":"7A"}`.
 `dir` is `tx` (tester wrote; `t_ms` = start of the write) or `rx` (tester read; `t_ms` = when the
 read returned; the echo of the preceding `tx` may be included and is stripped). `kind` marks a
 wake-up: `five_baud` (hex = address byte, `t_ms` = first break) or `fast_init`. `Driver::capturing`
-writes this format; the CLI's JSONL log should be convertible to it. On replay the ECU waits for
+writes this format; the CLI's captures use the same format plus `unix_ms` ([cli.md](cli.md#capture-files)). On replay the ECU waits for
 each `tx` (same wake-up or same bytes), then sends the following `rx` bytes at the recorded
 delays. A difference is a `ReplayMismatch` violation and the replay goes silent.
 
-## Instrument validity: what the simulator proves and what it cannot
+## What the simulator proves and what it cannot
 
 **It proves**, for the paths it exercises:
 
@@ -105,7 +122,7 @@ delays. A difference is a `ReplayMismatch` violation and the replay goes silent.
 - A serialport-based tester can drive the pty like a serial device.
 
 **It cannot prove anything about the real car.** It encodes the same assumptions as the core
-(both come from docs/protocol.md and the same RE notes), so where those are wrong, both are
+(both come from [protocol.md](protocol.md) and the same reverse-engineering notes), so where those are wrong, both are
 wrong together:
 
 1. 5-baud byte format: 8 raw bits LSB first, no parity, 200 ms bits, one stop bit.
@@ -134,5 +151,5 @@ wrong together:
 12. The scenario data layout comes from the definitions; if the DDT XML misdescribes a frame,
     the simulator agrees with it. ddt4all cross-checks only cover decoding.
 
-Only HIL tests on the car (docs/protocol.md "Not verified") can settle these. A capture from
+Only hardware-in-the-loop tests on the car ([protocol.md "Not verified"](protocol.md#not-verified-needs-the-car)) can settle these. A capture from
 the car, replayed with `ReplayEcu`, is the step between the two.

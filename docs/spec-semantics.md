@@ -1,19 +1,62 @@
-# kline-spec: DDT2000 XML semantics (ddt4all mode)
+# Reading DDT2000 ECU XML definitions: kline-spec decoding rules
 
-> Since M3 kline-spec has two interpretations (`Semantics`). The **default is
-> `Semantics::Ddt2000`**, DDT2000 itself as reverse engineered; it is described, with evidence, in
-> the author's DDT2000 behaviour notes. This document describes **`Semantics::Ddt4all`**,
-> which `crosscheck_ddt4all.py` uses (`dump --semantics ddt4all`). Validation of responses
-> (`decode_checked`) is the same in both modes.
+How `crates/kline-spec` reads a Renault DDT2000 ECU definition file (the XML with `<Target>`,
+`<Requests>` and `<Datas>`) and turns ECU response bytes into values. This is the page to read if
+you want to know exactly how a scaled value, a bit flag or a list item is decoded, or where
+kline deliberately differs from ddt4all.
 
-How `crates/kline-spec` reads a DDT2000 ECU definition and turns response bytes into values
-under `Semantics::Ddt4all`.
+## Contents
+
+- [Two semantics: DDT2000 and ddt4all](#two-semantics-ddt2000-and-ddt4all)
+- [How the ddt4all mode is verified](#how-the-ddt4all-mode-is-verified)
+- [Reading the file](#reading-the-file)
+- [`<K>` and `<CAN>`](#k-and-can)
+- [Data definitions](#data-definitions)
+- [Locating an item in a frame](#locating-an-item-in-a-frame-datadefextract)
+- [Validating a response](#validating-a-response-requestdecode_checked)
+- [From raw to value](#from-raw-to-value-datadefinterpret)
+- [Traps for callers](#traps-for-callers)
+- [Encoding](#encoding-datadefencode-encode_exact-datadefinsert-requestbuild)
+- [Request attributes](#request-attributes)
+- [Other differences from ddt4all](#other-differences-from-ddt4all)
+- [Vehicle addressing file](#vehicle-addressing-file-addressing)
+
+## Two semantics: DDT2000 and ddt4all
+
+kline-spec has two interpretations of the same XML (`Semantics`):
+
+- **`Semantics::Ddt2000`** (the default): DDT2000 itself, as reverse engineered. This is what
+  `kline` uses.
+- **`Semantics::Ddt4all`**: the ddt4all Python decoder, kept so the decoder can be cross-checked
+  against an independent implementation (`cargo run -p kline-spec --example dump -- FILE.xml --semantics ddt4all`).
+
+Validation of responses (`decode_checked`) is the same in both modes. **The rest of this page
+describes the ddt4all mode.** Where DDT2000 mode differs, it does so in these places:
+
+| Topic | ddt4all mode (this page) | DDT2000 mode (default) |
+|---|---|---|
+| `Bits@signed` | any non-empty value is true, `"0"` included | Visual Basic `CBool`: `"0"` is false (same for `Bytes@ascii`) |
+| sign extension | bit 7 / bit 15 only, 1 or 2 bytes only | at the field width, any width (a signed 4-bit field can be -8) |
+| little endian | ddt4all's byte reversal (12 bits of `34 12` give `0x1204`) | bytes LSB first, `BitOffset` from the LSB (12 bits of `34 12` give `0x234`) |
+| `<List>` and `<Scaled>` both present | Scaled wins | List wins |
+| numeric span over 4 bytes | decoded | refused when the file is loaded |
+| unsigned `Bits` of 32 or more | number | byte array (hex), never scaled |
+| 1-bit item with `<Scaled>` | scaled | never scaled |
+| display | `Format` with `.` only, else decimal | Visual Basic `Format()` (`00`, `#0`, `00.00000`); `bin` shows a binary string |
+| value missing from a List | lowercase hex | `##` + hex + `##` |
+| byte arrays | lowercase hex | uppercase hex |
+| ascii | UTF-8, invalid bytes dropped | windows-1252, nothing dropped |
+| missing `Received@MinBytes` / `DataItem@FirstByte` | 0 / parse error | 1 / 1, with a parse warning |
+| decimal separator | `.` | `.` (DDT2000 follows the Windows locale; kline does not, so script output is stable) |
+
+## How the ddt4all mode is verified
+
 The reference is the ddt4all Python decoder (GPL-3, `src/ddt4all/core/ecu/`, commit `e109cd2`).
 We match its **decoding** exactly. Where we deviate (mostly encoding and error handling), or where
 ddt4all and the XML disagree or are ambiguous, this document says so.
 
-Verification: the author's ddt4all crosscheck script runs ddt4all and our `dump` example on
-the same bytes (seeded random frames, full and truncated, for every request of all six ECU files
+A differential check script (kept by the author, not in this repository) runs ddt4all and our
+`dump` example on the same bytes (seeded random frames, full and truncated, for every request of all six ECU files
 plus our fixture). Per item it compares the display string, the raw bytes (ddt4all `getHexValue`
 against our `raw`) and, for scaled items, the unrounded number (ours against ddt4all's formula
 recomputed from its own `getHexValue` and parsed fields, compared with `==`). Run on 2026-11-21
@@ -121,7 +164,7 @@ FastInit before ISO8.
 ## Validating a response (`Request::decode_checked`)
 
 `Request::decode_unchecked` decodes any bytes (ddt4all `get_values_from_stream`); it is for the
-ddt4all crosscheck, replaying logs and canned frames. `decode_checked` (request sent with its
+ddt4all cross-check, replaying logs and canned frames. `decode_checked` (request sent with its
 default `SentBytes`) and `decode_checked_against(ecu, sent, response)` (any built frame) first
 check, in order, and return a typed error:
 
@@ -205,7 +248,7 @@ What ddt4all does (`core/ecu/ecu_request.py` `send_request`, `e109cd2`), and how
    - If Format contains `.`: Python `'%.Nf'`, where N is the number of characters between the
      first and the second `.`. Rounding is half-to-even on the exact binary value
      (`-39.375` gives `-39.38`, `-38.125` gives `-38.12`). Rust's `{:.N}` behaves the same way;
-     this was checked with tests and in the crosscheck.
+     this was checked with tests and in the cross-check.
    - Otherwise, if the value is integral, the integer (`-0.0` gives `0`).
    - Otherwise Python `str(float)`: shortest round-trip digits, with an exponent below 1e-4 or
      from 1e16 up (`1e-05`).
@@ -228,7 +271,7 @@ What ddt4all does (`core/ecu/ecu_request.py` `send_request`, `e109cd2`), and how
 
 ## Encoding (`DataDef::encode`, `encode_exact`, `DataDef::insert`, `Request::build`)
 
-Encoding is not used for anything this project sends yet. It is not covered by the crosscheck.
+Encoding is not used for anything this project sends yet. It is not covered by the cross-check.
 
 - `Value::Number` on scaled data: `raw = round((x * DivideBy - Offset) / Step)`.
   **Deviation:** ddt4all truncates with `int()`. That loses steps to float error. With truncation,

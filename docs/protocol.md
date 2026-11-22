@@ -1,19 +1,100 @@
-# K-line protocol as implemented in kline-core
+# Renault K-line protocol: ISO 9141 5-baud init, KWP2000 fast init and framing
 
-What `crates/kline-core` sends and expects on the K line, and why. This is a behaviour spec,
-not a description of DDT2000's code.
+This page explains how the K-line diagnostic protocol works on late-1990s Renault ECUs, and then
+documents exactly what `kline-core` sends and expects on the line: the ISO 9141-2 5-baud init,
+the KWP2000 (ISO 14230) 5-baud and fast init, the framing and checksum, the echo, every timing
+value, and the safety policy. It is a behaviour spec, not a description of DDT2000's code.
 
-Source tags:
+If you just want the idea, read [K-line in two minutes](#k-line-in-two-minutes). The rest is
+reference material with exact bytes and milliseconds.
+
+**Nothing on this page has been verified on a real car yet.** See [Not verified](#not-verified-needs-the-car)
+at the end.
+
+## Contents
+
+- [K-line in two minutes](#k-line-in-two-minutes)
+- [Where the numbers come from](#where-the-numbers-come-from)
+- [The Clio II ECUs](#the-clio-ii-ecus)
+- [Line settings](#line-settings)
+- [Timing values](#timing-values-ktiming)
+- [5-baud init (ISO 9141-2 slow init)](#5-baud-init-iso-9141-2-slow-init)
+- [Init variants: single ECU, Multipoint, fast init](#init-variants-single-ecu-multipoint-fast-init)
+- [KWP2000 fast init (ISO 14230-2)](#kwp2000-fast-init-iso-14230-2)
+- [Framing and checksum: ISO 9141 and KWP2000](#framing-and-checksum-iso-9141-and-kwp2000)
+- [One request/reply exchange](#one-requestreply-exchange)
+- [Session: TesterPresent and Stop](#session-testerpresent-and-stop)
+- [DDT2000 retry behaviour](#ddt2000-retry-behaviour)
+- [Sans-IO contract](#sans-io-contract)
+- [Safety policy](#safety-policy)
+- [Not verified (needs the car)](#not-verified-needs-the-car)
+
+## K-line in two minutes
+
+**The wire.** The K line is one wire between the diagnostic socket and the ECUs. It idles high
+(at battery voltage) and both sides pull it low to send. Bytes are ordinary UART bytes, 8N1, at
+10400 baud on these Renaults. Because there is only one wire, it is half duplex: only one side
+talks at a time.
+
+**The cable.** A "dumb" KKL cable is a USB serial chip (usually an FTDI FT232R) plus a level
+shifter. Its TX and RX both sit on the K line, so **every byte you send comes straight back on
+RX**. That is the *echo*. A tester reads the echo and compares it with what it sent: a
+difference means someone else talked at the same time (a collision). No echo at all usually
+means the K line is not connected or not powered.
+
+**Waking the ECU: 5-baud init.** An ECU on the K line sleeps until a tester wakes it. The
+classic way (ISO 9141-2, also used by KWP2000 as "slow init") is to send the ECU's address at
+**5 bits per second**: the tester holds the line low or high for 200 ms per bit, so one address
+byte takes 2 seconds. A KKL cable does this with the serial *break* signal (break on = line low).
+The ECU answers at 10400 baud with a sync byte `55` and two *key bytes* (KW1, KW2) that say which
+protocol variant it speaks. In the KWP2000 variant the tester then sends KW2 inverted (`~KW2`)
+and the ECU answers with its address inverted (`~address`). After that the session is open.
+
+**Waking the ECU: fast init.** KWP2000 (ISO 14230-2) adds a faster wake-up. The tester pulls
+the line low for 25 ms, releases it for 25 ms, and immediately sends a normal frame with the
+StartCommunication service (`81`). The ECU answers `C1 KW1 KW2`. This takes about 50 ms
+instead of 2 s, but the 25 ms pulse must be accurate to about 1 ms, which is hard over USB.
+
+**Frames.** After the init, every request and reply is a short frame. A KWP2000 frame looks like
+`82 7A F1 21 A0 AE`:
+
+| Byte | Meaning |
+|---|---|
+| `82` | format byte: physical addressing (`0x80`) plus 2 data bytes |
+| `7A` | target: the ECU address (here the Sirius 32 injection) |
+| `F1` | source: the tester |
+| `21 A0` | data: service `21` (read data by local identifier), identifier `A0` |
+| `AE` | checksum: the 8-bit sum of all bytes before it |
+
+The ECU's positive reply uses the service number plus `0x40` (`61 A0 ...`). A negative reply is
+`7F`, the service, and a reason code. Reason `78` means "busy, wait", and the tester keeps
+listening. The older ISO 9141 framing that DDT2000 calls "ISO8" (Sagem Safir injection) is
+simpler: a length byte, the data and the same kind of checksum, with no addresses.
+
+**Timing.** The protocol is full of small gaps: how long the ECU may take to answer (P2), how
+long the tester waits before the next request (P3), the gap between bytes, and the wait between
+KW2 and `~KW2` (W4). If the line is idle too long (a few seconds), the ECU goes back to sleep,
+so the tester sends *TesterPresent* (`3E`) to keep the session alive. When it is done it sends
+StopCommunication (`82`).
+
+**Renault specifics.** These ECUs use tester address `F1`, 10400 baud, KWP2000 services such
+as `21` (read by local identifier) and `14` (clear fault codes), and the request and data layout
+comes from DDT2000's XML definition files. The rest of this page is the exact version of all of
+the above, as `kline-core` implements it.
+
+## Where the numbers come from
+
+Every value below carries a source tag:
 
 - **RE: IOTBD32V3 ...**: DDT2000's native K-line DLL (serial port, init, echo, reply reading).
 - **RE: KWP2000Diag4 ...**: DDT2000's protocol classes (framing, reply checks, per-protocol defaults).
 - **XML <K>**: the ECU definition file.
 - **ours**: a choice of this project where DDT2000 has no equivalent, or where we deliberately differ.
 
-The reverse-engineering notes themselves are not in this repository. Nothing here is verified
-on the car yet. See "Not verified" at the end.
+"RE" means the behaviour was read from DDT2000's binaries by reverse engineering. The
+reverse-engineering notes themselves are not in this repository.
 
-## The car's ECUs
+## The Clio II ECUs
 
 | ECU | Address | `<K>` | Init path | KW1 KW2 |
 |---|---|---|---|---|
@@ -32,7 +113,9 @@ can target 0x7A as a fallback for the car test.
 | DTR | high while idle, low during the 5-baud bits | RE: IOTBD32V3 5-baud routine |
 | Tester address | 0xF1 | RE: KWP2000Diag4 KWP2000Ecu default ToolAddress |
 
-## Timing (`KTiming`, all ms)
+## Timing values (`KTiming`)
+
+All values in milliseconds.
 
 | Field | IOTBD default | ISO8 class default | KWP class default | Multipoint (`MultiEcu` only) | XML attribute |
 |---|---|---|---|---|---|
@@ -51,7 +134,7 @@ the KWP2000Ecu Multipoint init. Class defaults apply only when the XML attribute
 `LinkConfig::effective_timing()` applies the Multipoint column only under `MultiEcu`.
 XML values are assumed to be ms.
 
-Fixed constants (`timing::consts`):
+### Fixed constants (`timing::consts`)
 
 | Constant | Value | Source |
 |---|---|---|
@@ -68,9 +151,11 @@ Every read timeout is a **total** timeout for that read, not an inter-byte timeo
 (RE: IOTBD32V3 COMMTIMEOUTS). A reply therefore gets 300 ms for its first byte and 300 ms for
 the rest.
 
-## 5-baud init
+## 5-baud init (ISO 9141-2 slow init)
 
-Common part (RE: IOTBD32V3 5-baud routine):
+### Common part
+
+From RE: IOTBD32V3 5-baud routine:
 
 1. (ours) idle 300 ms.
 2. DTR low. Break on (K low) for 200 ms: the start bit.
@@ -92,7 +177,9 @@ Common part (RE: IOTBD32V3 5-baud routine):
    them). With `reject_keyword_mismatch` (ours, default off) a mismatch with the definition's
    key bytes fails the init.
 
-Then it depends on the transport flag DDT2000 sets (RE: IOTBD32V3 worker; the nested
+### ISO8 or KWP: what happens after the key bytes
+
+It depends on the transport flag DDT2000 sets (RE: IOTBD32V3 worker; the nested
 `<KWP><ISO8>` element only describes the init, the transport flag stays off for KWP):
 
 - **ISO8 (Safir):** no handshake. Wait `first_request_ms`. Done.
@@ -103,16 +190,20 @@ Then it depends on the transport flag DDT2000 sets (RE: IOTBD32V3 worker; the ne
   validated; echo but no ~address is error **no address complement**). Wait
   `first_request_ms`. Done.
 
+### Addresses with bit 7 set
+
 Addresses with bit 7 set are refused by both init machines (`AliasedAddress`): such a byte is
 the Multipoint wake byte of `address & 0x7F` (0xA6 wakes the BMT), so the ECU that answers
-could differ from the one the policy checks (security review M2 F3a). The init result
+could differ from the one the policy checks (found in a security review). The init result
 (`InitOutcome`) is opaque, carries the config, init kind and target (derived from the
 bit-banged byte, or the StartCommunication header target), and is consumed by `Session::new`.
 
-Example, Sirius 32 single ECU (as tested in `tests/init_traces.rs`): bits of 0x7A, read
-`55 D0 8F`, wait 25 ms, send `70`, read `70 xx` (xx logged), wait 20 ms.
+### Example: Sirius 32, single ECU
 
-## Init variants (`InitVariant`)
+As tested in `tests/init_traces.rs`: bits of 0x7A, read `55 D0 8F`, wait 25 ms, send `70`,
+read `70 xx` (xx logged), wait 20 ms.
+
+## Init variants: single ECU, Multipoint, fast init
 
 The XML marks both the Sirius 32 and the BMT `Multipoint="1"`, but whether DDT2000 actually
 uses Multipoint depends on how many ECUs it opens. Two RE sources:
@@ -125,7 +216,7 @@ uses Multipoint depends on how many ECUs it opens. Two RE sources:
 
 Both keep the ~KW2 handshake and the 25 ms / 20 ms waits.
 
-| Variant | 5-baud byte (Sirius / BMT) | Inter-byte | Timings | Expected ~address |
+| Variant (`InitVariant`) | 5-baud byte (Sirius / BMT) | Inter-byte | Timings | Expected ~address |
 |---|---|---|---|---|
 | `SingleEcu` (**default**) | 0x7A / 0x26 | XML (0) | XML / class defaults | 0x85 / 0xD9 |
 | `MultiEcu` | 0xFA / 0xA6 | 7 ms | fixed Multipoint values | 0x05 / 0x59 |
@@ -133,6 +224,8 @@ Both keep the ~KW2 handshake and the 25 ms / 20 ms waits.
 
 `MultiEcu` has no effect on an ECU whose XML has no Multipoint. The 5-baud byte is always
 8 raw bits, LSB first, no parity bit (RE: IOTBD32V3).
+
+### Detection order (`--variant auto`)
 
 **The car must confirm which variant each ECU needs.** `--variant auto` order (alone on the
 line): **FastInit, then SingleEcu** (DDT2000's own detection order for 0x7A and 0x26: DiagScanXml
@@ -142,7 +235,7 @@ our MultiEcu fallback; ISO8 (Safir) only SingleEcu. The whole list is tried up t
 500 ms apart (DDT2000 "Init retry n/3"; `--init-attempts`). Constants:
 `kline_core::retry::{DDT2000_DETECTION_ORDER, RetryPolicy}`.
 
-## Fast init (KWP)
+## KWP2000 fast init (ISO 14230-2)
 
 RE: IOTBD32V3 fast init: (ours) idle 300 ms, DTR high, 1 ms, break 25 ms, break off 25 ms,
 then the StartCommunication exchange below with payload `81`. With KW1 still unknown, the
@@ -153,21 +246,33 @@ StartCommunication), like the 5-baud init. DDT2000's fast-init reader (RE: IOTBD
 FUN_10001290) only handles a length in the format byte; we also accept a separate length byte
 there, as DDT2000's normal request reader does.
 
-## Framing
+## Framing and checksum: ISO 9141 and KWP2000
 
 Checksum: 8-bit sum of all preceding bytes, both framings (RE: KWP2000Diag4 builders).
 
-**ISO8** (RE: KWP2000Diag4 ISO8 builder and parser): `[N][data..][cs]`, `N = len(data) + 1`,
+### ISO8 (ISO 9141, Safir)
+
+RE: KWP2000Diag4 ISO8 builder and parser: `[N][data..][cs]`, `N = len(data) + 1`,
 no addresses. `33 50` -> `03 33 50 86`; TesterPresent `36` -> `02 36 38`; Stop `3F` -> `02 3F 41`.
 Reply checks: at least 3 bytes, `N` = byte count - 1, checksum. A one-byte payload 0x15, 0x37,
 0x38 or 0x39 is a status reply (`Reply::Iso8Status`, meaning unknown).
 
-**KWP2000** (RE: KWP2000Diag4 KWP builder and parser): `[0x80+n][tgt][F1][data..][cs]` for
+### KWP2000 (ISO 14230)
+
+RE: KWP2000Diag4 KWP builder and parser: `[0x80+n][tgt][F1][data..][cs]` for
 `n <= 0x3F`, else `[80][tgt][F1][n][data..][cs]` (`n <= 255`). Target is the ECU address,
 never XOR'ed. The separate length byte is also used for short frames when KW1 is neither 0xD0
 nor odd (RE: KWP2000Diag4 KWP2000Ecu init); D0 keeps the length in the format byte.
-`21 A3` to the BMT -> `82 26 F1 21 A3 5D`; `21 A0` to the Sirius -> `82 7A F1 21 A0 AE`;
-TesterPresent `3E` -> `81 26 F1 3E D6`; StopCommunication `82` -> `81 26 F1 82 1A`.
+
+Examples:
+
+| Request | Frame |
+|---|---|
+| `21 A3` to the BMT | `82 26 F1 21 A3 5D` |
+| `21 A0` to the Sirius | `82 7A F1 21 A0 AE` |
+| TesterPresent `3E` | `81 26 F1 3E D6` |
+| StopCommunication `82` | `81 26 F1 82 1A` |
+
 Reply checks: format byte must be physical (`fmt & 0xC0 == 0x80`, ours: stricter than
 DDT2000, whose parser KWP2000Diag4 0x2305d230 checks only the two address bytes; another
 address mode has a different header layout, and Renault ECUs answer physically), checksum,
@@ -175,7 +280,7 @@ byte 2 = 0xF1, byte 3 = ECU address, length consistent with the format or length
 
 Payloads returned to callers start at the response SID.
 
-## Exchange (one request)
+## One request/reply exchange
 
 1. Sleep whatever is left of the gap owed since the last exchange: P3 (`reply_to_request_ms`)
    after a good reply, `on_error_ms` after an error, negative reply or status reply (ours: the
@@ -198,7 +303,7 @@ Payloads returned to callers start at the response SID.
    restarts step 5 without a new request**, with a 5000 ms first-byte timeout, at most 10
    times (ours: DDT2000 treats 0x78 as a plain error).
 
-## Session
+## Session: TesterPresent and Stop
 
 - TesterPresent (`36` ISO8, `3E` KWP) is due when the line has been idle for
   `tester_present_ms` since the last exchange. Right after a 5-baud init it is due at once
@@ -217,14 +322,14 @@ Payloads returned to callers start at the response SID.
   5-baud branch of KWP2000Ecu init (RE: KWP2000Diag4 0x2305a370, `local_8 = 0x5d`) it only
   fetches the key bytes; `81` and the KW1 length-byte rule (separate length byte unless KW1 is
   0xD0 or odd) exist only on the fast-init branch. So after a 5-baud init the length stays in
-  the format byte whatever KW1 is (`Session::new`, D16).
+  the format byte whatever KW1 is (`Session::new`).
 - Optional `TesterPresentMode::DDT2000_PERIODIC` (`--periodic-tester-present`): `3E` every
   2000 ms since the last TP whatever else is sent, reply required (RE: DdtDiagScrXml 0x520484a0,
   "Enable or disable physical TesterPresent request, when idle", `TesterPresent.WithResponse`).
 
-## DDT2000 application behaviour (retries)
+## DDT2000 retry behaviour
 
-Not in DDT2000's protocol layer; defaults of `kline_core::RetryPolicy`:
+Not in DDT2000's protocol layer but in its application; defaults of `kline_core::RetryPolicy`:
 
 | What | Rule | RE |
 |---|---|---|
@@ -238,50 +343,56 @@ Machines (`FiveBaudInit`, `FastInit`, `Session`) emit one `Action` at a time and
 one `Event` back: `Done` for `SetDtr`, `SetBreak`, `Sleep`, `FlushRx`, `Write`;
 `BreakLoopbackSeen(bool)` for `CheckBreakLoopback`; `ReadOk(bytes)` with exactly `count` bytes
 or `ReadTimeout(partial)` with fewer for `Read`. Any other event fails the machine
-(`UnexpectedEvent`). Time is passed in as `now_ms`; nothing reads a clock.
+(`UnexpectedEvent`). Time is passed in as `now_ms`; nothing reads a clock. Why it is built this
+way: [architecture.md](architecture.md#sans-io-actions-and-events).
 
-## Safety
+## Safety policy
 
-Enforced in `kline-core` (SAFETY.md rules 2 and 3; owner-approved policy v2 and owner decision
-2026-11-22). The core writes only frames it built itself: `Action::Write` carries a
-crate-private `Frame` (bytes readable, no public constructor, not `Clone`), and every request
-frame comes from a crate-private `Permit`. Decisions use the exact payload bytes and the
-target taken from the init that actually ran; the loaded definition's `DefinitionGuard` (class
-and immobilizer-named requests) can only add refusals.
+Enforced in `kline-core` ([SAFETY.md](SAFETY.md) rules 2 and 3; the tier policy and the
+2026-11-22 decisions are the maintainer's). The core writes only frames it built itself:
+`Action::Write` carries a crate-private `Frame` (bytes readable, no public constructor, not
+`Clone`), and every request frame comes from a crate-private `Permit`. Decisions use the exact
+payload bytes and the target taken from the init that actually ran; the loaded definition's
+`DefinitionGuard` (class and immobilizer-named requests) can only add refusals.
 
 ### Tiers
 
 | Tier | Requests (exact bytes) | How |
 |---|---|---|
 | 0 Read | KWP: `3E [x]`, `10 81`, `10 A0`, `1A xx`, `21 xx` (exactly 2 bytes, BMT `21 A4` transponder *status* included), `17`/`18` + 1-3 bytes. ISO8 (Safir): `21`, `33 50`, `33 51`, `33 52`, `33 54` (exactly what Safir_1/Safir_2 contain) | `Session::request`; autonomous use OK (CLI, `--json`, MCP). Read-only scan via `ScanPlan` (below) |
-| 1 Service | KWP: `14 xx xx` clear DTC; not BMT: `30 lid` + 1-4 bytes output control, `11 FF` adaptation reset, exactly `32 A0 00` (end of injector inhibition; other `32`, and BMT `30`/`11`/`32`, are Expert: Gemini re-review M2 finding 2); Sirius `31 A0 A0` injector inhibition (warning `StopsEngine`); BMT `31 C7 00 00 00` / `31 C8 00 00 00` remote learning, BMT actuator `31 out param count` with `out` 0xA0..=0xB3 | human `Approval` per request |
+| 1 Service | KWP: `14 xx xx` clear DTC; not BMT: `30 lid` + 1-4 bytes output control, `11 FF` adaptation reset, exactly `32 A0 00` (end of injector inhibition; other `32`, and BMT `30`/`11`/`32`, are Expert, found in a review); Sirius `31 A0 A0` injector inhibition (warning `StopsEngine`); BMT `31 C7 00 00 00` / `31 C8 00 00 00` remote learning, BMT actuator `31 out param count` with `out` 0xA0..=0xB3 | human `Approval` per request |
 | 2 Config write | BMT `3B D2 index value` (index 0..=13 except 2, value 0/1); other KWP ECUs `3B lid` + 1-4 bytes | human `Approval`, plus in the same session: a positive backup read (`21 A1` for BMT `3B D2`, else `21 lid`) and a positive `21 80` whose exact reply the caller says it chose the ECU definition from (BMT config indices differ between BMT_X65_ph1_p and BMT_SAGEM) |
-| 3 Expert | any other request that is not forbidden (undocumented service, identifier, parameters or length), including `27` security access (`SecurityAccess`, `MayBrickEcu`), `34`-`37` transfer (`MayBrickEcu`, `MayLeaveProgrammingSession`), `10 xx` other than `10 81`/`10 A0` (`MayLeaveProgrammingSession`), `3D`/`38`-`3A`/`2C`/`23` on non-immobilizer ECUs (owner decision 2026-11-22, final) | human *expert* `Approval` (10-character code), `RiskInfo` with "unknown effect" and the specific warnings |
+| 3 Expert | any other request that is not forbidden (undocumented service, identifier, parameters or length), including `27` security access (`SecurityAccess`, `MayBrickEcu`), `34`-`37` transfer (`MayBrickEcu`, `MayLeaveProgrammingSession`), `10 xx` other than `10 81`/`10 A0` (`MayLeaveProgrammingSession`), `3D`/`38`-`3A`/`2C`/`23` on non-immobilizer ECUs (maintainer decision 2026-11-22, final) | human *expert* `Approval` (10-character code), `RiskInfo` with "unknown effect" and the specific warnings |
 | forbidden | the immobilizer line only, see below | never, not even in expert mode |
 
-**Forbidden always** (`DenyReason::Immobilizer`, `ImmobilizerNamed`; plus `ProtocolReserved`,
-`Empty`, which are not safety rules):
+### Always forbidden: the immobilizer
+
+`DenyReason::Immobilizer`, `ImmobilizerNamed`; plus `ProtocolReserved` and `Empty`, which are
+not safety rules:
 
 - BMT/UCH/decoder: address 0x26 or 0xA6, or a definition whose `Target@Name`/`<Function Name>`
   says BMT/UCH/UCBIC/decoder/anti-demarrage/immobilizer (`kline_core::spec::ecu_class`), at any
   address and protocol claim: `3D`, `38`, `39`, `3A`, `2C` (memory write / routine by address /
   dynamic define: EEPROM with key codes); `30`/`31`/`32`/`33` with byte 2 in 0xC0..=0xC9 except
-  the two exact remote-learning routines (catalogue 9.1: C0-C8 immobilizer, C9 added by owner
-  decision); every `2E`/`2F`; every `3B` except `3B D2`; `3B D2 02 ..` (AP1CLE, key related);
-  `21 A4` with anything after it.
-- Not BMT, any protocol claim (an ISO8 target at 0x7A included, re-review M2 finding 1):
+  the two exact remote-learning routines (C0-C8 immobilizer in the capability notes, C9 added by
+  maintainer decision); every `2E`/`2F`; every `3B` except `3B D2`; `3B D2 02 ..` (AP1CLE, key
+  related); `21 A4` with anything after it.
+- Not BMT, any protocol claim (an ISO8 target at 0x7A included, found in a review):
   `31`/`32`/`33`/`38`-`3A` with `A0 A3` (reset of the backed-up memory, may touch the "verrou
   logiciel" area); `2E`/`2F`/`3B` on `A0`, `A2`, `AE`, `BD` (frames carrying immobilizer /
-  verrou fields, catalogue 4.4).
+  verrou fields).
 - Sirius (0x7A or a Sirius definition): also `30` output control on `A0`/`A2`/`AE`/`BD`, and
   `31`-`33`/`38`-`3A` on `A2`/`AE`/`BD` (`31 A0 A0` / `32 A0 00` stay Tier 1: `A0` there is the
   special-function routine).
 - Name guard (`DefinitionGuard`, set on the `Session` by the CLI): Tier 1-3 requests of the loaded
-  definition whose names or data items look immobilizer/transponder/key related (docs/cli.md).
+  definition whose names or data items look immobilizer/transponder/key related
+  ([cli.md](cli.md#name-guard)).
 - Link frames `81`, `82` (KWP) and `36`, `3F` (ISO8) as requests (`ProtocolReserved`, session
   integrity rather than safety): only the init machines and `Session::tester_present` /
   `Session::stop` send them. ISO8 `36` (keep-alive) and `3F` (stop) are protocol-required
   (RE: KWP2000Diag4 ISO8Ecu init) although no Safir definition lists them.
+
+### RiskInfo
 
 Every non-read request has a machine-readable `RiskInfo { tier, what_it_changes,
 what_can_go_wrong, reversible, prerequisites, warnings }` (`safety::assess`), from the
@@ -293,17 +404,17 @@ option", `reversible: true` (write the old value from the `21 A1` backup), `Eepr
 
 The feature is **off by default** (`tests/exploits.rs` checks the resolved features).
 Without it no approval type or challenge method exists, so a library user, an MCP server or a
-`--json` binary can only send Tier 0. AI/MCP/`--json` callers *prepare* non-read requests with
-`safety::assess` / `safety::tier_of`: print the `RiskInfo` and the exact CLI command for a
-human, never execute.
+`--json` binary can only send Tier 0. Automated, MCP and `--json` callers *prepare* non-read
+requests with `safety::assess` / `safety::tier_of`: print the `RiskInfo` and the exact CLI
+command for a human, never execute.
 
 Only the interactive `kline` CLI may enable the feature. It must read the confirmation from
 `/dev/tty` (not stdin, so a pipe cannot answer) and never offer approvals with `--json`. The code
 is an anti-accident gate: an agent driving a pty can type it (permitted by the owner when he
-chooses). `kline-agent`
-(the AI binary) depends on `kline-core` without it; `crates/kline-agent/tests/agent.rs` runs
-`cargo tree -p kline-agent -e features` and fails if the feature or `kline-cli` appears. Any future
-`kline-mcp` crate needs the same check (docs/cli.md).
+chooses). `kline-agent` (the read-only binary) depends on `kline-core` without it;
+`crates/kline-agent/tests/agent.rs` runs `cargo tree -p kline-agent -e features` and fails if the
+feature or `kline-cli` appears. Any future `kline-mcp` crate needs the same check
+([cli.md](cli.md#building-kline-and-kline-agent)).
 
 Flow: `Session::service_challenge(payload)` / `config_write_challenge(payload,
 identification)` / `expert_challenge(payload)` returns an `ApprovalChallenge` with the exact
