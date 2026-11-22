@@ -43,8 +43,10 @@ Default-deny, decided on exact payload bytes and the target of the init that act
   (owner decision 2026-11-22, final; on the BMT see rule 3). BMT memory read `23` stays Expert
   (owner decision, step 7).
 - **Airbag ECU.** Requests to the airbag ECU (`0x2C` in the X65 addressing) follow the normal
-  tiers, but every non-read carries the `SafetySystem` warning and a fixed airbag risk text
-  (disabled airbags or pretensioners, airbag lamp, squib on an output test).
+  tiers, but every non-read carries the `SafetySystem` warning, an airbag risk text
+  (`RiskInfo::safety_system`: disabled airbags or pretensioners, airbag lamp, squib on an
+  output test) and airbag prerequisites, in addition to the request's own warnings, text and
+  prerequisites (none of those is dropped).
 - **Protocol frames.** ISO8 `36` (keep-alive) and `3F` (stop), KWP `81`/`82`: sent only by the
   init machines and `Session::tester_present`/`stop`, never as requests.
 

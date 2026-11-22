@@ -608,11 +608,86 @@ fn airbag_non_reads_carry_safety_system_warning() {
             r.warnings.contains(&Warning::SafetySystem),
             "{p:02X?} {r:?}"
         );
-        assert!(r.what_can_go_wrong.contains("AIRBAG"), "{p:02X?} {r:?}");
+        assert!(
+            r.safety_system.is_some_and(|t| t.contains("AIRBAG")),
+            "{p:02X?} {r:?}"
+        );
     }
     // Reads are untouched; other ECUs get no airbag warning.
     let read = assess(&AIRBAG, &[0x21, 0x80]).unwrap();
     assert!(!read.warnings.contains(&Warning::SafetySystem));
+    assert_eq!(read.safety_system, None);
     let sirius = assess(&SIRIUS, &[0x3B, 0xD1, 0x10]).unwrap();
     assert!(!sirius.warnings.contains(&Warning::SafetySystem));
+    assert_eq!(sirius.safety_system, None);
+}
+
+/// Code review M2 / security review L1: the airbag override adds `SafetySystem` and the airbag
+/// prerequisites to the request's own risk; it never drops the request's own warnings,
+/// prerequisites or text, and adds no warning that does not belong to the request.
+#[test]
+fn airbag_risk_keeps_the_request_warnings_and_prerequisites() {
+    const AIRBAG: Target = Target {
+        protocol: Protocol::Kwp,
+        ecu_address: 0x2C,
+    };
+    const OTHER: Target = Target {
+        protocol: Protocol::Kwp,
+        ecu_address: 0x40,
+    };
+    for p in [
+        &[0x14, 0xFF, 0x00][..],
+        &[0x11, 0xFF],
+        &[0x27, 0x01],
+        &[0x10, 0x85],
+        &[0x34, 0x00, 0x00],
+        &[0x37],
+        &[0x31, 0x81],
+        &[0x3D, 0x00, 0x10, 0x01],
+        &[0x38, 0x10, 0x00],
+        &[0x2C, 0xF0],
+        &[0x23, 0x00, 0x10],
+        &[0x30, 0x80, 0x00, 0x01],
+        &[0x32, 0xA0, 0x00],
+        &[0x3B, 0xD0, 0x01],
+        &[0x31, 0x00],
+        &[0x99],
+    ] {
+        let a = assess(&AIRBAG, p).unwrap_or_else(|d| panic!("{p:02X?}: {d}"));
+        let o = assess(&OTHER, p).unwrap_or_else(|d| panic!("{p:02X?}: {d}"));
+        assert_eq!(a.tier, o.tier, "{p:02X?}");
+        let mut want = vec![Warning::SafetySystem];
+        want.extend(o.warnings.iter().copied());
+        assert_eq!(
+            a.warnings.iter().copied().collect::<Vec<_>>(),
+            want,
+            "{p:02X?}"
+        );
+        for pre in o.prerequisites.iter() {
+            assert!(a.prerequisites.iter().any(|x| x == pre), "{p:02X?} {pre}");
+        }
+        assert!(
+            a.prerequisites.iter().any(|x| x.contains("airbag lamp")),
+            "{p:02X?} {a:?}"
+        );
+        assert_eq!(a.what_it_changes, o.what_it_changes, "{p:02X?}");
+        assert_eq!(a.what_can_go_wrong, o.what_can_go_wrong, "{p:02X?}");
+    }
+    let clear = assess(&AIRBAG, &[0x14, 0xFF, 0x00]).unwrap();
+    assert!(clear.warnings.contains(&Warning::ErasesFaultMemory));
+    assert!(!clear.warnings.contains(&Warning::MovesActuator));
+    assert!(assess(&AIRBAG, &[0x27, 0x01])
+        .unwrap()
+        .warnings
+        .contains(&Warning::SecurityAccess));
+    for p in [&[0x10, 0x85][..], &[0x34, 0x00, 0x00]] {
+        assert!(assess(&AIRBAG, p)
+            .unwrap()
+            .warnings
+            .contains(&Warning::MayLeaveProgrammingSession));
+    }
+    assert!(assess(&AIRBAG, &[0x11, 0xFF])
+        .unwrap()
+        .warnings
+        .contains(&Warning::ErasesLearnedValues));
 }

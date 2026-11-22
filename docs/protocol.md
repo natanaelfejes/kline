@@ -406,10 +406,13 @@ not safety rules:
 ### RiskInfo
 
 Every non-read request has a machine-readable `RiskInfo { tier, what_it_changes,
-what_can_go_wrong, reversible, prerequisites, warnings }` (`safety::assess`), from the
+what_can_go_wrong, safety_system, reversible, prerequisites, warnings }` (`safety::assess`), from the
 definitions and the capability catalogue. Examples: clear DTC "erases the stored fault
 codes", `reversible: false`, `ErasesFaultMemory`; BMT `3B D2` "rewrites one BMT configuration
 option", `reversible: true` (write the old value from the `21 A1` backup), `EepromWrite`.
+`warnings` and `prerequisites` are short inline lists (`StaticList`), so the airbag ECU
+(0x2C) can add `SafetySystem`, its text (`safety_system`) and its prerequisites to the
+request's own risk without dropping any of it.
 
 ### Approvals (feature `approved-routines`)
 

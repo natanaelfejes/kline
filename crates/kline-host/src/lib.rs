@@ -124,8 +124,9 @@ pub fn risk_json(r: &RiskInfo) -> Value {
         "tier_number": match r.tier { Tier::Read => 0, Tier::Service => 1, Tier::ConfigWrite => 2, Tier::Expert => 3 },
         "what_it_changes": r.what_it_changes,
         "what_can_go_wrong": r.what_can_go_wrong,
+        "safety_system": r.safety_system,
         "reversible": r.reversible,
-        "prerequisites": r.prerequisites,
+        "prerequisites": r.prerequisites.iter().collect::<Vec<_>>(),
         "warnings": r.warnings.iter().map(|w| warning_name(*w)).collect::<Vec<_>>(),
     })
 }
@@ -139,9 +140,12 @@ pub fn risk_human(r: &RiskInfo) -> String {
         r.what_can_go_wrong,
         if r.reversible { "yes" } else { "NO" }
     );
+    if let Some(t) = r.safety_system {
+        s.push_str(&format!("\nSAFETY SYSTEM:     {t}"));
+    }
     if !r.prerequisites.is_empty() {
         s.push_str("\nprerequisites:");
-        for p in r.prerequisites {
+        for p in &r.prerequisites {
             s.push_str(&format!("\n  - {p}"));
         }
     }

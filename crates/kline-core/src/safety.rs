@@ -254,6 +254,100 @@ pub enum Warning {
     SafetySystem,
 }
 
+/// A short list kept inline (no allocation, `Copy`), so a risk can be extended (airbag ECU)
+/// without losing the request's own entries. Holds at most `N` items.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct StaticList<T: Copy + PartialEq + 'static, const N: usize> {
+    items: [Option<T>; N],
+}
+
+impl<T: Copy + PartialEq + 'static, const N: usize> StaticList<T, N> {
+    /// The items of `s` in order. Panics if `s` has more than `N` items (a programming error
+    /// in the risk table, covered by the tests).
+    pub fn from_slice(s: &[T]) -> Self {
+        let mut l = StaticList { items: [None; N] };
+        for x in s {
+            l.push(*x);
+        }
+        l
+    }
+
+    /// Append `x` unless it is already in the list.
+    pub fn push(&mut self, x: T) {
+        if self.contains(&x) {
+            return;
+        }
+        let slot = self
+            .items
+            .iter_mut()
+            .find(|i| i.is_none())
+            .expect("StaticList capacity");
+        *slot = Some(x);
+    }
+
+    /// `x` first, then the items (without a duplicate of `x`).
+    pub fn with_first(&self, x: T) -> Self {
+        let mut l = StaticList { items: [None; N] };
+        l.push(x);
+        for i in self.iter() {
+            l.push(*i);
+        }
+        l
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        self.items.iter().filter_map(Option::as_ref)
+    }
+
+    pub fn contains(&self, x: &T) -> bool {
+        self.iter().any(|i| i == x)
+    }
+
+    pub fn len(&self) -> usize {
+        self.iter().count()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items[0].is_none()
+    }
+}
+
+impl<T: Copy + PartialEq + core::fmt::Debug + 'static, const N: usize> core::fmt::Debug
+    for StaticList<T, N>
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+impl<T: Copy + PartialEq + 'static, const N: usize> PartialEq<[T]> for StaticList<T, N> {
+    fn eq(&self, other: &[T]) -> bool {
+        self.len() == other.len() && self.iter().zip(other).all(|(a, b)| a == b)
+    }
+}
+
+impl<T: Copy + PartialEq + 'static, const N: usize, const M: usize> PartialEq<&[T; M]>
+    for StaticList<T, N>
+{
+    fn eq(&self, other: &&[T; M]) -> bool {
+        *self == other[..]
+    }
+}
+
+impl<'a, T: Copy + PartialEq + 'static, const N: usize> IntoIterator for &'a StaticList<T, N> {
+    type Item = &'a T;
+    type IntoIter =
+        core::iter::FilterMap<core::slice::Iter<'a, Option<T>>, fn(&'a Option<T>) -> Option<&'a T>>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.items.iter().filter_map(Option::as_ref)
+    }
+}
+
+/// Warnings of a [`RiskInfo`].
+pub type Warnings = StaticList<Warning, 8>;
+/// Prerequisites of a [`RiskInfo`].
+pub type Prerequisites = StaticList<&'static str, 8>;
+
 /// What a non-read request does, shown to the human before approval and quoted by the
 /// approval (sources: ECU definitions and the capability catalogue).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -261,9 +355,12 @@ pub struct RiskInfo {
     pub tier: Tier,
     pub what_it_changes: &'static str,
     pub what_can_go_wrong: &'static str,
+    /// Extra risk from the kind of ECU, shown with `what_can_go_wrong`: the airbag text on the
+    /// airbag ECU ([`AIRBAG_ADDRESS`]), else `None`.
+    pub safety_system: Option<&'static str>,
     pub reversible: bool,
-    pub prerequisites: &'static [&'static str],
-    pub warnings: &'static [Warning],
+    pub prerequisites: Prerequisites,
+    pub warnings: Warnings,
 }
 
 /// Why a payload was refused.
@@ -616,27 +713,25 @@ pub fn assess_in(
 /// marked as a safety-system change.
 pub const AIRBAG_ADDRESS: u8 = 0x2C;
 
+/// The request's own risk plus the airbag text, `SafetySystem` (first) and the airbag
+/// prerequisites (code review M2 / security review L1: nothing of the request's own risk is
+/// dropped). Irreversible: an airbag change must be checked on the car.
 fn airbag_risk(info: RiskInfo) -> RiskInfo {
     const WHAT: &str = "AIRBAG ECU (safety system): a wrong write, test or clear can disable the airbags or seat-belt pretensioners, light the airbag lamp, or on an output test fire a squib";
-    let warnings: &'static [Warning] = match info.tier {
-        Tier::Read => &[],
-        Tier::Service => &[Warning::SafetySystem, Warning::MovesActuator],
-        Tier::ConfigWrite => &[Warning::SafetySystem, Warning::EepromWrite],
-        Tier::Expert => &[
-            Warning::SafetySystem,
-            Warning::UnknownEffect,
-            Warning::MayBrickEcu,
-        ],
-    };
+    const PRE: [&str; 3] = [
+        "nobody in the car, ignition on, engine off",
+        "read and save the airbag fault frames first",
+        "after any change, check that the airbag lamp goes out at the next ignition on",
+    ];
+    let mut prerequisites = info.prerequisites;
+    for p in PRE {
+        prerequisites.push(p);
+    }
     RiskInfo {
-        what_can_go_wrong: WHAT,
+        safety_system: Some(WHAT),
         reversible: false,
-        prerequisites: &[
-            "nobody in the car, ignition on, engine off",
-            "read and save the airbag fault frames first",
-            "after any change, check that the airbag lamp goes out at the next ignition on",
-        ],
-        warnings,
+        prerequisites,
+        warnings: info.warnings.with_first(Warning::SafetySystem),
         ..info
     }
 }
@@ -644,13 +739,18 @@ fn airbag_risk(info: RiskInfo) -> RiskInfo {
 const NONE: &[&str] = &[];
 
 fn risk_info(bmt: bool, payload: &[u8], tier: Tier) -> RiskInfo {
-    let r = |what_it_changes, what_can_go_wrong, reversible, prerequisites, warnings| RiskInfo {
+    let r = |what_it_changes,
+             what_can_go_wrong,
+             reversible,
+             prerequisites: &[&'static str],
+             warnings: &[Warning]| RiskInfo {
         tier,
         what_it_changes,
         what_can_go_wrong,
+        safety_system: None,
         reversible,
-        prerequisites,
-        warnings,
+        prerequisites: Prerequisites::from_slice(prerequisites),
+        warnings: Warnings::from_slice(warnings),
     };
     match (tier, payload) {
         (Tier::Read, _) => r("nothing (read)", "none known", true, NONE, &[]),
