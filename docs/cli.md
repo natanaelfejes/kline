@@ -177,7 +177,9 @@ second challenge for the stop request with its own code, keeps the session alive
 stop when that code is typed. If it is not typed in time the stop is NOT sent (said on stdout);
 the session then ends with StopCommunication, which on most ECUs also ends an output test
 (NOT VERIFIED on this car). One challenge per session at a time (kline-core), so the stop cannot
-be approved before the request is sent.
+be approved before the request is sent. A Tier 2 (config write) stop request needs the session's `21 80`
+identification and its backup read like any config write: both are read before the request is
+sent, and if they fail the whole command is refused with nothing sent (Neon critique F1).
 
 `--hold SECONDS` (1 to 60; final critique F01): without it the session ends with
 StopCommunication a few ms after the reply, which would end a learning window the request

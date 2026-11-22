@@ -351,11 +351,33 @@ pub fn exec(
     let payload = asx.payload.clone();
     let names = asx.names.clone();
     let timeout_ms = a.confirm_timeout.saturating_mul(1000);
+    // The stop's own state read for a lost stop reply (Neon F1).
+    let stop_state_read = stop
+        .as_ref()
+        .map(|(s, _)| state_read_hint(&ecu, &a.link, &s.payload));
     cmd::with_session(ctx, &a.link, "exec", |ctx, o| {
         let identification = if risk.tier == Tier::ConfigWrite {
             Some(config_write_prereads(ctx, o, &payload)?)
         } else {
             None
+        };
+        // A Tier 2 stop needs the 21 80 identification and its backup read in this session
+        // (Neon F1): both are read before the request is sent, so a stop that could not be
+        // approved refuses the whole command while nothing has been sent yet.
+        let stop_identification = match &stop {
+            Some((s, r)) if r.tier == Tier::ConfigWrite => {
+                Some(config_write_prereads(ctx, o, &s.payload).map_err(|e| {
+                    CliError::new(
+                        e.code,
+                        e.kind,
+                        format!(
+                            "the --stop config write cannot be prepared ({}); nothing was sent",
+                            e.message
+                        ),
+                    )
+                })?)
+            }
+            _ => None,
         };
         let sent = approve_and_send(
             ctx,
@@ -416,10 +438,10 @@ pub fn exec(
                 &s.payload,
                 &s.names,
                 srisk.tier,
-                None,
+                stop_identification.as_deref(),
                 timeout_ms,
                 "send the stop request now",
-                &state_read,
+                stop_state_read.as_deref().unwrap_or(&state_read),
             )
         };
         match &stopped {
