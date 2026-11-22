@@ -1001,7 +1001,7 @@ mod meaning_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod git_tests {
     use super::*;
 
