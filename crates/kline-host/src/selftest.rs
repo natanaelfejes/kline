@@ -177,7 +177,7 @@ pub fn fast_init_cause(j: &BreakJitter) -> Option<String> {
             j.max_call_us as f64 / 1000.0
         )
     } else {
-        "the break calls were fast, so the host's sleeps woke late (see host timing above)".into()
+        "the break calls were fast, so the host's sleeps woke late: a busy host or, in a VM, a descheduled vCPU (see host timing above)".into()
     })
 }
 

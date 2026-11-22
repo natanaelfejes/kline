@@ -752,7 +752,7 @@ pub fn selftest(ctx: &mut Ctx, a: &SelftestArgs) -> Result<(), CliError> {
     let fast_init_cause = crate::selftest::fast_init_cause(&j);
     let fast_init_human = fast_init_cause
         .as_ref()
-        .map(|c| format!(" ({c})"))
+        .map(|c| format!(": {c}"))
         .unwrap_or_default();
     ctx.out.emit(
         json!({"event": "selftest", "port": path,
