@@ -78,7 +78,12 @@ In any tier, including expert. This is the only forbidden class (owner-approved)
 - **Name guard**: a Tier 1-3 request whose definition names look immobilizer/transponder/key
   related, applied by `Session` in kline-core ([cli.md](cli.md#name-guard)). The texts of an
   enumerated sent parameter count too: the value whose text has such a word is refused (fixed
-  bytes plus that byte), or the whole request when the parameter is not one whole byte.
+  bytes plus that byte), or the whole request when the parameter is not one whole byte. A flag
+  needs at least two distinguishing bytes (the fixed prefix, else the whole SentBytes
+  template); a service byte alone never flags. Non-read variants of a flagged read are refused
+  on purpose (intended, security review L2): a `21 xx` with extra bytes can write (BMT `21 A1`
+  with a third byte writes CALTERMI), so on a read flagged by its received items only the exact
+  two-byte read stays allowed (Tier 0).
 - **Allowed**: reading transponder *status* (BMT `21A4`, exactly 2 bytes) is Tier 0.
 
 Writing, learning, resetting or disabling the immobilizer is never implemented.

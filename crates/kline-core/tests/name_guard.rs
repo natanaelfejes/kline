@@ -155,3 +155,150 @@ mod list_texts {
         assert_eq!(names(&[0x3B, 0x40, 0x00]), vec!["Nibble"]);
     }
 }
+
+/// Security review L3: more key words ("clef", "code manuel", German "Schluessel"), and a
+/// request whose first sent item starts at byte 1 can be flagged. A flag always needs at least
+/// two distinguishing bytes: a service byte alone never flags (a template like BMT
+/// "LANCEMENT DES ROUTINES" `3100000000` with "MSB/LSB Code manuel" items must not refuse the
+/// owner's `31C7000000`/`31C8000000` or the actuator tests `31 A0..B3 ..`).
+#[test]
+fn more_key_words_are_recognised() {
+    for name in [
+        "App seconde cléf TIR",
+        "Clef 2",
+        "CLEFS",
+        "Emission du CODE MANUEL",
+        "MSB Code manuel",
+        "Schlüssel anlernen",
+        "Schluessel",
+        "SCHLUSSEL",
+    ] {
+        assert!(
+            safety::immobilizer_keyword(name).is_some(),
+            "{name:?} should be flagged"
+        );
+    }
+    for name in ["Clefable", "Manuel", "Code defaut", "Schluss"] {
+        assert_eq!(safety::immobilizer_keyword(name), None, "{name:?}");
+    }
+}
+
+#[cfg(feature = "spec")]
+mod prefixes {
+    use kline_core::safety::{self, DefinitionGuard, EcuClass, Protocol, Target, Tier};
+    use kline_spec::EcuDef;
+
+    const XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Target Name="Prefix fixture" xmlns="http://www-diag.renault.com/2002/ECU">
+<Function Name="Body" Address="81"/>
+<Datas>
+<Data Name="v"><Bits count="8"/></Data>
+<Data Name="w"><Bits count="16"/></Data>
+<Data Name="MSB Code manuel"><Bits count="8"/></Data>
+<Data Name="Neutral item"><Description>Valeur du transpondeur</Description><Bits count="8"/></Data>
+<Data Name="Plain"><Comment>sets the clef count</Comment><Bits count="8"/></Data>
+<Data Name="Mnem"><Mnemonic>VERLOG_X</Mnemonic><Bits count="8"/></Data>
+<Data Name="Etat verrou"><Bits count="8"/></Data>
+</Datas>
+<Requests Endian="Big">
+<Request Name="Ecriture clef"><Sent><SentBytes>3B6000</SentBytes><DataItem Name="v" FirstByte="3"/></Sent><Received MinBytes="1"/></Request>
+<Request Name="Emission du CODE MANUEL"><Sent><SentBytes>3B7100</SentBytes><DataItem Name="v" FirstByte="3"/></Sent><Received MinBytes="1"/></Request>
+<Request Name="Schlüssel anlernen"><Sent><SentBytes>3B7200</SentBytes><DataItem Name="v" FirstByte="3"/></Sent><Received MinBytes="1"/></Request>
+<Request Name="Ecriture code cle"><Sent><SentBytes>3B8000</SentBytes><DataItem Name="w" FirstByte="1"/></Sent><Received MinBytes="1"/></Request>
+<Request Name="LANCEMENT DES ROUTINES"><Sent><SentBytes>3100000000</SentBytes><DataItem Name="v" FirstByte="2"/><DataItem Name="MSB Code manuel" FirstByte="4"/></Sent><Received MinBytes="1"/></Request>
+<Request Name="Short code cle"><Sent><SentBytes>3B</SentBytes><DataItem Name="v" FirstByte="2"/></Sent><Received MinBytes="1"/></Request>
+<Request Name="Write A"><Sent><SentBytes>3B9100</SentBytes><DataItem Name="Neutral item" FirstByte="3"/></Sent><Received MinBytes="1"/></Request>
+<Request Name="Write B"><Sent><SentBytes>3B9200</SentBytes><DataItem Name="Plain" FirstByte="3"/></Sent><Received MinBytes="1"/></Request>
+<Request Name="Write C"><Sent><SentBytes>3B9300</SentBytes><DataItem Name="Mnem" FirstByte="3"/></Sent><Received MinBytes="1"/></Request>
+<Request Name="Lecture etat"><Sent><SentBytes>21B5</SentBytes></Sent><Received MinBytes="3"><DataItem Name="Etat verrou" FirstByte="3"/></Received></Request>
+</Requests>
+</Target>"#;
+
+    fn def() -> EcuDef {
+        EcuDef::from_xml_bytes(XML.as_bytes()).unwrap()
+    }
+
+    fn t(addr: u8) -> Target {
+        Target {
+            protocol: Protocol::Kwp,
+            ecu_address: addr,
+        }
+    }
+
+    fn names(addr: u8, p: &[u8]) -> Vec<String> {
+        kline_core::spec::immobilizer_named_requests(&def(), &t(addr), p)
+    }
+
+    #[test]
+    fn new_words_flag_requests_with_two_distinguishing_bytes() {
+        assert_eq!(names(0x51, &[0x3B, 0x60, 0x01]), vec!["Ecriture clef"]);
+        assert_eq!(
+            names(0x51, &[0x3B, 0x71, 0x01]),
+            vec!["Emission du CODE MANUEL"]
+        );
+        assert_eq!(names(0x51, &[0x3B, 0x72, 0x01]), vec!["Schlüssel anlernen"]);
+        // Other identifiers of the same service are not touched.
+        assert!(names(0x51, &[0x3B, 0x61, 0x01]).is_empty());
+    }
+
+    #[test]
+    fn first_item_at_byte_one_flags_the_whole_template() {
+        assert_eq!(names(0x51, &[0x3B, 0x80, 0x00]), vec!["Ecriture code cle"]);
+        assert!(names(0x51, &[0x3B, 0x81, 0x00]).is_empty());
+    }
+
+    #[test]
+    fn a_service_byte_alone_never_flags() {
+        // "LANCEMENT DES ROUTINES" (fixed prefix `31`) is flagged by its full template only.
+        assert_eq!(
+            names(0x51, &[0x31, 0x00, 0x00, 0x00, 0x00]),
+            vec!["LANCEMENT DES ROUTINES"]
+        );
+        let g = kline_core::spec::definition_guard(&def());
+        let mut immo = g.clone();
+        immo.class = EcuClass::Immobilizer;
+        for addr in [0x26u8, 0x51] {
+            let guard = if addr == 0x26 { &g } else { &immo };
+            for p in [
+                &[0x31, 0xC7, 0x00, 0x00, 0x00][..],
+                &[0x31, 0xC8, 0x00, 0x00, 0x00],
+            ] {
+                assert_eq!(
+                    safety::tier_of_in(guard, &t(addr), p).unwrap(),
+                    Tier::Service,
+                    "{addr:02X} {p:02X?}"
+                );
+            }
+            assert_eq!(
+                safety::tier_of_in(guard, &t(addr), &[0x31, 0xA0, 0x00, 0x01]).unwrap(),
+                Tier::Service
+            );
+        }
+        // A one-byte template ("Short code cle", SentBytes `3B`) cannot be flagged at all.
+        assert!(names(0x51, &[0x3B, 0x01]).is_empty());
+        assert!(names(0x51, &[0x3B]).is_empty());
+        let mut direct = DefinitionGuard::default();
+        direct.flag(vec![0x3B], "one byte".into());
+        assert!(direct.immobilizer_names(&t(0x51), &[0x3B, 0x00]).is_empty());
+    }
+
+    /// Security review L8 (mutants M43, M44): the description, comment and mnemonic of a sent
+    /// data item, and the names of received items, flag the request.
+    #[test]
+    fn item_texts_and_received_items_flag_the_request() {
+        assert_eq!(names(0x51, &[0x3B, 0x91, 0x00]), vec!["Write A"]);
+        assert_eq!(names(0x51, &[0x3B, 0x92, 0x00]), vec!["Write B"]);
+        assert_eq!(names(0x51, &[0x3B, 0x93, 0x00]), vec!["Write C"]);
+        // Received item "Etat verrou": the read stays Tier 0, anything longer is refused.
+        let g = kline_core::spec::definition_guard(&def());
+        assert_eq!(
+            safety::tier_of_in(&g, &t(0x51), &[0x21, 0xB5]).unwrap(),
+            Tier::Read
+        );
+        assert_eq!(names(0x51, &[0x21, 0xB5, 0x01]), vec!["Lecture etat"]);
+        assert!(safety::tier_of_in(&g, &t(0x51), &[0x21, 0xB5, 0x01])
+            .unwrap_err()
+            .reason
+            .is_forbidden());
+    }
+}

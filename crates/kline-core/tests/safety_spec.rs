@@ -178,3 +178,59 @@ fn bmt_definition_guard_flags_immobilizer_actuator_outputs() {
         }
     }
 }
+
+/// Security review L3 with the coordinator's constraint: "LANCEMENT DES ROUTINES" (SentBytes
+/// `3100000000`, fixed prefix `31`) has the items "MSB/LSB Code manuel", which the new
+/// "code manuel" keyword hits. Its flag must not refuse the remote learning, the actuator tests
+/// or any other `31 xx`: only its whole template is flagged.
+#[test]
+fn bmt_code_manuel_routine_template_does_not_block_other_31_requests() {
+    for file in ["BMT_X65_ph1_p.xml", "BMT_SAGEM.xml"] {
+        let Some(bytes) = common::ddt_file(file) else {
+            continue;
+        };
+        let ecu = EcuDef::from_xml_bytes(&bytes).unwrap();
+        let g = kline_core::spec::definition_guard(&ecu);
+        for addr in [0x26u8, 0x40] {
+            let t = Target {
+                protocol: Protocol::Kwp,
+                ecu_address: addr,
+            };
+            let tier = |p: &[u8]| kline_core::safety::tier_of_in(&g, &t, p);
+            assert_eq!(
+                kline_core::spec::immobilizer_named_requests(&ecu, &t, &[0x31, 0, 0, 0, 0]),
+                vec!["LANCEMENT DES ROUTINES".to_string()],
+                "{file}"
+            );
+            for r in BMT_REMOTE_LEARNING {
+                assert_eq!(
+                    tier(&r).unwrap(),
+                    Tier::Service,
+                    "{file} {addr:02X} {r:02X?}"
+                );
+            }
+            for out in 0xA0u8..=0xB3 {
+                let p = [0x31, out, 0x00, 0x01];
+                if [0xA6, 0xAB, 0xAC].contains(&out) {
+                    assert!(
+                        tier(&p).unwrap_err().reason.is_forbidden(),
+                        "{file} {p:02X?}"
+                    );
+                } else {
+                    assert_eq!(
+                        tier(&p).unwrap(),
+                        Tier::Service,
+                        "{file} {addr:02X} {p:02X?}"
+                    );
+                }
+            }
+            assert_eq!(
+                tier(&[0x31, 0xC1, 0x00, 0x00, 0x00]).unwrap_err().reason,
+                kline_core::safety::DenyReason::Immobilizer,
+                "{file}"
+            );
+            // Undocumented routines stay Expert, not refused by the name guard.
+            assert_eq!(tier(&[0x31, 0x10, 0x00, 0x00, 0x00]).unwrap(), Tier::Expert);
+        }
+    }
+}

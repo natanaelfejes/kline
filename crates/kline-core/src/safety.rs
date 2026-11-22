@@ -165,9 +165,11 @@ impl DefinitionGuard {
     }
 
     /// Flag the request `name` that sends `prefix` (its fixed bytes) as immobilizer related.
-    /// An empty prefix is ignored (it would match every payload by accident of the XML).
+    /// A prefix shorter than two bytes is ignored: a service byte alone would refuse every
+    /// request of that service (e.g. the BMT remote learning `31C7000000`) by accident of the
+    /// XML.
     pub fn flag(&mut self, prefix: Vec<u8>, name: alloc::string::String) {
-        if !prefix.is_empty() {
+        if prefix.len() >= 2 {
             self.flagged.push((prefix, name));
         }
     }
@@ -1175,7 +1177,9 @@ pub const APPROVALS_COMPILED: bool = cfg!(feature = "approved-routines");
 /// Substrings (lowercase, accents folded, spaces and punctuation removed) that mark a request
 /// or data name as immobilizer / transponder / key related. Coordinator scope addition
 /// 2026-11-22 (generic ECUs): anti-demarrage, transpondeur, immo, VERLOG, verrou, APPTRP,
-/// AP1CLE, code cle / key code. `wegfahr` (German Wegfahrsperre) is ours. Deliberately broad:
+/// AP1CLE, code cle / key code. `wegfahr` (German Wegfahrsperre) is ours; `codemanuel` (BMT
+/// "Emission du CODE MANUEL") and `schlussel`/`schluessel` (German key) from security review
+/// L3. Deliberately broad:
 /// "verrou" also matches central locking ("verrouillage"), which is refused too.
 pub const IMMOBILIZER_SUBSTRINGS: &[&str] = &[
     "antidemarr",
@@ -1189,10 +1193,13 @@ pub const IMMOBILIZER_SUBSTRINGS: &[&str] = &[
     "clecode",
     "keycode",
     "wegfahr",
+    "codemanuel",
+    "schlussel",
+    "schluessel",
 ];
-/// Whole words (lowercase, accents folded) with the same meaning: `cle`/`cles` (French key, as
-/// in "APPRENT CLE 2 TEL") and `key`/`keys`.
-pub const IMMOBILIZER_WORDS: &[&str] = &["cle", "cles", "key", "keys"];
+/// Whole words (lowercase, accents folded) with the same meaning: `cle`/`cles`/`clef`/`clefs`
+/// (French key, as in "APPRENT CLE 2 TEL", "App seconde cléf TIR") and `key`/`keys`.
+pub const IMMOBILIZER_WORDS: &[&str] = &["cle", "cles", "clef", "clefs", "key", "keys"];
 
 /// Fold one character for keyword matching: lowercase ASCII, accents removed; `None` for
 /// anything that is not a letter or digit.

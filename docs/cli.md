@@ -178,16 +178,32 @@ type it, and the owner permits that when he chooses. It is not a defence against
 ## Name guard
 
 Name guard (kline-core, all ECUs, Tier 1-3; `Session` applies it with the definition the CLI
-loaded, `kline_core::spec::definition_guard`): a request is refused (exit 7) when a definition request with
-those bytes, or one of its data items (name, description, mnemonic), contains an
+loaded, `kline_core::spec::definition_guard`; with several candidate definitions, the union of
+their guards): a request is refused (exit 7) when a definition request with those bytes, or one
+of its sent or received data items (name, description, comment, mnemonic), contains an
 immobilizer/transponder/key keyword (`kline_core::safety::immobilizer_keyword`: anti-demarrage,
-transpond, immo, verlog, verrou, apptrp, ap1cle, code cle, key code, wegfahr, and the words
-cle/cles/key/keys). The exact BMT remote-learning payloads `31C7000000`/`31C8000000` on a BMT/UCH/decoder
-(0x26/0xA6 or a BMT/UCH/decoder definition) are exempt (their names contain "CLE"). "verrou" also matches central locking; that is refused too.
+transpond, immo, verlog, verrou, apptrp, ap1cle, code cle, key code, wegfahr, code manuel,
+schlussel/schluessel, and the words cle/cles/clef/clefs/key/keys; accents are folded, so "cléf"
+and "Schlüssel" match). The exact BMT remote-learning payloads `31C7000000`/`31C8000000` on a
+BMT/UCH/decoder (0x26/0xA6 or a BMT/UCH/decoder definition) are exempt (their names contain
+"CLE"). "verrou" also matches central locking; that is refused too.
+
+What "those bytes" are: the request's fixed sent bytes up to its first sent data item, when
+that is at least two bytes; otherwise its whole SentBytes template (e.g. BMT "LANCEMENT DES
+ROUTINES" `3100000000`, whose "MSB/LSB Code manuel" items hit "code manuel", is refused only
+as `31 00 00 00 00 ..`, not every `31`). A service byte alone never flags anything, so a
+definition whose template is one byte cannot be flagged by name (the byte rules still apply).
+
 An enumerated sent parameter counts as well: when a text of its `<List>` has such a keyword,
-the request with that value is refused (fixed bytes plus the value byte; the whole request when
-the parameter is not one whole byte), e.g. BMT actuator outputs `A6` "Ligne Transpondeur" and
-`AB` "Led Verlog"; the other outputs stay available.
+the request with that value is refused (fixed bytes plus the value byte; the request as above
+when the parameter is not one whole byte), e.g. BMT actuator outputs `A6` "Ligne Transpondeur"
+and `AB` "Led Verlog"; the other outputs stay available.
+
+A request flagged by a received item is a read whose reply holds an immobilizer field: the
+exact read (`21 xx`, 2 bytes) stays Tier 0, but the same bytes with anything after them are
+refused, not Expert. This is intended: a `21 xx` with extra bytes can write (BMT `21 A1` with a
+third byte writes CALTERMI), so an unknown variant of a flagged read is not offered
+(security review L2, kept).
 
 ## Exit codes
 

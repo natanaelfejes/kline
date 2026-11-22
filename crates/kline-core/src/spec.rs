@@ -165,10 +165,12 @@ pub fn ecu_class(ecu: &EcuDef) -> EcuClass {
 /// The policy's view of `ecu` ([`DefinitionGuard`]): its class ([`ecu_class`]) and every
 /// request whose request name, or the name, description, comment or mnemonic of one of its
 /// data items, contains an immobilizer keyword ([`crate::safety::immobilizer_keyword`]),
-/// flagged with its fixed sent bytes (up to the first sent data item). A sent item whose
-/// `<List>` has a text with such a keyword flags the fixed bytes plus that value (when the item
-/// is the whole byte right after them; otherwise the whole request). `Session` applies it to
-/// every request once it is set with `Session::set_definition_guard`.
+/// flagged with its fixed sent bytes (up to the first sent data item) when they are at least
+/// two bytes, else with its whole SentBytes template (at least two bytes, else not at all: a
+/// service byte alone never flags). A sent item whose `<List>` has a text with such a keyword
+/// flags the fixed bytes plus that value (when the item is the whole byte right after them;
+/// otherwise the request as above). `Session` applies it to every request once it is set with
+/// `Session::set_definition_guard`.
 pub fn definition_guard(ecu: &EcuDef) -> DefinitionGuard {
     use crate::safety::immobilizer_keyword;
     let mut g = DefinitionGuard::new(ecu_class(ecu));
@@ -196,8 +198,19 @@ pub fn definition_guard(ecu: &EcuDef) -> DefinitionGuard {
                 .iter()
                 .chain(r.received_items.iter())
                 .any(|i| flagged(&i.name));
-        if fixed > 0 && hit {
-            g.flag(sent[..fixed].to_vec(), r.name.clone());
+        // At least two distinguishing bytes (coordinator, security review L3): a request whose
+        // fixed prefix is the service byte alone (BMT "LANCEMENT DES ROUTINES" `3100000000`,
+        // items from byte 2) or nothing (first item at byte 1) is flagged by its whole
+        // SentBytes template, so it never refuses every request of that service.
+        let key = if fixed >= 2 {
+            Some(sent[..fixed].to_vec())
+        } else {
+            (sent.len() >= 2).then(|| sent.clone())
+        };
+        if hit {
+            if let Some(k) = key {
+                g.flag(k, r.name.clone());
+            }
             continue;
         }
         // Enumerated sent parameters (step 7: BMT "sortie a activer" lists 0xA6 "Ligne
@@ -227,8 +240,8 @@ pub fn definition_guard(ecu: &EcuDef) -> DefinitionGuard {
                     p.push(v);
                     g.flag(p, r.name.clone());
                 }
-            } else {
-                g.flag(sent[..fixed].to_vec(), r.name.clone());
+            } else if let Some(k) = &key {
+                g.flag(k.clone(), r.name.clone());
             }
         }
     }
