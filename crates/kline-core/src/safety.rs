@@ -174,6 +174,25 @@ impl DefinitionGuard {
         }
     }
 
+    /// Add `other`'s refusals: the stronger class (immobilizer over Sirius over generic) and
+    /// all its flagged requests. For several candidate definitions of one ECU (security
+    /// review L4): the guard of the union only adds refusals.
+    pub fn merge(&mut self, other: DefinitionGuard) {
+        let rank = |c: EcuClass| match c {
+            EcuClass::Generic => 0,
+            EcuClass::Sirius => 1,
+            EcuClass::Immobilizer => 2,
+        };
+        if rank(other.class) > rank(self.class) {
+            self.class = other.class;
+        }
+        for f in other.flagged {
+            if !self.flagged.contains(&f) {
+                self.flagged.push(f);
+            }
+        }
+    }
+
     /// Names of the flagged requests `payload` would send (their prefix starts it). The two
     /// owner-approved BMT remote-learning routines are exempt on an immobilizer ECU: their BMT
     /// names contain "CLE" (remote key).

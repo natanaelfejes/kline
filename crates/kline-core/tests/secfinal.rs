@@ -477,3 +477,27 @@ fn bmt_config_index_nibble_alias_of_ap1cle_is_forbidden() {
         Tier::ConfigWrite
     );
 }
+
+/// Security review L4: merging guards keeps every refusal and the strongest class.
+#[test]
+fn merged_guard_keeps_the_strongest_class_and_all_flags() {
+    let t = Target {
+        protocol: Protocol::Kwp,
+        ecu_address: 0x40,
+    };
+    let mut a = DefinitionGuard::new(EcuClass::Sirius);
+    a.flag(vec![0x3B, 0x50], "a".into());
+    let mut b = DefinitionGuard::new(EcuClass::Immobilizer);
+    b.flag(vec![0x3B, 0x60], "b".into());
+    let mut g = a.clone();
+    g.merge(b.clone());
+    assert_eq!(g.class, EcuClass::Immobilizer);
+    assert_eq!(g.immobilizer_names(&t, &[0x3B, 0x50, 0]), vec!["a"]);
+    assert_eq!(g.immobilizer_names(&t, &[0x3B, 0x60, 0]), vec!["b"]);
+    let mut g2 = b;
+    g2.merge(a);
+    assert_eq!(g2.class, EcuClass::Immobilizer);
+    let mut g3 = DefinitionGuard::default();
+    g3.merge(DefinitionGuard::new(EcuClass::Sirius));
+    assert_eq!(g3.class, EcuClass::Sirius);
+}

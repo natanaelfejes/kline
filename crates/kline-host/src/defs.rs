@@ -320,10 +320,15 @@ impl Ecu {
         }
     }
 
-    /// The policy's view of the definition ([`kline_core::safety::DefinitionGuard`]): its
-    /// BMT/UCH/decoder class and its immobilizer-named requests.
+    /// The policy's view of the loaded definitions ([`kline_core::safety::DefinitionGuard`]):
+    /// the union over every candidate (strongest class, all immobilizer-named requests), so a
+    /// name or class only the second BMT definition has still applies (security review L4).
     pub fn guard(&self) -> kline_core::safety::DefinitionGuard {
-        kline_core::spec::definition_guard(self.def())
+        let mut g = kline_core::spec::definition_guard(self.def());
+        for d in &self.defs[1..] {
+            g.merge(kline_core::spec::definition_guard(&d.def));
+        }
+        g
     }
 
     /// The policy target the init would produce (address from the definition or --address).

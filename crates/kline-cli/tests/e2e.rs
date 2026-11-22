@@ -574,6 +574,44 @@ fn non_clio_name_guard_refuses_immobilizer_requests() {
     assert_eq!(r.event("risk")[0]["risk"]["tier_number"], 1);
 }
 
+/// Security review L4 / code review L6: the name guard and the class come from every loaded
+/// candidate definition (union), not only the first.
+#[test]
+fn definition_guard_is_the_union_of_all_candidates() {
+    let d = temp_dir("guard-union");
+    let abs = std::fs::read_to_string(fixture_path("abs_fast.xml")).unwrap();
+    let neutral = d.join("neutral.xml");
+    std::fs::write(&neutral, abs.replace("Code antidemarrage", "Code reglage")).unwrap();
+    let body = d.join("body.xml");
+    std::fs::write(
+        &body,
+        abs.replace(
+            "Target Name=\"CLI fixture ABS\"",
+            "Target Name=\"CLI fixture BMT\"",
+        ),
+    )
+    .unwrap();
+    let (neutral, body, abs) = (path_str(&neutral), path_str(&body), xml("abs_fast.xml"));
+    let risk = |xmls: &[&str], req: &str| {
+        let mut args = vec!["--json", "risk"];
+        for x in xmls {
+            args.extend(["--xml", x]);
+        }
+        args.push(req);
+        run(abs_ecu(), &args).0
+    };
+    assert_eq!(risk(&[&neutral], "3B801234").code, 0);
+    let r = risk(&[&neutral, &abs], "3B801234");
+    assert_eq!(r.code, 7, "{}", r.stdout);
+    assert!(r.event("risk")[0]["refused"]
+        .as_str()
+        .unwrap()
+        .contains("immobilizer"));
+    // Class: the second candidate is a BMT definition, so the BMT rules apply.
+    assert_eq!(risk(&[&neutral], "2E1000").code, 0);
+    assert_eq!(risk(&[&neutral, &body], "2E1000").code, 7);
+}
+
 #[test]
 fn address_override_and_risk_report() {
     let (r, _) = run(
