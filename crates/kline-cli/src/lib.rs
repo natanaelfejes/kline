@@ -444,8 +444,14 @@ pub fn exec(
     })
 }
 
+/// Confirmation attempts per request: a mistyped code gives one more attempt with a new code
+/// (Neon critique F1: a typo in the `--stop` code must not leave an actuator test running), then
+/// the request is not sent (exit 9). ours.
+pub const CONFIRM_ATTEMPTS: u32 = 2;
+
 /// Show the approval screen for `payload`, wait for the typed code (keeping the session open),
-/// and send it once. Nothing is sent without the exact code.
+/// and send it once. Nothing is sent without the exact code; a wrong code voids the challenge
+/// and, once, a new challenge with a new code is shown for the same request.
 #[allow(clippy::too_many_arguments)]
 fn approve_and_send(
     ctx: &mut Ctx,
@@ -459,34 +465,80 @@ fn approve_and_send(
     action: &str,
     state_read: &str,
 ) -> Result<kline_core::session::SessionOutcome, CliError> {
-    let challenge = match tier {
-        Tier::Service => o.session.service_challenge(payload),
-        Tier::ConfigWrite => o
-            .session
-            .config_write_challenge(payload, identification.unwrap_or(&[])),
-        Tier::Expert => o.session.expert_challenge(payload),
-        Tier::Read => unreachable!("reads need no approval"),
-    }
-    .map_err(|e| CliError::session(&e))?;
-    let t = challenge.target();
-    let screen = format!(
-        "\n==== APPROVAL REQUIRED: {} ====\nrequest:  {}{}\nECU:      {:02X} ({})\n{}\n\nType the code {} and Enter to {action}; anything else aborts.",
-        tier_name(challenge.tier()),
-        hex_sp(challenge.payload()),
-        if names.is_empty() { String::new() } else { format!(" = {}", kline_host::sanitize_list(names)) },
-        t.ecu_address,
-        cmd::proto_name(t.protocol),
-        risk_human(challenge.risk()),
-        challenge.code()
-    );
-    prompt
-        .show(&screen)
-        .map_err(|e| CliError::refused(format!("cannot write to {TTY_OUT}: {e}")))?;
+    let mut attempt = 1;
+    let approval = loop {
+        let challenge = match tier {
+            Tier::Service => o.session.service_challenge(payload),
+            Tier::ConfigWrite => o
+                .session
+                .config_write_challenge(payload, identification.unwrap_or(&[])),
+            Tier::Expert => o.session.expert_challenge(payload),
+            Tier::Read => unreachable!("reads need no approval"),
+        }
+        .map_err(|e| CliError::session(&e))?;
+        let t = challenge.target();
+        let screen = format!(
+            "\n==== APPROVAL REQUIRED: {} ====\nrequest:  {}{}\nECU:      {:02X} ({})\n{}\n\nType the code {} and Enter to {action}; {}",
+            tier_name(challenge.tier()),
+            hex_sp(challenge.payload()),
+            if names.is_empty() { String::new() } else { format!(" = {}", kline_host::sanitize_list(names)) },
+            t.ecu_address,
+            cmd::proto_name(t.protocol),
+            risk_human(challenge.risk()),
+            challenge.code(),
+            if attempt < CONFIRM_ATTEMPTS {
+                "a wrong code gives one more attempt with a new code, then aborts."
+            } else {
+                "this is the last attempt: anything else aborts."
+            }
+        );
+        prompt
+            .show(&screen)
+            .map_err(|e| CliError::refused(format!("cannot write to {TTY_OUT}: {e}")))?;
+        let typed = wait_for_code(ctx, o, prompt, timeout_ms)?;
+        match Approval::confirm(challenge, &typed) {
+            Ok(a) => break a,
+            Err(_) if attempt < CONFIRM_ATTEMPTS => {
+                attempt += 1;
+                prompt
+                    .show("\nconfirmation code does not match; nothing was sent. That code is void: one more attempt with a new code.")
+                    .map_err(|e| CliError::refused(format!("cannot write to {TTY_OUT}: {e}")))?;
+            }
+            Err(_) => {
+                return Err(CliError::new(
+                    exit::NOT_APPROVED,
+                    "not_approved",
+                    format!("confirmation code does not match; nothing was sent ({CONFIRM_ATTEMPTS} attempts)"),
+                ))
+            }
+        }
+    };
+    let first = o
+        .session
+        .request_approved(payload, approval, o.link.now_ms())
+        .map_err(|e| CliError::session(&e))?;
+    let written = o.link.frames_written();
+    o.link.run(&mut o.session, first).map_err(|e| {
+        if o.link.frames_written() > written {
+            reply_lost(ctx, payload, &e.to_cli().message, state_read)
+        } else {
+            e.to_cli()
+        }
+    })
+}
+
+/// Read one line from the terminal, keeping the session open with TesterPresent while waiting.
+fn wait_for_code(
+    ctx: &mut Ctx,
+    o: &mut cmd::Open,
+    prompt: &mut dyn Prompt,
+    timeout_ms: u64,
+) -> Result<String, CliError> {
     let rx = prompt.ask();
     let start = o.link.now_ms();
-    let typed = loop {
+    loop {
         match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(Ok(line)) => break line,
+            Ok(Ok(line)) => return Ok(line),
             Ok(Err(e)) => {
                 return Err(CliError::new(
                     exit::NOT_APPROVED,
@@ -513,26 +565,7 @@ fn approve_and_send(
                 o.link.keepalive(&mut o.session).map_err(|e| e.to_cli())?;
             }
         }
-    };
-    let approval = Approval::confirm(challenge, &typed).map_err(|_| {
-        CliError::new(
-            exit::NOT_APPROVED,
-            "not_approved",
-            "confirmation code does not match; nothing was sent",
-        )
-    })?;
-    let first = o
-        .session
-        .request_approved(payload, approval, o.link.now_ms())
-        .map_err(|e| CliError::session(&e))?;
-    let written = o.link.frames_written();
-    o.link.run(&mut o.session, first).map_err(|e| {
-        if o.link.frames_written() > written {
-            reply_lost(ctx, payload, &e.to_cli().message, state_read)
-        } else {
-            e.to_cli()
-        }
-    })
+    }
 }
 
 /// Final critique F06: the approved request reached the line but its reply was lost, damaged

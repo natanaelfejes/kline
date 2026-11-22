@@ -322,11 +322,22 @@ pub enum Human {
     TypesShownCode,
     /// Types something else.
     TypesWrongCode,
+    /// One answer per prompt, in order (the last one repeats).
+    Script(&'static [Answer]),
+}
+
+/// One answer of [`Human::Script`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Answer {
+    Shown,
+    Wrong,
 }
 
 pub struct FakeTty {
     pub human: Human,
     pub screen: Arc<Mutex<String>>,
+    /// Prompts answered so far.
+    pub asks: usize,
 }
 
 impl Prompt for FakeTty {
@@ -337,13 +348,19 @@ impl Prompt for FakeTty {
     fn ask(&mut self) -> mpsc::Receiver<io::Result<String>> {
         let (tx, rx) = mpsc::channel();
         let screen = self.screen.lock().unwrap().clone();
-        let line = match self.human {
-            Human::TypesShownCode => {
+        let answer = match self.human {
+            Human::TypesShownCode => Answer::Shown,
+            Human::TypesWrongCode => Answer::Wrong,
+            Human::Script(s) => s[self.asks.min(s.len() - 1)],
+        };
+        self.asks += 1;
+        let line = match answer {
+            Answer::Shown => {
                 // The latest challenge (an exec with --stop shows two).
                 let after = screen.rsplit("Type the code ").next().unwrap();
                 format!("{}\n", after.split_whitespace().next().unwrap())
             }
-            Human::TypesWrongCode => "AAAAAA\n".to_string(),
+            Answer::Wrong => "AAAAAA\n".to_string(),
         };
         tx.send(Ok(line)).unwrap();
         rx
@@ -545,6 +562,7 @@ fn run_line_inner(line: VirtualLine, port: &str, args: &[&str], o: Opts, blind: 
             Ok(Box::new(FakeTty {
                 human,
                 screen: screen2.clone(),
+                asks: 0,
             }) as Box<dyn Prompt>)
         }),
     };

@@ -165,8 +165,10 @@ the session, and for Tier 2 (config write) first reads `21 80` (the definition m
 `ident` chooses, unambiguously) and the backup read (`21 A1` for BMT `3B D2`, else `21 lid`).
 It then makes the kline-core challenge, shows it on `/dev/tty` with a random code (6
 characters, 10 for expert tier) and reads the answer from `/dev/tty` (not stdin), sending
-TesterPresent while it waits (default 120 s, `--confirm-timeout`). A wrong code, timeout or
-Ctrl-C is exit 9 and nothing is sent. Definition names on these screens are printed sanitized
+TesterPresent while it waits (default 120 s, `--confirm-timeout`). A mistyped code voids that
+challenge and gives one more attempt with a new code for the same request (nothing is sent in
+between, the session stays open; Neon critique F1); a second wrong code, a timeout or Ctrl-C is
+exit 9 and nothing is sent. This holds for the request and for its `--stop` request. Definition names on these screens are printed sanitized
 (control characters, escape sequences and bidi overrides shown as `\u{..}`).
 
 `--stop REQ` (e.g. an actuator test's stop payload): checked before anything is opened (a refused
@@ -248,7 +250,7 @@ third byte writes CALTERMI), so an unknown variant of a flagged read is not offe
 | 6 | the ECU answered negatively (`7F sid nrc`) |
 | 7 | refused: safety policy, name guard, `exec` without a TTY or with `--json` (nothing sent) |
 | 8 | definition: missing/invalid file, CAN only, unknown request name, no fault/ident request |
-| 9 | approval not given: wrong code, timeout, terminal closed (nothing sent) |
+| 9 | approval not given: wrong code twice, timeout, terminal closed (nothing sent) |
 | 10 | reply does not decode with the definition |
 | 11 | capture/replay file problem |
 | 12 | scan stopped early (3 missing replies or a security NRC) |
