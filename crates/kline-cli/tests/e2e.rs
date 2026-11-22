@@ -991,6 +991,12 @@ fn selftest_toggles_break_only_and_reports_timing() {
     assert!(s["note"].as_str().unwrap().contains("latency"));
     assert!(s["baud_reported_source"].is_string(), "{s}");
     assert!(s["echo_rtt"].is_null(), "no echo test unless asked: {s}");
+    // A cause is given exactly when TiniL fails.
+    assert_eq!(
+        s["fast_init_cause"].is_string(),
+        s["break_jitter"]["fast_init_ok"] == false,
+        "{s}"
+    );
     // No ECU was woken and nothing was written.
     j.assert_no_writes();
     assert!(r.event("connected").is_empty());
@@ -1227,6 +1233,7 @@ fn selftest_echo_rtt_times_the_loopback() {
     assert_eq!(e["sent"], 10, "{e}");
     assert_eq!(e["echoed"], 10, "{e}");
     assert!(e["max_us"].as_u64().unwrap() < 25_000, "{e}");
+    assert!(e["write_error"].is_null(), "{e}");
     assert!(r.event("connected").is_empty());
 }
 

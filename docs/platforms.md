@@ -3,7 +3,8 @@
 kline builds and its full test suite runs natively on all three (CI: `.github/workflows/ci.yml`,
 matrix `ubuntu-latest`, `macos-latest`, `windows-latest`). What differs is the cable driver, the
 port name, permissions, the FTDI latency timer, timing precision and where data lives. Nothing
-in this file has been verified with the real FTDI cable on Linux or Windows; see "NOT VERIFIED".
+in this file has been verified with the real FTDI cable on a car; on Windows only the
+Parallels VM with the cable on the Mac's USB (no K-line power) was measured; see "NOT VERIFIED".
 
 ## Build
 
@@ -41,6 +42,17 @@ Break (5-baud init) is `ioctl(TIOCSBRK/TIOCCBRK)` on Linux and macOS and
 MAXDWORD` and our per-call constant (whole milliseconds, at least 1 ms), i.e. "return as soon as
 one byte is there, else wait at most the constant": the same contract as `VMIN=0/VTIME` polling
 on Unix.
+
+Write timeouts: `serialport` writes the same constant into `WriteTotalTimeoutConstant`, so the
+last read's timeout (down to 1 ms) also bounded the next `WriteFile`, which then returns 0 bytes
+written and std's `write_all` fails with "failed to write whole buffer" (seen once in `selftest
+--echo-rtt` on the Windows VM). Measured with the FT232R through Parallels USB passthrough, 100
+writes each: 20 bytes at a 10 ms timeout returned 0 written 15-16 times, 5 bytes at 10 ms once,
+20 bytes at 200 ms never (a 20-byte write+flush takes up to ~21 ms: WriteFile waits for the
+bytes to go out). kline now sets the write's own timeout before every write (twice the bytes'
+time at 10400 baud plus 200 ms, `transport::write_timeout_ms`) and reports a stall as
+`serial write stalled: N of M bytes accepted within T ms` with a replug hint (exit 3);
+`selftest --echo-rtt` reports it as "echo RTT: not measured: write failed ..." and exits 0.
 
 Unix only: after opening, kline clears `IGNBRK`, `BRKINT` and `PARMRK` with termios (`nix`, a
 `cfg(unix)` dependency), so a looped-back break reads as one `00` byte; macOS's `cfmakeraw` sets
@@ -113,6 +125,25 @@ why the tail is adaptive. A spin cannot help when the thread itself is preempted
 a VM whose vCPU is descheduled): run `selftest` and close heavy programs if it says
 `TOO IMPRECISE`.
 
+Break edges on the Windows VM (FT232R on the Mac's USB, attached to Parallels "Windows 11"
+ARM64 as COM1; 2026-11-22). `kline selftest` (40 edges, 10 ms half-period) gave max deviation
+0.55-5.74 ms over 8 runs (one outlier 63.7 ms with a 47 ms `set_break`), so TiniL (+-1 ms) is
+`TOO IMPRECISE` in most runs while 5-baud (+-10 ms) is OK; on the Mac the same cable passes. A
+probe (100 pulses of 25 ms each, spin-waited, timeBeginPeriod(1), two runs) per thread priority:
+
+| Thread priority | SetCommBreak/ClearCommBreak call p50 / p99 / max | TiniL error p50 / p99 / max | pulses >= 1 ms off |
+|---|---|---|---|
+| normal | 0.26-0.30 / 0.8-1.8 / 3.2-14.6 ms | 0.28-0.31 / 2.9-3.2 / 3.3-4.8 ms | 4-7 % |
+| `THREAD_PRIORITY_TIME_CRITICAL` | 0.28-0.31 / 1.9-2.1 / 2.7-3.6 ms | 0.30-0.33 / 2.0-2.7 / 2.6-3.2 ms | 5-13 % |
+| MMCSS "Pro Audio" (`AvSetMmThreadCharacteristicsW`) | 0.28-0.31 / 0.9-1.3 / 1.5-1.8 ms | 0.32-0.34 / 1.8-2.7 / 2.2-8.1 ms | 5-6 % |
+| MMCSS + TIME_CRITICAL | 0.28-0.29 / 1.2-1.6 / 1.9-5.0 ms | 0.30-0.31 / 2.3-3.8 / 3.2-5.1 ms | 7-9 % |
+
+Priority does not change it: the spread is in the break call itself, i.e. the USB round trip
+through the VM's passthrough, not in our sleep, so kline does not raise thread priority.
+`selftest` says so when TiniL fails with a slow break call (`fast_init_cause`). Fast init from
+this VM may therefore miss TiniL in a few percent of attempts; bare-metal Windows is NOT
+VERIFIED.
+
 ## Data directories
 
 | OS | Default | Override |
@@ -141,8 +172,10 @@ sent (NOT VERIFIED on Windows).
 
 ## NOT VERIFIED
 
-- Anything with the real FTDI cable on Linux or Windows: break latency, looped-back break as a
-  `00` byte (Windows VCP), DTR behaviour, 10400 baud accuracy, latency timer effect.
+- Anything with the real FTDI cable on a car (powered K line), on any OS: looped-back break as
+  a `00` byte (Windows VCP), echo RTT, DTR behaviour, 10400 baud accuracy, latency timer effect.
+- The real FTDI cable on Linux, and on bare-metal Windows (Windows numbers above are from the
+  Parallels VM only); whether the write stall also happens without a VM.
 - `--set-latency` against a real `ftdi_sio` sysfs file (tested against a fake sysfs tree).
 - The Windows approval prompt on `CONIN$`/`CONOUT$` in an interactive console.
 - Windows x86_64 natively (verified: Windows 11 ARM64 in a VM, `aarch64-pc-windows-msvc`).

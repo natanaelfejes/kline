@@ -286,6 +286,49 @@ impl<P: SerialIo, C: Clock> Transport for KklLine<P, C> {
     }
 }
 
+/// Margin on top of the bytes' transmission time a serial write may take before it counts as
+/// stalled (ours: well above the ~20 ms worst write+flush measured through Parallels USB
+/// passthrough, docs/platforms.md).
+pub const WRITE_TIMEOUT_MARGIN_MS: u32 = 200;
+
+/// Write timeout for `len` bytes: twice their time on the wire at 10400 baud 8N1 (10 bits,
+/// ~0.96 ms each, rounded up to 1 ms) plus [`WRITE_TIMEOUT_MARGIN_MS`].
+pub fn write_timeout_ms(len: usize) -> u32 {
+    WRITE_TIMEOUT_MARGIN_MS.saturating_add(u32::try_from(len).unwrap_or(u32::MAX).saturating_mul(2))
+}
+
+/// `write_all` that turns a stalled write (`Ok(0)`, i.e. the driver's write timeout expired, or
+/// `TimedOut`) into a `TimedOut` error saying how much went out, instead of std's bare
+/// "failed to write whole buffer".
+pub fn write_all_timed<W: io::Write + ?Sized>(
+    w: &mut W,
+    bytes: &[u8],
+    timeout_ms: u32,
+) -> io::Result<()> {
+    let mut done = 0;
+    while done < bytes.len() {
+        match w.write(&bytes[done..]) {
+            Ok(0) => break,
+            Ok(n) => done += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) if matches!(e.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WriteZero) => {
+                break
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    if done < bytes.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "serial write stalled: {done} of {} bytes accepted within {timeout_ms} ms",
+                bytes.len()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// [`SerialIo`] for a `serialport` port: the FTDI KKL cable.
 pub struct SerialportIo {
     port: Box<dyn serialport::SerialPort>,
@@ -463,7 +506,15 @@ impl SerialIo for SerialportIo {
     }
 
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.port.write_all(bytes)?;
+        // On Windows `serialport` puts its one timeout into both ReadTotalTimeoutConstant and
+        // WriteTotalTimeoutConstant (COMMTIMEOUTS), so the last read's timeout (down to 1 ms)
+        // would also bound this write, and WriteFile then returns 0 bytes written (measured,
+        // FT232R under Parallels: 16 of 100 20-byte writes at 10 ms). Give the write its own.
+        let ms = write_timeout_ms(bytes.len());
+        self.port
+            .set_timeout(Duration::from_millis(u64::from(ms)))
+            .map_err(io::Error::from)?;
+        write_all_timed(&mut self.port, bytes, ms)?;
         self.port.flush()
     }
 
@@ -924,6 +975,70 @@ mod tests {
         m.0.borrow_mut().rx.push_back((5_000, 0x00));
         l.sleep_ms(200);
         assert!(l.break_loopback_seen().unwrap());
+    }
+
+    /// A writer that accepts `accept` bytes per call from a script, then stalls the way the
+    /// driver reports it.
+    struct Stalling {
+        script: VecDeque<io::Result<usize>>,
+        got: Vec<u8>,
+    }
+
+    impl io::Write for Stalling {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            let r = self.script.pop_front().unwrap_or(Ok(0));
+            if let Ok(n) = r {
+                self.got.extend_from_slice(&b[..n.min(b.len())]);
+            }
+            r
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn stalling(script: Vec<io::Result<usize>>) -> Stalling {
+        Stalling {
+            script: script.into(),
+            got: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn short_writes_are_completed_and_a_stall_is_a_clear_timeout() {
+        // Short writes and an interruption: everything goes out.
+        let mut w = stalling(vec![Ok(2), Err(io::ErrorKind::Interrupted.into()), Ok(3)]);
+        write_all_timed(&mut w, &[1, 2, 3, 4, 5], 210).unwrap();
+        assert_eq!(w.got, [1, 2, 3, 4, 5]);
+
+        // WriteFile returning 0 written (Windows write timeout): a TimedOut that says so.
+        let mut w = stalling(vec![Ok(1), Ok(0)]);
+        let e = write_all_timed(&mut w, &[1, 2, 3], 206).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(
+            e.to_string(),
+            "serial write stalled: 1 of 3 bytes accepted within 206 ms"
+        );
+
+        // A driver TimedOut error: the same.
+        let mut w = stalling(vec![Err(io::ErrorKind::TimedOut.into())]);
+        let e = write_all_timed(&mut w, &[0xFF], 202).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::TimedOut);
+        assert!(e.to_string().contains("0 of 1 bytes"), "{e}");
+
+        // Other errors pass through unchanged.
+        let mut w = stalling(vec![Err(io::ErrorKind::BrokenPipe.into())]);
+        let e = write_all_timed(&mut w, &[0xFF], 202).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn write_timeout_covers_the_bytes_on_the_wire() {
+        // 10400 baud 8N1: ~0.96 ms per byte; the timeout never drops to a read's 1 ms.
+        assert_eq!(write_timeout_ms(0), WRITE_TIMEOUT_MARGIN_MS);
+        assert_eq!(write_timeout_ms(1), WRITE_TIMEOUT_MARGIN_MS + 2);
+        assert_eq!(write_timeout_ms(255), WRITE_TIMEOUT_MARGIN_MS + 510);
+        assert_eq!(write_timeout_ms(usize::MAX), u32::MAX);
     }
 
     #[test]

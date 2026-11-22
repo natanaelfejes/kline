@@ -110,7 +110,7 @@ pub enum ExchangeError {
 impl ExchangeError {
     pub fn to_cli(&self) -> CliError {
         match self {
-            ExchangeError::Io(e) => CliError::port(format!("transport I/O error: {e}")),
+            ExchangeError::Io(e) => CliError::io_ref(e),
             ExchangeError::Session(e) => CliError::session(e),
         }
     }

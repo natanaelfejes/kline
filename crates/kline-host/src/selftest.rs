@@ -127,16 +127,22 @@ pub struct EchoRtt {
     pub mean_us: Option<u64>,
     /// Every byte came back and the slowest in less than [`W4_MIN_US`].
     pub kw2_handshake_ok: bool,
+    /// The write that failed (the measurement stops there), e.g. a stalled USB write.
+    pub write_error: Option<String>,
 }
 
 /// Write [`ECHO_BYTE`] `count` times and time each echo. Needs a looped-back K line (a KKL
 /// cable on a powered K line, or TX wired to RX); otherwise nothing comes back.
 pub fn measure_echo_rtt(t: &mut dyn Transport, count: u32) -> io::Result<EchoRtt> {
     let mut rtts = Vec::new();
+    let mut write_error = None;
     for _ in 0..count {
         t.flush_rx()?;
         let t0 = t.now_us();
-        t.write(&[ECHO_BYTE], 0)?;
+        if let Err(e) = t.write(&[ECHO_BYTE], 0) {
+            write_error = Some(e.to_string());
+            break;
+        }
         let got = t.read(1, ECHO_TIMEOUT_MS)?;
         if got.first() == Some(&ECHO_BYTE) {
             rtts.push(t.now_us().saturating_sub(t0));
@@ -149,7 +155,29 @@ pub fn measure_echo_rtt(t: &mut dyn Transport, count: u32) -> io::Result<EchoRtt
         min_us: rtts.iter().copied().min(),
         max_us: max,
         mean_us: (!rtts.is_empty()).then(|| rtts.iter().sum::<u64>() / rtts.len() as u64),
-        kw2_handshake_ok: rtts.len() as u32 == count && max.is_some_and(|m| m < W4_MIN_US),
+        kw2_handshake_ok: write_error.is_none()
+            && rtts.len() as u32 == count
+            && max.is_some_and(|m| m < W4_MIN_US),
+        write_error,
+    })
+}
+
+/// Why the TiniL check failed, for the selftest report; `None` when it passed. When the break
+/// call itself is slow, the USB round trip of the break request (SetCommBreak/ClearCommBreak,
+/// TIOCSBRK) is the cause, not our sleep: under Parallels USB passthrough on Windows 11 ARM it
+/// is ~0.3 ms typically with 1.5..3 ms spikes, unchanged by thread priority (measured,
+/// docs/platforms.md).
+pub fn fast_init_cause(j: &BreakJitter) -> Option<String> {
+    if j.fast_init_ok {
+        return None;
+    }
+    Some(if j.max_call_us * 2 >= FAST_INIT_TOLERANCE_US {
+        format!(
+            "the break request itself took up to {:.2} ms: USB round-trip latency of the break call, not the host's sleep. Seen under VM USB passthrough (Parallels, Windows 11 ARM; thread priority does not help, docs/platforms.md); fast init may then miss TiniL, try bare metal or another USB port",
+            j.max_call_us as f64 / 1000.0
+        )
+    } else {
+        "the break calls were fast, so the host's sleeps woke late (see host timing above)".into()
     })
 }
 
@@ -230,6 +258,8 @@ mod tests {
         latency_us: u64,
         rx: Vec<(u64, u8)>,
         writes: usize,
+        /// Writes after this many succeeded stall (Windows write timeout).
+        stall_after: Option<usize>,
     }
 
     impl Transport for Loop {
@@ -258,6 +288,12 @@ mod tests {
         }
         fn write(&mut self, b: &[u8], _: u32) -> io::Result<()> {
             self.writes += 1;
+            if self.stall_after == Some(self.writes - 1) {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "serial write stalled: 0 of 1 bytes accepted within 202 ms",
+                ));
+            }
             self.now += 1000; // one byte at 10400 baud, tcdrain
             for &x in b {
                 self.rx.push((self.now + self.latency_us, x));
@@ -287,6 +323,7 @@ mod tests {
             latency_us: 1_000,
             rx: Vec::new(),
             writes: 0,
+            stall_after: None,
         };
         let e = measure_echo_rtt(&mut fast, 5).unwrap();
         assert_eq!((e.sent, e.echoed, fast.writes), (5, 5, 5));
@@ -299,6 +336,7 @@ mod tests {
             latency_us: 30_000,
             rx: Vec::new(),
             writes: 0,
+            stall_after: None,
         };
         let e = measure_echo_rtt(&mut slow, 3).unwrap();
         assert_eq!(e.max_us, Some(31_000));
@@ -310,9 +348,55 @@ mod tests {
             latency_us: 1_000_000,
             rx: Vec::new(),
             writes: 0,
+            stall_after: None,
         };
         let e = measure_echo_rtt(&mut dead, 2).unwrap();
         assert_eq!((e.echoed, e.max_us, e.kw2_handshake_ok), (0, None, false));
+        assert_eq!(e.write_error, None);
+    }
+
+    #[test]
+    fn echo_rtt_reports_a_stalled_write_instead_of_failing() {
+        let mut stuck = Loop {
+            now: 0,
+            latency_us: 1_000,
+            rx: Vec::new(),
+            writes: 0,
+            stall_after: Some(2),
+        };
+        let e = measure_echo_rtt(&mut stuck, 10).unwrap();
+        assert_eq!(
+            (e.sent, e.echoed, stuck.writes),
+            (10, 2, 3),
+            "stops at the stall"
+        );
+        assert!(!e.kw2_handshake_ok);
+        assert_eq!(
+            e.write_error.as_deref(),
+            Some("serial write stalled: 0 of 1 bytes accepted within 202 ms")
+        );
+    }
+
+    #[test]
+    fn fast_init_cause_blames_the_break_call_only_when_it_was_slow() {
+        let j = |max_dev_us, max_call_us| BreakJitter {
+            edges: 40,
+            half_ms: 10,
+            max_dev_us,
+            mean_dev_us: 300,
+            max_call_us,
+            loopback_seen: false,
+            five_baud_ok: true,
+            fast_init_ok: max_dev_us < FAST_INIT_TOLERANCE_US,
+        };
+        assert_eq!(fast_init_cause(&j(600, 400)), None);
+        let usb = fast_init_cause(&j(1_510, 1_680)).unwrap();
+        assert!(
+            usb.contains("up to 1.68 ms") && usb.contains("USB"),
+            "{usb}"
+        );
+        let sleep = fast_init_cause(&j(1_510, 200)).unwrap();
+        assert!(sleep.contains("sleeps woke late"), "{sleep}");
     }
 
     /// A line whose set_break costs `cost_us` and whose clock is virtual.

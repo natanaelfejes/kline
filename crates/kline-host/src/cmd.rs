@@ -721,6 +721,12 @@ pub fn selftest(ctx: &mut Ctx, a: &SelftestArgs) -> Result<(), CliError> {
     };
     let echo_human = match &echo {
         None => String::new(),
+        Some(e) if e.write_error.is_some() => format!(
+            "\necho RTT: not measured: write failed after {} of {} bytes: {}; ~KW2 handshake timing: not measured (the cable did not take the echo byte; replug it and check `kline ports`)",
+            e.echoed,
+            e.sent,
+            e.write_error.as_deref().unwrap_or_default()
+        ),
         Some(e) => format!(
             "\necho RTT: {}/{} bytes back{}; ~KW2 handshake timing: {}",
             e.echoed,
@@ -743,15 +749,21 @@ pub fn selftest(ctx: &mut Ctx, a: &SelftestArgs) -> Result<(), CliError> {
             }
         ),
     };
+    let fast_init_cause = crate::selftest::fast_init_cause(&j);
+    let fast_init_human = fast_init_cause
+        .as_ref()
+        .map(|c| format!(" ({c})"))
+        .unwrap_or_default();
     ctx.out.emit(
         json!({"event": "selftest", "port": path,
+               "fast_init_cause": fast_init_cause,
                "usb": usb.as_ref().map(|u| u.to_json()),
                "baud_requested": baud, "baud_reported": reported,
                "baud_reported_source": baud_source,
                "break_jitter": j, "echo_rtt": echo, "latency_timer": latency_json,
                "note": note}),
         format!(
-            "port: {path}{}\nbaud: requested {baud}, driver reports {} ({baud_source})\nbreak toggles: {} edges, {} ms half-period: max deviation {:.2} ms, mean {:.2} ms, slowest set_break {:.2} ms; loopback {}\n5-baud bits (+-10 ms): {}; fast-init TiniL (+-1 ms): {}{echo_human}{latency_human}\n{note}",
+            "port: {path}{}\nbaud: requested {baud}, driver reports {} ({baud_source})\nbreak toggles: {} edges, {} ms half-period: max deviation {:.2} ms, mean {:.2} ms, slowest set_break {:.2} ms; loopback {}\n5-baud bits (+-10 ms): {}; fast-init TiniL (+-1 ms): {}{fast_init_human}{echo_human}{latency_human}\n{note}",
             usb.as_ref()
                 .and_then(|u| u.usb.map(|v| format!(" (usb {:04x}:{:04x} {})", v.0, v.1, u.product.clone().unwrap_or_default())))
                 .unwrap_or_default(),

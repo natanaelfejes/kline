@@ -71,7 +71,19 @@ impl CliError {
     }
 
     pub fn io(e: std::io::Error) -> CliError {
-        CliError::port(format!("transport I/O error: {e}"))
+        CliError::io_ref(&e)
+    }
+
+    /// A transport error; a stalled write (the USB serial driver did not take the bytes within
+    /// the write timeout) says what to check instead of only the OS message.
+    pub fn io_ref(e: &std::io::Error) -> CliError {
+        let hint = match e.kind() {
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WriteZero => {
+                " (the USB serial driver did not take the bytes in time: cable unplugged or the USB link stalled; replug the cable and check `kline ports`)"
+            }
+            _ => "",
+        };
+        CliError::port(format!("transport I/O error: {e}{hint}"))
     }
 
     pub fn denied(d: &Denied) -> CliError {
@@ -139,5 +151,34 @@ pub fn deny_text(r: &DenyReason) -> String {
         DenyReason::IdentificationMismatch => {
             "21 80 identification must be read in this session first".into()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stalled_write_gets_a_hint_other_io_errors_do_not() {
+        let e = CliError::io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "serial write stalled: 0 of 5 bytes accepted within 210 ms",
+        ));
+        assert_eq!((e.code, e.kind), (exit::PORT, "port"));
+        assert!(
+            e.message
+                .starts_with("transport I/O error: serial write stalled: 0 of 5 bytes")
+                && e.message.contains("replug the cable"),
+            "{}",
+            e.message
+        );
+        let e = CliError::io(std::io::ErrorKind::WriteZero.into());
+        assert!(
+            e.message.contains("did not take the bytes"),
+            "{}",
+            e.message
+        );
+        let e = CliError::io(std::io::ErrorKind::BrokenPipe.into());
+        assert!(!e.message.contains("replug"), "{}", e.message);
     }
 }
