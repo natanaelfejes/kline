@@ -22,7 +22,7 @@ Default-deny, decided on exact payload bytes and the target of the init that act
   `10 81`, `10 A0`; Safir `21`, `3350`, `3351`, `3352`, `3354`). The only tier library code
   paths, `--json`, MCP and tests against a real port may execute.
 - **Tier 1 SERVICE** (clear DTC `14`, output tests `30`, adaptation reset `11 FF`/`32`, Sirius
-  `31A0A0`, BMT `31C7`/`31C8` remote learning and `31 out` actuators), **Tier 2 CONFIG WRITE**
+  `31A000` injector inhibition, BMT `31C7`/`31C8` remote learning and `31 out` actuators), **Tier 2 CONFIG WRITE**
   (`3B`, with backup read and `21 80` identification in the same session) and **Tier 3 EXPERT**
   (any other non-forbidden request, "unknown effect"): only with a per-request human `Approval`
   that quotes the request's `RiskInfo`.
@@ -66,9 +66,16 @@ In any tier, including expert. This is the only forbidden class (owner-approved)
   bytes. `3B D2` index 3 (TRF) is the remote type, RF or infrared, not key related: Tier 2 with
   a specific warning (`ChangesRemoteType`); a value other than 0/1 is also Tier 2 with that
   warning and the text "unknown TRF value".
-- **On non-immobilizer ECUs**: `31 A0 A3` (and `32`/`33`/`38`-`3A` `A0 A3`, reset of the
-  backed-up memory).
-- **On a Sirius** (0x7A or a Sirius definition): also writes `2E`/`2F`/`3B` to the frame
+- **On non-immobilizer ECUs**: `31 A0 A3` (and `32`/`33`/`38`-`3A` `A0 A3`), an earlier
+  reading of the backed-up memory reset, kept refused.
+- **On a Sirius** (0x7A or a Sirius definition): `31 A3 ..`, `32 A3 ..` and `33 A3 ..`, the
+  real backed-up memory reset ("Reinit memoire sauvegardee", function 0xA3; the backed-up
+  memory holds the verrou logiciel). In the Sirius 32 definition "Fonctions particulieres" is
+  `31A000` with the function number at FirstByte 2 (1-based), so a request is `31 fn 00`
+  ("Arret fonctions" `32 fn 00`, "Status fonctions" `31 fn 01`); injector inhibition is
+  `31 A0 00` (Tier 1) and `32 A0 00` ends it (final critique F02). The other functions (A1
+  power latch stop, A2 OBDFC tests, A4, A6 static test, A7 fuel pump priming) stay Expert.
+  Also writes `2E`/`2F`/`3B` to the frame
   identifiers `A0`/`A2`/`AE`/`BD` (the `21` frames that carry the immobilizer / "verrou
   logiciel" fields). Output control `30` and routines `31`-`33`/`38`-`3A` whose byte 2 is one
   of those values are other number spaces (`30 A0` is the fast radiator fan, `31 A2 00 00 00`

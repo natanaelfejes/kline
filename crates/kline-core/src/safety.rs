@@ -4,10 +4,10 @@
 //! | Tier | What | Who can send it |
 //! |---|---|---|
 //! | [`Tier::Read`] | documented reads, `10 81`/`10 A0`, `3E` | anyone: [`check`] / `Session::request` (CLI, `--json`, MCP) |
-//! | [`Tier::Service`] | clear DTC, output tests, adaptation reset, Sirius `31 A0 A0`, BMT remote learning and actuators | a human, one typed `Approval` per request |
+//! | [`Tier::Service`] | clear DTC, output tests, adaptation reset, Sirius `31 A0 00`, BMT remote learning and actuators | a human, one typed `Approval` per request |
 //! | [`Tier::ConfigWrite`] | `3B` config writes | a human `Approval`, after the backup read and (BMT) the `21 80` identification the definition was chosen from |
 //! | [`Tier::Expert`] | any other request that is not forbidden: undocumented services and identifiers, security access `27`, download/upload/transfer `34`-`37` and flash erase/checksum `31 81`/`31 82` (not on a BMT), other `10 xx` sessions, memory/routine-by-address services on non-immobilizer ECUs (with specific warnings such as [`Warning::MayBrickEcu`]) | a human expert `Approval` that shows the risk |
-//! | forbidden | the immobilizer line only (owner decision 2026-11-22, final): on a BMT/UCH/decoder (address `26`/`A6` or a BMT/UCH/decoder definition, [`DefinitionGuard`]) `3D`, `38`-`3A`, `2C`, `34`-`37`, `31`-`33` `81`/`82` (flash erase/checksum), `30`-`33` with `C0`-`C9` (except exact `31C7000000`/`31C8000000`) or with the immobilizer outputs `A6`/`AB`/`AC` ([`BMT_IMMOBILIZER_OUTPUTS`]), `2E`/`2F`, `3B` other than `3B D2` and `3B D2 x2` (AP1CLE, also with a high nibble), `21 A4` with extra bytes; on every other ECU routines `31`-`33`/`38`-`3A` on `A0 A3`; on a Sirius (`7A` or a Sirius definition) also writes `2E`/`2F`/`3B` to the frames `A0`/`A2`/`AE`/`BD`; definition requests named like immobilizer/transponder/key ([`DenyReason::ImmobilizerNamed`]) | nobody, never |
+//! | forbidden | the immobilizer line only (owner decision 2026-11-22, final): on a BMT/UCH/decoder (address `26`/`A6` or a BMT/UCH/decoder definition, [`DefinitionGuard`]) `3D`, `38`-`3A`, `2C`, `34`-`37`, `31`-`33` `81`/`82` (flash erase/checksum), `30`-`33` with `C0`-`C9` (except exact `31C7000000`/`31C8000000`) or with the immobilizer outputs `A6`/`AB`/`AC` ([`BMT_IMMOBILIZER_OUTPUTS`]), `2E`/`2F`, `3B` other than `3B D2` and `3B D2 x2` (AP1CLE, also with a high nibble), `21 A4` with extra bytes; on every other ECU routines `31`-`33`/`38`-`3A` on `A0 A3`; on a Sirius (`7A` or a Sirius definition) also `31`-`33 A3 ..` (function 0xA3, reset of the backed-up memory) and writes `2E`/`2F`/`3B` to the frames `A0`/`A2`/`AE`/`BD`; definition requests named like immobilizer/transponder/key ([`DenyReason::ImmobilizerNamed`]) | nobody, never |
 //!
 //! Link frames (`81`, `82`, ISO8 `36`/`3F`) are refused as requests ([`DenyReason::ProtocolReserved`]),
 //! not as a safety rule: sent as a request they would desynchronise the session state machine.
@@ -88,12 +88,21 @@ pub const BMT_CONFIG_TRF_INDEX: u8 = 0x03;
 /// Highest documented BMT config index; 14 and 15 are reserved (catalogue 3.4) and only
 /// reachable as [`Tier::Expert`].
 pub const BMT_CONFIG_MAX_INDEX: u8 = 13;
-/// Sirius special functions `31 A0 fn` (catalogue 4.3). 0xA0 (injector inhibition) stops the
-/// engine: Tier 1 with [`Warning::StopsEngine`]. 0xA3 (reset of the backed-up memory) can touch
-/// the immobilizer "verrou logiciel" area: forbidden always. Coordinator decision 2026-11-22.
-pub const SIRIUS_SPECIAL_FUNCTION: u8 = 0xA0;
+/// Sirius special functions (catalogue 4.3). In the definition "Fonctions particulieres" is
+/// `31A000` with the function number at FirstByte 2 (1-based), so a start is `31 fn 00`, a stop
+/// ("Arret fonctions" `32A000`) `32 fn 00` and a status ("Status fonctions" `31A001`)
+/// `31 fn 01` (final critique F02, checked against the Sirius 32 XML). 0xA0 (injector
+/// inhibition, `31 A0 00`) stops the engine: Tier 1 with [`Warning::StopsEngine`]. 0xA3
+/// ("Reinit memoire sauvegardee", reset of the backed-up memory) can touch the immobilizer
+/// "verrou logiciel" area: `31`/`32`/`33 A3 ..` forbidden on a Sirius. Coordinator decision
+/// 2026-11-22.
 pub const SIRIUS_INJECTOR_INHIBITION: u8 = 0xA0;
 pub const SIRIUS_BACKUP_MEMORY_RESET: u8 = 0xA3;
+/// Option byte of a Sirius special function start/stop (`31 fn 00`, `32 fn 00`).
+pub const SIRIUS_FUNCTION_START: u8 = 0x00;
+/// The byte pair `A0 A3` refused after any routine service on every non-immobilizer ECU: an
+/// earlier reading of the catalogue put 0xA3 at byte 3 (`31 A0 A3`); kept refused (harmless).
+pub const SIRIUS_LEGACY_RESET_PAIR: [u8; 2] = [0xA0, 0xA3];
 /// Sirius local identifiers whose frames carry immobilizer / "verrou logiciel" fields
 /// (catalogue 4.4: Trame 01 `A0`, Trame 03 `A2`, Trame 15 `AE` verrou type, Trame 30 `BD`).
 /// They are `21` frame identifiers. Reading them is Tier 0. On a Sirius ([`is_sirius_ecu`])
@@ -214,8 +223,8 @@ pub fn is_immobilizer_ecu(guard: &DefinitionGuard, target: &Target) -> bool {
         || guard.class == EcuClass::Immobilizer
 }
 
-/// True when the Sirius immobilizer-LID write rule applies: address 0x7A or a Sirius
-/// definition (and not an immobilizer ECU). `.. A0 A3` routines are refused on every
+/// True when the Sirius immobilizer rules apply (LID writes, `31`-`33 A3 ..`): address 0x7A or
+/// a Sirius definition (and not an immobilizer ECU). `.. A0 A3` routines are refused on every
 /// non-immobilizer ECU.
 pub fn is_sirius_ecu(guard: &DefinitionGuard, target: &Target) -> bool {
     !is_immobilizer_ecu(guard, target)
@@ -244,7 +253,7 @@ pub enum Tier {
 /// Machine-readable warning flags of a [`RiskInfo`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Warning {
-    /// Stops the engine or prevents it from running (Sirius `31 A0 A0`; undo with `32 A0 00`).
+    /// Stops the engine or prevents it from running (Sirius `31 A0 00`; undo with `32 A0 00`).
     StopsEngine,
     /// Erases stored fault codes / fault evidence.
     ErasesFaultMemory,
@@ -565,12 +574,17 @@ fn forbidden_bytes(guard: &DefinitionGuard, target: &Target, payload: &[u8]) -> 
         }
     }
     // Sirius rules on any protocol too (re-review M2 finding 1: a Target { Iso8, 0x7A } must not
-    // turn `31 A0 A3` or a write to an immobilizer frame into an expert request).
+    // turn `31 A3 00`, `31 A0 A3` or a write to an immobilizer frame into an expert request).
     if !bmt {
         let routine = ROUTINE_SERVICES.contains(&service);
-        let reset = routine
-            && payload.len() >= 3
-            && payload[1..3] == [SIRIUS_SPECIAL_FUNCTION, SIRIUS_BACKUP_MEMORY_RESET];
+        let legacy_reset =
+            routine && payload.len() >= 3 && payload[1..3] == SIRIUS_LEGACY_RESET_PAIR;
+        // The real layout: `31`/`32`/`33 A3 ..` is the backed-up memory reset on a Sirius
+        // (final critique F02).
+        let reset = legacy_reset
+            || (matches!(service, 0x31..=0x33)
+                && p1 == Some(SIRIUS_BACKUP_MEMORY_RESET)
+                && is_sirius_ecu(guard, target));
         // A0/A2/AE/BD are `21` frame identifiers: only a write by local identifier addresses
         // the same frame, and only on a Sirius do those numbers mean the immobilizer frames.
         // Output control `30` and routines use other number spaces (security review M1).
@@ -599,7 +613,7 @@ fn forbidden_bytes(guard: &DefinitionGuard, target: &Target, payload: &[u8]) -> 
 /// `21A4` included; `21 A1 xx` would write CALTERMI on the BMT), `17`/`18` with 1-3 parameter
 /// bytes. ISO8 (Safir), Tier 0: `21` (bare), `33 50`, `33 51`, `33 52`, `33 54`.
 /// KWP, Tier 1: `14 xx xx`; not BMT: `30 lid` + 1-4 bytes, `11 FF`, exactly `32 A0 00` (end of
-/// injector inhibition, the only `32` in the definitions), `31 A0 A0`; BMT `31C7000000`, `31C8000000`, actuator `31 out param count` with
+/// injector inhibition, the only `32` in the definitions), `31 A0 00`; BMT `31C7000000`, `31C8000000`, actuator `31 out param count` with
 /// `out` in 0xA0..=0xB3. KWP, Tier 2: BMT `3B D2 index 00|01` (index 0..=13, not 2), other
 /// ECUs `3B lid` + 1-4 bytes.
 pub fn classify(target: &Target, payload: &[u8]) -> Result<Tier, Denied> {
@@ -657,16 +671,16 @@ fn classify_bytes(
         (Kwp, 0x11) if !bmt => (p1 == Some(0xFF) && len == 2).then_some(Service),
         // Tier 1: only `32 A0 00` (Sirius/S2000 "end of injector inhibition"); any other `32`
         // is undocumented: Expert (re-review M2 finding 2).
-        (Kwp, 0x32) if !bmt => {
-            (payload == [0x32, SIRIUS_SPECIAL_FUNCTION, 0x00]).then_some(Service)
-        }
+        (Kwp, 0x32) if !bmt => (payload
+            == [0x32, SIRIUS_INJECTOR_INHIBITION, SIRIUS_FUNCTION_START])
+        .then_some(Service),
         // Tier 1, BMT: remote learning, and the actuator command `31 out param count`
         // ("COMMANDE DES ACTUATEURS" 31000000).
         (Kwp, 0x31) if bmt => (is_remote_learning(payload)
             || (len == 4 && p1.is_some_and(|b| BMT_ACTUATOR_OUTPUTS.contains(&b))))
         .then_some(Service),
-        // Tier 1, other KWP ECUs (Sirius): only injector inhibition `31 A0 A0`.
-        (Kwp, 0x31) => (payload == [0x31, SIRIUS_SPECIAL_FUNCTION, SIRIUS_INJECTOR_INHIBITION])
+        // Tier 1, other KWP ECUs (Sirius): only injector inhibition `31 A0 00`.
+        (Kwp, 0x31) => (payload == [0x31, SIRIUS_INJECTOR_INHIBITION, SIRIUS_FUNCTION_START])
             .then_some(Service),
         // Tier 2, BMT: `3B D2 index value`, one boolean option (catalogue 3.4). TRF with any
         // value is still a remote-type change (security review L5).
@@ -800,14 +814,14 @@ fn risk_info(bmt: bool, payload: &[u8], tier: Tier) -> RiskInfo {
             &["drive cycle afterwards to relearn"],
             &[Warning::ErasesLearnedValues],
         ),
-        (Tier::Service, [0x32, SIRIUS_SPECIAL_FUNCTION, 0x00]) => r(
-            "ends the injector inhibition started by 31 A0 A0 (the engine may run again)",
+        (Tier::Service, [0x32, SIRIUS_INJECTOR_INHIBITION, SIRIUS_FUNCTION_START]) => r(
+            "ends the injector inhibition started by 31 A0 00 (the engine may run again)",
             "the engine can start running if it is being cranked",
             true,
             &["vehicle stationary"],
             &[],
         ),
-        (Tier::Service, [0x31, SIRIUS_SPECIAL_FUNCTION, SIRIUS_INJECTOR_INHIBITION]) if !bmt => r(
+        (Tier::Service, [0x31, SIRIUS_INJECTOR_INHIBITION, SIRIUS_FUNCTION_START]) if !bmt => r(
             "inhibits injection: the engine stops / will not run until 32 A0 00 or ignition cycle",
             "engine stops; never while driving",
             true,

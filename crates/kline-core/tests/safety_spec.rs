@@ -29,10 +29,11 @@ const CASES: [Case; 4] = [
             "21A7", "21A8", "21A9", "21AA", "21AB", "21AC", "21AD", "21AE", "21AF", "21BD", "21C6",
             "21C7",
         ],
-        // Output control, clear DTC, adaptation reset, stop functions. The 31 A0 xx template
-        // (31A000) and the other routines stay denied.
+        // Output control, clear DTC, adaptation reset, stop functions. "Fonctions
+        // particulieres" 31A000 is `31 fn 00` with its default function 0xA0, injector
+        // inhibition (final critique F02); the other routines stay denied.
         service: &[
-            "30D0000A", "30D00100", "30D01100", "140000", "11FF", "32A000",
+            "30D0000A", "30D00100", "30D01100", "140000", "11FF", "32A000", "31A000",
         ],
         config_write: &["3BD010"],
         requests: 34,

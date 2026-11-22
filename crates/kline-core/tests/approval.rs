@@ -216,7 +216,7 @@ fn approval_kind_must_match_tier() {
     // BMT remote learning is not Tier 1 on the Sirius.
     assert!(mismatch(s.service_challenge(&ERASE_AND_LEARN_1)));
     // Engine stop carries its warning.
-    let ch = s.service_challenge(&[0x31, 0xA0, 0xA0]).unwrap();
+    let ch = s.service_challenge(&[0x31, 0xA0, 0x00]).unwrap();
     assert_eq!(ch.risk().warnings, &[Warning::StopsEngine]);
 }
 

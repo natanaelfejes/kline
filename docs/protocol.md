@@ -366,7 +366,7 @@ payload bytes and the target taken from the init that actually ran; the loaded d
 | Tier | Requests (exact bytes) | How |
 |---|---|---|
 | 0 Read | KWP: `3E [x]`, `10 81`, `10 A0`, `1A xx`, `21 xx` (exactly 2 bytes, BMT `21 A4` transponder *status* included), `17`/`18` + 1-3 bytes. ISO8 (Safir): `21`, `33 50`, `33 51`, `33 52`, `33 54` (exactly what Safir_1/Safir_2 contain) | `Session::request`; autonomous use OK (CLI, `--json`, MCP). Read-only scan via `ScanPlan` (below) |
-| 1 Service | KWP: `14 xx xx` clear DTC; not BMT: `30 lid` + 1-4 bytes output control, `11 FF` adaptation reset, exactly `32 A0 00` (end of injector inhibition; other `32`, and BMT `30`/`11`/`32`, are Expert, found in a review); Sirius `31 A0 A0` injector inhibition (warning `StopsEngine`); BMT `31 C7 00 00 00` / `31 C8 00 00 00` remote learning, BMT actuator `31 out param count` with `out` 0xA0..=0xB3 | human `Approval` per request |
+| 1 Service | KWP: `14 xx xx` clear DTC; not BMT: `30 lid` + 1-4 bytes output control, `11 FF` adaptation reset, exactly `32 A0 00` (end of injector inhibition; other `32`, and BMT `30`/`11`/`32`, are Expert, found in a review); Sirius `31 A0 00` injector inhibition (warning `StopsEngine`; "Fonctions particulieres" `31A000` has the function number at byte 2, final critique F02); BMT `31 C7 00 00 00` / `31 C8 00 00 00` remote learning, BMT actuator `31 out param count` with `out` 0xA0..=0xB3 | human `Approval` per request |
 | 2 Config write | BMT `3B D2 index value` (index 0..=13 except 2, value 0/1; index 3 TRF = remote type RF/infrared, warning `ChangesRemoteType`, also with any other value, then with the text "unknown TRF value"); other KWP ECUs `3B lid` + 1-4 bytes | human `Approval`, plus in the same session: a positive backup read (`21 A1` for BMT `3B D2`, else `21 lid`) and a positive `21 80` whose exact reply the caller says it chose the ECU definition from (BMT config indices differ between BMT_X65_ph1_p and BMT_SAGEM) |
 | 3 Expert | any other request that is not forbidden (undocumented service, identifier, parameters or length), including `27` security access (`SecurityAccess`, `MayBrickEcu`), `34`-`37` transfer and `31 81`/`31 82` flash erase/checksum on non-BMT ECUs (`MayBrickEcu`, `MayLeaveProgrammingSession`), `10 xx` other than `10 81`/`10 A0` (`MayLeaveProgrammingSession`), `3D`/`38`-`3A`/`2C`/`23` on non-immobilizer ECUs (maintainer decision 2026-11-22, final) | human *expert* `Approval` (10-character code), `RiskInfo` with "unknown effect" and the specific warnings |
 | forbidden | the immobilizer line only, see below | never, not even in expert mode |
@@ -389,8 +389,12 @@ not safety rules:
   an alias of AP1CLE if the BMT firmware masks the index to its low nibble, security review H1,
   NOT VERIFIED; other indices above 0x0F stay Expert); `21 A4` with anything after it.
 - Not BMT, any protocol claim (an ISO8 target at 0x7A included, found in a review):
-  `31`/`32`/`33`/`38`-`3A` with `A0 A3` (reset of the backed-up memory, may touch the "verrou
-  logiciel" area).
+  `31`/`32`/`33`/`38`-`3A` with `A0 A3` (an earlier reading of the backed-up memory reset, kept
+  refused).
+- Sirius (0x7A or a Sirius definition): `31`/`32`/`33` with `A3` at byte 2, whatever follows
+  (function 0xA3 "Reinit memoire sauvegardee", reset of the backed-up memory, may touch the
+  "verrou logiciel" area). The Sirius request layout is `31 fn 00` start, `32 fn 00` stop,
+  `31 fn 01` status, from `31A000`/`32A000`/`31A001` with the function at FirstByte 2.
 - Sirius (0x7A or a Sirius definition): `2E`/`2F`/`3B` on `A0`, `A2`, `AE`, `BD` (the `21`
   frames carrying immobilizer / verrou fields). Output control `30` and routines
   `31`-`33`/`38`-`3A` with byte 2 = `A0`/`A2`/`AE`/`BD` are not refused: those are I/O,

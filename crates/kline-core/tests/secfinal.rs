@@ -143,7 +143,7 @@ fn sirius_immobilizer_lids_and_backup_reset_variants_are_forbidden() {
         .contains(&safety::Warning::MovesActuator));
     // Documented Sirius service actions are unchanged.
     assert_eq!(
-        tier_of(&SIRIUS, &[0x31, 0xA0, 0xA0]).unwrap(),
+        tier_of(&SIRIUS, &[0x31, 0xA0, 0x00]).unwrap(),
         Tier::Service
     );
     assert_eq!(
@@ -500,4 +500,65 @@ fn merged_guard_keeps_the_strongest_class_and_all_flags() {
     let mut g3 = DefinitionGuard::default();
     g3.merge(DefinitionGuard::new(EcuClass::Sirius));
     assert_eq!(g3.class, EcuClass::Sirius);
+}
+
+/// Final critique F02 (immobilizer part): in the Sirius definition "Fonctions particulieres"
+/// is `31A000` with the function number at FirstByte 2 (1-based), so a request is
+/// `31 <fn> 00` ("Arret fonctions" `32 <fn> 00`, "Status fonctions" `31 <fn> 01`). Function
+/// 0xA3 "Reinit memoire sauvegardee" (reset of the backed-up memory, which holds the verrou
+/// logiciel) is therefore `31 A3 ..`, not `31 A0 A3`. On a Sirius every `31`/`32`/`33 A3` is
+/// forbidden; `31 A0 A3` stays forbidden. Injector inhibition (0xA0) is `31 A0 00`.
+#[test]
+fn sirius_backup_memory_reset_is_function_a3_at_byte_2() {
+    let def = DefinitionGuard::new(EcuClass::Sirius);
+    let other = Target {
+        protocol: Protocol::Kwp,
+        ecu_address: 0x40,
+    };
+    for p in [
+        &[0x31, 0xA3, 0x00][..],
+        &[0x31, 0xA3, 0x01],
+        &[0x31, 0xA3],
+        &[0x32, 0xA3, 0x00],
+        &[0x33, 0xA3, 0x00],
+        &[0x31, 0xA0, 0xA3],
+    ] {
+        assert!(immo(&SIRIUS, p), "{p:02X?}: {:?}", tier_of(&SIRIUS, p));
+        assert!(
+            tier_of_in(&def, &other, p)
+                .unwrap_err()
+                .reason
+                .is_forbidden(),
+            "{p:02X?} with a Sirius definition"
+        );
+    }
+    // Injector inhibition: start `31 A0 00` Tier 1 with StopsEngine, end `32 A0 00` Tier 1.
+    assert_eq!(
+        tier_of(&SIRIUS, &[0x31, 0xA0, 0x00]).unwrap(),
+        Tier::Service
+    );
+    assert!(safety::assess(&SIRIUS, &[0x31, 0xA0, 0x00])
+        .unwrap()
+        .warnings
+        .contains(&safety::Warning::StopsEngine));
+    assert_eq!(
+        tier_of(&SIRIUS, &[0x32, 0xA0, 0x00]).unwrap(),
+        Tier::Service
+    );
+    // `31 A0 A0` is not a request of the definition (function A0 with option A0): Expert.
+    assert_eq!(tier_of(&SIRIUS, &[0x31, 0xA0, 0xA0]).unwrap(), Tier::Expert);
+    // The other special functions keep their tier (Expert), including the status request.
+    for p in [
+        &[0x31, 0xA1, 0x00][..],
+        &[0x31, 0xA2, 0x00],
+        &[0x31, 0xA4, 0x00],
+        &[0x31, 0xA6, 0x00],
+        &[0x31, 0xA7, 0x00],
+        &[0x31, 0xA0, 0x01],
+        &[0x32, 0xA1, 0x00],
+    ] {
+        assert_eq!(tier_of(&SIRIUS, p).unwrap(), Tier::Expert, "{p:02X?}");
+    }
+    // A generic ECU at 0x40 without a Sirius definition: `31 A3` is not the Sirius function.
+    assert_eq!(tier_of(&other, &[0x31, 0xA3, 0x00]).unwrap(), Tier::Expert);
 }
