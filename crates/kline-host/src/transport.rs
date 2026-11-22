@@ -1261,6 +1261,23 @@ mod tests {
     }
 
     #[test]
+    fn a_new_init_guard_ends_a_chain_left_open_mid_pattern() {
+        // Code review N1: a chain open with edges in 1..=9 (here: break on and off, edges = 2,
+        // no DTR edge after it) must not make the next attempt's idle a guarded slot. The
+        // cleanup `set_dtr(true)` would reset `edges` only after that idle, so this needs the
+        // `end_chain` in `set_init_guard` itself.
+        let (mut l, m) = line(500);
+        l.set_init_guard(true);
+        l.set_break(true).unwrap();
+        l.set_break(false).unwrap();
+        l.set_init_guard(true);
+        let n = m.0.borrow().sleeps;
+        m.0.borrow_mut().oversleep_nth = Some((n, 30_000));
+        l.sleep_ms(300);
+        l.set_dtr(false).expect("the idle was not guarded");
+    }
+
+    #[test]
     fn with_the_init_guard_a_late_tinil_aborts_before_start_communication() {
         let (mut l, m) = line(500);
         l.set_init_guard(true);
