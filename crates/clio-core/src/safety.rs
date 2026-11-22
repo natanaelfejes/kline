@@ -710,3 +710,69 @@ mod approval {
         }
     }
 }
+
+/// True when this build of clio-core has the `approved-routines` feature (approval types
+/// exist). Lets a binary that must never approve anything (clio-agent) detect a build in which
+/// cargo unified the feature in from another workspace member.
+pub const APPROVALS_COMPILED: bool = cfg!(feature = "approved-routines");
+
+/// Substrings (lowercase, accents folded, spaces and punctuation removed) that mark a request
+/// or data name as immobilizer / transponder / key related. Coordinator scope addition
+/// 2026-11-22 (generic ECUs): anti-demarrage, transpondeur, immo, VERLOG, verrou, APPTRP,
+/// AP1CLE, code cle / key code. `wegfahr` (German Wegfahrsperre) is ours. Deliberately broad:
+/// "verrou" also matches central locking ("verrouillage"), which is refused too.
+pub const IMMOBILIZER_SUBSTRINGS: &[&str] = &[
+    "antidemarr",
+    "transpond",
+    "immo",
+    "verlog",
+    "verrou",
+    "apptrp",
+    "ap1cle",
+    "codecle",
+    "clecode",
+    "keycode",
+    "wegfahr",
+];
+/// Whole words (lowercase, accents folded) with the same meaning: `cle`/`cles` (French key, as
+/// in "APPRENT CLE 2 TEL") and `key`/`keys`.
+pub const IMMOBILIZER_WORDS: &[&str] = &["cle", "cles", "key", "keys"];
+
+fn fold(c: char) -> Option<char> {
+    let c = match c {
+        'à' | 'â' | 'ä' | 'á' | 'À' | 'Â' | 'Ä' | 'Á' => 'a',
+        'é' | 'è' | 'ê' | 'ë' | 'É' | 'È' | 'Ê' | 'Ë' => 'e',
+        'î' | 'ï' | 'í' | 'Î' | 'Ï' | 'Í' => 'i',
+        'ô' | 'ö' | 'ó' | 'Ô' | 'Ö' | 'Ó' => 'o',
+        'ù' | 'û' | 'ü' | 'ú' | 'Ù' | 'Û' | 'Ü' | 'Ú' => 'u',
+        'ç' | 'Ç' => 'c',
+        c => c.to_ascii_lowercase(),
+    };
+    c.is_ascii_alphanumeric().then_some(c)
+}
+
+/// The immobilizer/transponder/key keyword `name` contains ([`IMMOBILIZER_SUBSTRINGS`],
+/// [`IMMOBILIZER_WORDS`]), if any. Used to refuse Tier 1-3 requests of ECU definitions by
+/// name (SAFETY.md rule 3 for ECUs the address-based rules above do not know).
+pub fn immobilizer_keyword(name: &str) -> Option<&'static str> {
+    let compact: alloc::string::String = name.chars().filter_map(fold).collect();
+    if let Some(k) = IMMOBILIZER_SUBSTRINGS
+        .iter()
+        .find(|k| compact.contains(**k))
+    {
+        return Some(k);
+    }
+    let mut word = alloc::string::String::new();
+    for c in name.chars().chain(core::iter::once(' ')) {
+        match fold(c) {
+            Some(f) => word.push(f),
+            None => {
+                if let Some(k) = IMMOBILIZER_WORDS.iter().find(|k| **k == word) {
+                    return Some(k);
+                }
+                word.clear();
+            }
+        }
+    }
+    None
+}

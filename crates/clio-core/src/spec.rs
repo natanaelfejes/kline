@@ -99,3 +99,55 @@ pub fn link_config(ecu: &EcuDef) -> Result<LinkConfig, SpecMapError> {
     cfg.expected_keywords = k.key_words();
     Ok(cfg)
 }
+
+/// Names of the requests of `ecu` that `payload` would send (its `SentBytes` up to the first
+/// sent data item are a prefix of `payload`) and whose request name, or the name, description
+/// or mnemonic of one of its data items, contains an immobilizer keyword
+/// ([`crate::safety::immobilizer_keyword`]). Empty: no such request.
+///
+/// The two owner-approved BMT remote-learning routines (exact `31C7000000` / `31C8000000` on
+/// [`crate::safety::BMT_ADDRESS`]) are exempt: their BMT names contain "CLE" (remote key).
+/// Additive guard for generic ECUs (coordinator scope addition 2026-11-22); the address-based
+/// policy in [`crate::safety`] still applies first.
+pub fn immobilizer_named_requests(
+    ecu: &EcuDef,
+    target: &crate::safety::Target,
+    payload: &[u8],
+) -> Vec<String> {
+    use crate::safety::{immobilizer_keyword, BMT_ADDRESS, BMT_REMOTE_LEARNING};
+    if target.ecu_address == BMT_ADDRESS && BMT_REMOTE_LEARNING.iter().any(|r| r[..] == *payload) {
+        return Vec::new();
+    }
+    let flagged = |name: &str| -> bool {
+        if immobilizer_keyword(name).is_some() {
+            return true;
+        }
+        ecu.data(name).is_some_and(|d| {
+            [&d.description, &d.comment, &d.mnemonic]
+                .iter()
+                .any(|t| t.as_deref().and_then(immobilizer_keyword).is_some())
+        })
+    };
+    ecu.requests
+        .iter()
+        .filter(|r| {
+            let sent = &r.sent_bytes.0;
+            let fixed = r
+                .sent_items
+                .iter()
+                .map(|i| (i.first_byte as usize).saturating_sub(1))
+                .min()
+                .unwrap_or(sent.len())
+                .min(sent.len());
+            fixed > 0 && payload.starts_with(&sent[..fixed])
+        })
+        .filter(|r| {
+            flagged(&r.name)
+                || r.sent_items
+                    .iter()
+                    .chain(r.received_items.iter())
+                    .any(|i| flagged(&i.name))
+        })
+        .map(|r| r.name.clone())
+        .collect()
+}
