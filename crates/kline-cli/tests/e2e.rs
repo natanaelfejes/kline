@@ -1055,6 +1055,42 @@ fn selftest_toggles_break_only_and_reports_timing() {
     assert!(!r.opened);
 }
 
+/// Re-review R3: `selftest --rts low` drops RTS once (the bench comparison `--rts low` vs
+/// `leave` depends on it) and traces the same `PORT dtr=1 rts=0` line as an init; the default
+/// leaves RTS alone.
+#[test]
+fn selftest_rts_low_drops_rts_once_and_traces_the_port_line() {
+    for (extra, rts_calls, line) in [
+        (&["--rts", "low"][..], 1, "PORT dtr=1 rts=0"),
+        (&[][..], 0, "PORT dtr=1 rts=left as opened"),
+    ] {
+        let ecu = sirius_ecu();
+        let j = ecu.journal();
+        let mut args = extra.to_vec();
+        args.extend(["--trace", "selftest"]);
+        let r = run_line_port(
+            VirtualLine::with_ecu(ecu),
+            "virtual",
+            &args,
+            Opts {
+                ports: vec![ftdi_port("virtual")],
+                ..Opts::default()
+            },
+        );
+        assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+        assert!(r.stderr.contains(line), "{}", r.stderr);
+        let notes: Vec<String> = j.notes().into_iter().map(|(_, n)| n).collect();
+        assert_eq!(
+            notes.iter().filter(|n| n.starts_with("RTS")).count(),
+            rts_calls,
+            "{notes:?}"
+        );
+        if rts_calls == 1 {
+            assert!(notes.iter().any(|n| n == "RTS low"), "{notes:?}");
+        }
+    }
+}
+
 #[test]
 fn selftest_reports_host_sleep_jitter_before_opening_the_port() {
     let (r, _) = run(sirius_ecu(), &["--json", "selftest"]);

@@ -797,11 +797,13 @@ pub fn selftest(ctx: &mut Ctx, a: &SelftestArgs) -> Result<(), CliError> {
     let baud = kline_core::timing::consts::DEFAULT_BAUD;
     let mut t = (ctx.env.opener)(&spec, baud, Tracer::off())
         .map_err(|e| CliError::port(format!("cannot open {path} at {baud} baud: {e}")))?;
-    // `--rts low`: the same line state as before an init (Link::prepare_port).
-    if ctx.g.rts == RtsArg::Low {
-        t.set_dtr(true).map_err(CliError::io)?;
-        t.set_rts(false).map_err(CliError::io)?;
-    }
+    // The same line state and trace line as before an init (Link::prepare_port).
+    let trace = if ctx.g.trace {
+        Tracer::to(ctx.env.stderr.clone())
+    } else {
+        Tracer::off()
+    };
+    crate::link::prepare_port(t.as_mut(), &trace, ctx.g.rts.mode()).map_err(CliError::io)?;
     let reported = t.baud_rate();
     let j = crate::selftest::measure_break_jitter(
         t.as_mut(),

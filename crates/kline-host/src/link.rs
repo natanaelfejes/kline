@@ -121,6 +121,26 @@ impl ExchangeError {
     }
 }
 
+/// The port preparation of [`Link::prepare_port`] on a bare transport, so `selftest` sets the
+/// same line state and writes the same trace line as an init does.
+pub fn prepare_port(
+    t: &mut dyn Transport,
+    trace: &Tracer,
+    rts: kline_core::RtsMode,
+) -> io::Result<()> {
+    match rts {
+        kline_core::RtsMode::Low => {
+            t.set_dtr(true)?;
+            t.set_rts(false)?;
+            trace.line(t.now_us(), "PORT dtr=1 rts=0");
+        }
+        kline_core::RtsMode::Leave => {
+            trace.line(t.now_us(), "PORT dtr=1 rts=left as opened");
+        }
+    }
+    Ok(())
+}
+
 /// The K line plus its trace and capture.
 pub struct Link {
     t: Box<dyn Transport>,
@@ -148,18 +168,7 @@ impl Link {
     /// dropped, in DDT2000's order (IOTBDSetup: DTR set, RTS control disabled). With
     /// [`RtsMode::Leave`] (default) RTS is not touched. Traced as `PORT dtr=1 rts=..`.
     pub fn prepare_port(&mut self, rts: kline_core::RtsMode) -> io::Result<()> {
-        match rts {
-            kline_core::RtsMode::Low => {
-                self.t.set_dtr(true)?;
-                self.t.set_rts(false)?;
-                self.trace.line(self.t.now_us(), "PORT dtr=1 rts=0");
-            }
-            kline_core::RtsMode::Leave => {
-                self.trace
-                    .line(self.t.now_us(), "PORT dtr=1 rts=left as opened");
-            }
-        }
-        Ok(())
+        prepare_port(self.t.as_mut(), &self.trace, rts)
     }
 
     pub fn sleep_ms(&mut self, ms: u32) {

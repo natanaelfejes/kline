@@ -106,6 +106,26 @@ fn binary_rts_low_goes_over_the_control_socket() {
     assert_eq!(rts, vec!["RTS low".to_string()]);
 }
 
+/// Re-review R3 over the real control socket: `selftest --rts low` drops RTS after DTR once.
+#[test]
+fn binary_selftest_rts_low_goes_over_the_control_socket() {
+    let Some((sim, j)) = spawn("selftest-rts") else {
+        return;
+    };
+    let caps = temp_dir("pty-selftest-rts");
+    let o = kline(&sim, &caps, &["--rts", "low", "--trace", "selftest"]);
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert_eq!(o.status.code(), Some(0), "{err}");
+    assert!(err.contains("PORT dtr=1 rts=0"), "{err}");
+    let rts: Vec<String> = j
+        .notes()
+        .into_iter()
+        .map(|(_, n)| n)
+        .filter(|n| n.starts_with("RTS"))
+        .collect();
+    assert_eq!(rts, vec!["RTS low".to_string()]);
+}
+
 #[test]
 fn binary_exec_is_refused_without_a_tty() {
     let Some((sim, j)) = spawn("exec") else {
