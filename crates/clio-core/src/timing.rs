@@ -170,6 +170,11 @@ pub struct LinkConfig {
     pub response_pending_timeout_ms: u32,
     /// Bound on consecutive 0x78 replies, see [`consts::MAX_RESPONSE_PENDING`].
     pub max_response_pending: u8,
+    /// Read window for `55 KW1 KW2` and `[echo, ~address]` in a 5-baud init. `None` (default):
+    /// DDT2000 behaviour, KW2Timeout + 100 ms ([`KTiming::kw2_read_window_ms`]). Set it to
+    /// widen the window on the car if an ECU's W1 is near the ISO 9141 maximum of 300 ms.
+    /// NOT VERIFIED on the car whether any ECU needs it.
+    pub kw_window_ms: Option<u32>,
 }
 
 impl LinkConfig {
@@ -185,6 +190,7 @@ impl LinkConfig {
             idle_before_init_ms: consts::IDLE_BEFORE_INIT_MS,
             response_pending_timeout_ms: consts::RESPONSE_PENDING_TIMEOUT_MS,
             max_response_pending: consts::MAX_RESPONSE_PENDING,
+            kw_window_ms: None,
         }
     }
 

@@ -3,8 +3,8 @@
 mod common;
 
 use clio_core::frame::{checksum, FrameError, Reply};
-use clio_core::init::InitOutcome;
-use clio_core::safety::DenyReason;
+use clio_core::safety::{DenyReason, Tier};
+use clio_core::scan::{ScanPlan, ScanResult, ScanService, ScanStep};
 use clio_core::session::{Session, SessionError, SessionOutcome};
 use clio_core::{InitKind, InitVariant, KTiming, LinkConfig, LinkError, Step};
 use common::*;
@@ -19,26 +19,21 @@ fn sirius_cfg() -> LinkConfig {
     )
 }
 
-fn outcome(kind: InitKind, kw1: u8, kw2: u8) -> InitOutcome {
-    InitOutcome {
-        kind,
-        address_byte: None,
-        sync: Some(0x55),
-        kw1,
-        kw2,
-        address_complement: None,
-        keywords_match: None,
-    }
-}
-
 fn sirius_session(now: u64) -> Session {
-    let cfg = sirius_cfg();
-    Session::new(&cfg, &outcome(cfg.timing.init, 0xD0, 0x8F), now)
+    Session::new(open(&sirius_cfg(), 0xD0, 0x8F), now)
 }
 
 /// ECU -> tool KWP frame from 0x7A.
 fn from_ecu(payload: &[u8]) -> Vec<u8> {
     let mut f = vec![0x80 | payload.len() as u8, 0xF1, 0x7A];
+    f.extend_from_slice(payload);
+    f.push(checksum(&f));
+    f
+}
+
+/// Tool -> 0x7A KWP request frame.
+fn to_ecu(payload: &[u8]) -> Vec<u8> {
+    let mut f = vec![0x80 | payload.len() as u8, 0x7A, 0xF1];
     f.extend_from_slice(payload);
     f.push(checksum(&f));
     f
@@ -179,7 +174,7 @@ fn response_pending_keeps_reading() {
 fn response_pending_is_bounded() {
     let mut cfg = sirius_cfg();
     cfg.max_response_pending = 2;
-    let mut s = Session::new(&cfg, &outcome(cfg.timing.init, 0xD0, 0x8F), 0);
+    let mut s = Session::new(open(&cfg, 0xD0, 0x8F), 0);
     let first = s.request(&[0x21, 0xA0], 0).unwrap();
     let pending = from_ecu(&[0x7F, 0x21, 0x78]);
     let mut script = vec![
@@ -266,7 +261,10 @@ fn incomplete_and_bad_replies() {
     script.extend(reply_reads(&bad));
     assert!(matches!(
         run(&mut s, first, &script, 1100),
-        Step::Failed(SessionError::Frame(FrameError::Checksum { .. }))
+        // A bad reply is a line error, not "cannot frame request" (simulator author request).
+        Step::Failed(SessionError::Link(LinkError::Frame(
+            FrameError::Checksum { .. }
+        )))
     ));
 }
 
@@ -309,10 +307,11 @@ fn denied_request_writes_nothing() {
         // Nothing queued: the session is free and owes no event.
         assert!(!s.is_busy());
     }
-    // An approved-routine payload without Approval is refused too.
+    // The BMT remote-learning routine is not even Tier 1 on another ECU.
     assert!(matches!(
         s.request(&[0x31, 0xC7, 0, 0, 0], 0),
-        Err(SessionError::Denied(ref d)) if d.reason == DenyReason::ApprovalRequired
+        Err(SessionError::Denied(ref d))
+            if d.reason == (DenyReason::ParametersNotAllowed { service: 0x31 })
     ));
 }
 
@@ -376,9 +375,13 @@ fn tester_present_after_fast_init_waits_tp_minus_first_request() {
             ..KTiming::default()
         },
     );
-    let s = Session::new(&cfg, &outcome(cfg.timing.init, 0xD0, 0x8F), 0);
-    assert!(!s.tester_present_due(2979));
-    assert!(s.tester_present_due(2980));
+    // The fast init waited FirstRequest (20 ms) itself; the outcome arrives then.
+    let mut s = Session::new(open(&cfg, 0xD0, 0x8F), 20);
+    // TP 3000 ms after StartCommunication = 2980 ms after the outcome (RE: IOTBD32V3 worker).
+    assert!(!s.tester_present_due(2999));
+    assert!(s.tester_present_due(3000));
+    // No extra gap is owed before the first request (Gemini M2 #1: was ReplyToRequest 5 ms).
+    assert_eq!(s.request(&[0x21, 0xA0], 20).unwrap(), flush());
 }
 
 #[test]
@@ -410,7 +413,7 @@ fn safir_iso8_session() {
             ..KTiming::default()
         },
     );
-    let mut s = Session::new(&cfg, &outcome(InitKind::Iso8FiveBaud, 0xC2, 0x85), 0);
+    let mut s = Session::new(open(&cfg, 0xC2, 0x85), 0);
     let first = s.request(&[0x33, 0x50], 0).unwrap();
     let req = [0x03, 0x33, 0x50, 0x86];
     let reply = [0x03, 0x73, 0x50, 0xC6];
@@ -449,21 +452,137 @@ fn safir_iso8_session() {
 fn length_byte_framing_when_kw1_requires_it() {
     // KW1 0xC2 (bit 0 clear, not 0xD0): KWP length goes in a separate byte.
     let cfg = sirius_cfg();
-    let mut s = Session::new(&cfg, &outcome(cfg.timing.init, 0xC2, 0x8F), 0);
+    let mut s = Session::new(open(&cfg, 0xC2, 0x8F), 0);
     let req = [0x80, 0x7A, 0xF1, 0x02, 0x21, 0xA0, 0xAE];
     assert_eq!(s.request(&[0x21, 0xA0], 0).unwrap(), flush());
-    assert_eq!(s.on_event(done(), 0), Step::Act(write(&req, 0)));
+    assert_eq!(act(s.on_event(done(), 0)), write(&req, 0));
 }
 
 #[test]
-fn multi_ecu_session_uses_7ms_inter_byte() {
+fn multi_ecu_session_full_exchange() {
+    // Gemini M2 #5: complete MultiEcu exchange. Wake byte 0xFA, header target 0x7A, 7 ms
+    // inter-byte, Multipoint timings.
     let mut cfg = sirius_cfg();
     cfg.variant = InitVariant::MultiEcu;
-    let mut s = Session::new(
-        &cfg,
-        &outcome(InitKind::KwpFiveBaud { multipoint: true }, 0xD0, 0x8F),
-        0,
+    let o = open(&cfg, 0xD0, 0x8F);
+    assert_eq!(o.address_byte(), Some(0xFA));
+    assert_eq!(o.target().ecu_address, 0x7A);
+    let mut s = Session::new(o, 0);
+    let first = s.request(&[0x21, 0xA0], 0).unwrap();
+    let reply = from_ecu(&[0x61, 0xA0, 0x55]);
+    let mut script = vec![
+        (flush(), done()),
+        (write(&REQ_21A0, 7), done()),
+        (read(6, 300), ok(&REQ_21A0)),
+    ];
+    script.extend(reply_reads(&reply));
+    assert_eq!(
+        run(&mut s, first, &script, 50),
+        Step::Done(SessionOutcome::Reply(Reply::Positive(vec![
+            0x61, 0xA0, 0x55
+        ])))
     );
-    assert_eq!(s.request(&[0x21, 0xA0], 0).unwrap(), flush());
-    assert_eq!(s.on_event(done(), 0), Step::Act(write(&REQ_21A0, 7)));
+    // P3 5 ms from the reply, then TP 3000 ms idle.
+    assert_eq!(s.request(&[0x21, 0xA1], 52).unwrap(), sleep(3));
+}
+
+#[test]
+fn protocol_frames_only_through_session_methods() {
+    // Security review M2 #5: raw 81/82 via request() would close the ECU link behind the
+    // session's back. Refused; stop() is the only way.
+    let mut s = sirius_session(0);
+    for p in [&[0x82u8][..], &[0x81]] {
+        assert!(matches!(
+            s.request(p, 0),
+            Err(SessionError::Denied(ref d))
+                if d.reason == (DenyReason::ProtocolReserved { service: p[0] })
+        ));
+        assert!(!s.is_busy());
+        assert!(!s.is_closed());
+    }
+    let cfg = LinkConfig::new(
+        0x7A,
+        KTiming {
+            init: InitKind::Iso8FiveBaud,
+            ..KTiming::default()
+        },
+    );
+    let mut s = Session::new(open(&cfg, 0xC2, 0x85), 0);
+    for p in [&[0x3Fu8][..], &[0x36]] {
+        assert!(matches!(
+            s.request(p, 0),
+            Err(SessionError::Denied(ref d))
+                if d.reason == (DenyReason::ProtocolReserved { service: p[0] })
+        ));
+    }
+}
+
+#[test]
+fn service_and_config_writes_need_approval() {
+    let mut s = sirius_session(0);
+    for (p, tier) in [
+        (&[0x14, 0x00, 0x00][..], Tier::Service),
+        (&[0x30, 0xD0, 0x00, 0x0A], Tier::Service),
+        (&[0x11, 0xFF], Tier::Service),
+        (&[0x32, 0xA0, 0x00], Tier::Service),
+        (&[0x3B, 0xD0, 0x10], Tier::ConfigWrite),
+    ] {
+        assert!(
+            matches!(
+                s.request(p, 0),
+                Err(SessionError::Denied(ref d)) if d.reason == (DenyReason::ApprovalRequired { tier })
+            ),
+            "{p:02X?}"
+        );
+        assert!(!s.is_busy());
+    }
+}
+
+#[test]
+fn positive_21_reads_are_recorded_as_config_backup() {
+    let mut s = sirius_session(0);
+    let req = to_ecu(&[0x21, 0xD0]);
+    let first = s.request(&[0x21, 0xD0], 0).unwrap();
+    let mut script = vec![
+        (flush(), done()),
+        (write(&req, 0), done()),
+        (read(6, 300), ok(&req)),
+    ];
+    script.extend(reply_reads(&from_ecu(&[0x61, 0xD0, 0x10])));
+    assert!(matches!(run(&mut s, first, &script, 10), Step::Done(_)));
+    assert_eq!(s.config_read(0xD0), Some(&[0x61, 0xD0, 0x10][..]));
+    // A later negative reply drops the backup: only the latest read counts.
+    let first = s.request(&[0x21, 0xD0], 1000).unwrap();
+    let mut script = vec![
+        (flush(), done()),
+        (write(&req, 0), done()),
+        (read(6, 300), ok(&req)),
+    ];
+    script.extend(reply_reads(&from_ecu(&[0x7F, 0x21, 0x12])));
+    assert!(matches!(run(&mut s, first, &script, 1010), Step::Done(_)));
+    assert_eq!(s.config_read(0xD0), None);
+}
+
+#[test]
+fn scan_plan_feeds_session_reads() {
+    let mut s = sirius_session(0);
+    let mut plan = ScanPlan::new(ScanService::LocalIdentifier, 0xA0..=0xA1, 0);
+    let ScanStep::Send(r) = plan.next(0) else {
+        panic!()
+    };
+    let first = s.request_scan(r, 0).unwrap();
+    let mut script = vec![
+        (flush(), done()),
+        (write(&REQ_21A0, 0), done()),
+        (read(6, 300), ok(&REQ_21A0)),
+    ];
+    script.extend(reply_reads(&from_ecu(&[0x61, 0xA0])));
+    let Step::Done(SessionOutcome::Reply(r)) = run(&mut s, first, &script, 10) else {
+        panic!()
+    };
+    // One at a time: nothing until the result is reported, then the 200 ms minimum spacing.
+    assert_eq!(plan.next(500), ScanStep::AwaitingReport);
+    plan.report(ScanResult::Reply(&r));
+    assert_eq!(plan.next(10), ScanStep::Wait { ms: 190 });
+    assert!(matches!(plan.next(200), ScanStep::Send(ref r) if r.payload() == [0x21, 0xA1]));
 }

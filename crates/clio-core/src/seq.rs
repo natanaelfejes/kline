@@ -16,7 +16,7 @@ enum Expect {
 ///
 /// Invariant: a `Read` or `CheckBreakLoopback` is always the last action of a batch, so the
 /// machine reacts to every data-carrying event.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub(crate) struct Seq {
     queue: VecDeque<Action>,
     outstanding: Option<Expect>,

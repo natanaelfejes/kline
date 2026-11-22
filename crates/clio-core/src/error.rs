@@ -48,6 +48,13 @@ pub enum LinkError {
     /// The init kind of the config does not match the machine.
     #[error("init kind does not match this init machine")]
     WrongInitKind,
+    /// The ECU address has bit 7 set: it is the Multipoint wake byte of another address
+    /// (`address ^ 0x80`), so the woken ECU could differ from the one the policy checks.
+    #[error("ECU address {address:#04x} aliases another ECU (bit 7 set)")]
+    AliasedAddress { address: u8 },
+    /// A permit was issued for another protocol or ECU than the framing addresses.
+    #[error("permit target does not match the framing")]
+    PermitMismatch,
     /// The driver fed an event that does not answer the last action, or fed a finished machine.
     #[error("event does not match the outstanding action")]
     UnexpectedEvent,

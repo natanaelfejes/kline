@@ -3,7 +3,7 @@
 mod common;
 
 use clio_core::init::{FastInit, FiveBaudInit, InitOutcome};
-use clio_core::io::Action;
+use clio_core::safety::{Protocol, Target};
 use clio_core::{Event, InitKind, InitVariant, KTiming, LinkConfig, LinkError, Step};
 use common::*;
 
@@ -47,7 +47,7 @@ fn start_bit(seen: bool) -> Script {
         (dtr(false), done()),
         (brk(true), done()),
         (sleep(200), done()),
-        (Action::CheckBreakLoopback, Event::BreakLoopbackSeen(seen)),
+        (loopback(), Event::BreakLoopbackSeen(seen)),
     ]
 }
 
@@ -88,16 +88,32 @@ fn kwp_five_baud(addr: u8, complement: u8) -> Script {
     s
 }
 
-fn kwp_outcome(multipoint: bool, addr: u8, complement: u8) -> InitOutcome {
-    InitOutcome {
-        kind: InitKind::KwpFiveBaud { multipoint },
-        address_byte: Some(addr),
-        sync: Some(0x55),
-        kw1: 0xD0,
-        kw2: 0x8F,
-        address_complement: Some(complement),
-        keywords_match: Some(true),
-    }
+/// Check a finished KWP 5-baud init: kind, wake byte, key bytes, ~address, and that the policy
+/// target is the plain ECU address (`ecu`) whatever was bit-banged.
+fn assert_kwp_outcome(
+    step: Step<InitOutcome, LinkError>,
+    multipoint: bool,
+    addr: u8,
+    complement: u8,
+    ecu: u8,
+) {
+    let Step::Done(o) = step else {
+        panic!("init failed: {step:?}")
+    };
+    assert_eq!(o.kind(), InitKind::KwpFiveBaud { multipoint });
+    assert_eq!(o.address_byte(), Some(addr));
+    assert_eq!(o.sync(), Some(0x55));
+    assert_eq!(o.keywords(), (0xD0, 0x8F));
+    assert_eq!(o.address_complement(), Some(complement));
+    assert_eq!(o.keywords_match(), Some(true));
+    assert_eq!(
+        o.target(),
+        Target {
+            protocol: Protocol::Kwp,
+            ecu_address: ecu
+        }
+    );
+    assert_eq!(o.config().ecu_address, ecu);
 }
 
 #[test]
@@ -107,9 +123,12 @@ fn sirius32_single_ecu_init_is_default() {
     assert_eq!(cfg.variant, InitVariant::SingleEcu);
     assert_eq!(cfg.five_baud_address_byte(), 0x7A);
     assert_eq!(cfg.effective_timing().inter_byte_ms, 0);
-    assert_eq!(
+    assert_kwp_outcome(
         run_five_baud(&cfg, &kwp_five_baud(0x7A, 0x85)),
-        Step::Done(kwp_outcome(false, 0x7A, 0x85))
+        false,
+        0x7A,
+        0x85,
+        0x7A,
     );
 }
 
@@ -119,9 +138,12 @@ fn sirius32_multi_ecu_init() {
     let cfg = multi(sirius32());
     assert_eq!(cfg.five_baud_address_byte(), 0xFA);
     assert_eq!(cfg.effective_timing().inter_byte_ms, 7);
-    assert_eq!(
+    assert_kwp_outcome(
         run_five_baud(&cfg, &kwp_five_baud(0xFA, 0x05)),
-        Step::Done(kwp_outcome(true, 0xFA, 0x05))
+        true,
+        0xFA,
+        0x05,
+        0x7A,
     );
 }
 
@@ -131,24 +153,30 @@ fn complement_is_logged_not_validated() {
     let Step::Done(o) = run_five_baud(&sirius32(), &kwp_five_baud(0x7A, 0x00)) else {
         panic!("init failed")
     };
-    assert_eq!(o.address_complement, Some(0x00));
+    assert_eq!(o.address_complement(), Some(0x00));
 }
 
 #[test]
 fn bmt_single_ecu_init() {
     let cfg = bmt();
-    assert_eq!(
+    assert_kwp_outcome(
         run_five_baud(&cfg, &kwp_five_baud(0x26, 0xD9)),
-        Step::Done(kwp_outcome(false, 0x26, 0xD9))
+        false,
+        0x26,
+        0xD9,
+        0x26,
     );
 }
 
 #[test]
 fn bmt_multi_ecu_init() {
     let cfg = multi(bmt());
-    assert_eq!(
+    assert_kwp_outcome(
         run_five_baud(&cfg, &kwp_five_baud(0xA6, 0x59)),
-        Step::Done(kwp_outcome(true, 0xA6, 0x59))
+        true,
+        0xA6,
+        0x59,
+        0x26,
     );
 }
 
@@ -167,9 +195,12 @@ fn multi_ecu_forces_multipoint_timing() {
         (sleep(90), done()),
     ]);
     assert!(matches!(run_five_baud(&cfg, &s), Step::Done(_)));
-    assert_eq!(
+    assert_kwp_outcome(
         run_five_baud(&multi(cfg), &kwp_five_baud(0xFA, 0x05)),
-        Step::Done(kwp_outcome(true, 0xFA, 0x05))
+        true,
+        0xFA,
+        0x05,
+        0x7A,
     );
 }
 
@@ -186,17 +217,21 @@ fn safir_iso8_init_has_no_handshake() {
     let cfg = safir2();
     let mut s = up_to_keywords(0x7A, 600, ok(&[0x55, 0xC2, 0x85]));
     s.push((sleep(20), done()));
+    let Step::Done(o) = run_five_baud(&cfg, &s) else {
+        panic!("init failed")
+    };
+    assert_eq!(o.kind(), InitKind::Iso8FiveBaud);
+    assert_eq!(o.address_byte(), Some(0x7A));
+    assert_eq!(o.sync(), Some(0x55));
+    assert_eq!(o.keywords(), (0xC2, 0x85));
+    assert_eq!(o.address_complement(), None);
+    assert_eq!(o.keywords_match(), Some(true));
     assert_eq!(
-        run_five_baud(&cfg, &s),
-        Step::Done(InitOutcome {
-            kind: InitKind::Iso8FiveBaud,
-            address_byte: Some(0x7A),
-            sync: Some(0x55),
-            kw1: 0xC2,
-            kw2: 0x85,
-            address_complement: None,
-            keywords_match: Some(true),
-        })
+        o.target(),
+        Target {
+            protocol: Protocol::Iso8,
+            ecu_address: 0x7A
+        }
     );
 }
 
@@ -210,7 +245,7 @@ fn safir1_keywords_are_reported_not_rejected() {
         panic!("init failed")
     };
     assert_eq!(o.keywords(), (0x1C, 0x86));
-    assert_eq!(o.keywords_match, Some(false));
+    assert_eq!(o.keywords_match(), Some(false));
 }
 
 #[test]
@@ -364,18 +399,24 @@ fn fast_init_sirius32_fallback() {
         (read(5, 300), ok(&START_COMM_7A)),
         (read(1, 300), ok(&reply[..1])),
         (read(6, 300), ok(&[0xF1, 0x7A, 0xC1, 0xD0, 0x8F, cs])),
+        // FirstRequest after StartCommunication (RE: IOTBD32V3 FUN_100015a0, Gemini M2 #1).
+        (sleep(20), done()),
     ]);
+    let Step::Done(o) = run_fast(&fast_cfg(0x7A), &s) else {
+        panic!("init failed")
+    };
+    assert_eq!(o.kind(), InitKind::KwpFast { multipoint: false });
+    assert_eq!(o.address_byte(), None);
+    assert_eq!(o.sync(), None);
+    assert_eq!(o.keywords(), (0xD0, 0x8F));
+    assert_eq!(o.address_complement(), None);
+    assert_eq!(o.keywords_match(), None);
     assert_eq!(
-        run_fast(&fast_cfg(0x7A), &s),
-        Step::Done(InitOutcome {
-            kind: InitKind::KwpFast { multipoint: false },
-            address_byte: None,
-            sync: None,
-            kw1: 0xD0,
-            kw2: 0x8F,
-            address_complement: None,
-            keywords_match: None,
-        })
+        o.target(),
+        Target {
+            protocol: Protocol::Kwp,
+            ecu_address: 0x7A
+        }
     );
 }
 
@@ -393,6 +434,7 @@ fn fast_init_separate_length_byte_reply() {
         (read(1, 300), ok(&[0x80])),
         (read(3, 300), ok(&body[..3])),
         (read(4, 300), ok(&[0xC1, 0xD0, 0x8F, cs])),
+        (sleep(20), done()),
     ]);
     let Step::Done(o) = run_fast(&fast_cfg(0x7A), &s) else {
         panic!("init failed")
@@ -467,12 +509,13 @@ fn fast_init_fallback_for_five_baud_ecu() {
         (read(5, 300), ok(&START_COMM_7A)),
         (read(1, 300), ok(&reply[..1])),
         (read(6, 300), ok(&[0xF1, 0x7A, 0xC1, 0xD0, 0x8F, cs])),
+        (sleep(20), done()),
     ]);
     let Step::Done(o) = run_fast(&cfg, &s) else {
         panic!("init failed")
     };
-    assert_eq!(o.kind, InitKind::KwpFast { multipoint: false });
-    assert_eq!(o.keywords_match, Some(true));
+    assert_eq!(o.kind(), InitKind::KwpFast { multipoint: false });
+    assert_eq!(o.keywords_match(), Some(true));
 }
 
 #[test]
@@ -522,4 +565,133 @@ fn fast_init_multipoint_uses_7ms_inter_byte_only_multi_ecu() {
         run_fast(&cfg, &script(7)),
         Step::Failed(LinkError::KLineInactive)
     );
+}
+
+#[test]
+fn literal_address_waveforms() {
+    // Hand-written expected SetBreak values (Gemini M2 #5): compare the machine's bits to them.
+    for (cfg, byte) in [
+        (sirius32(), 0x7A),
+        (multi(sirius32()), 0xFA),
+        (bmt(), 0x26),
+        (multi(bmt()), 0xA6),
+    ] {
+        let mut m = FiveBaudInit::new(&cfg).unwrap();
+        assert_eq!(m.address_byte(), byte);
+        let mut a = m.start();
+        let mut bits = Vec::new();
+        loop {
+            let ev = match A::from(&a) {
+                A::CheckBreakLoopback => Event::BreakLoopbackSeen(true),
+                A::SetBreak(b) => {
+                    bits.push(b);
+                    Event::Done
+                }
+                A::Read(..) => break,
+                _ => Event::Done,
+            };
+            a = act(m.on_event(ev));
+        }
+        // bits[0] is the start bit, bits[9] the stop-bit release.
+        assert_eq!(bits.len(), 10, "{byte:#04x}");
+        assert!(bits[0] && !bits[9]);
+        assert_eq!(&bits[1..9], &literal_bits(byte), "{byte:#04x}");
+    }
+}
+
+#[test]
+fn aliased_addresses_are_refused() {
+    // Security review M2 F3a: a declared 0xA6 (bit 7) with MultiEcu bit-bangs 0x26 and wakes
+    // the BMT. Every address with bit 7 set is refused by both init machines.
+    for addr in [0xA6, 0xFA, 0x80, 0xFF] {
+        for variant in [InitVariant::SingleEcu, InitVariant::MultiEcu] {
+            let mut cfg = sirius32();
+            cfg.ecu_address = addr;
+            cfg.variant = variant;
+            assert_eq!(
+                FiveBaudInit::new(&cfg).unwrap_err(),
+                LinkError::AliasedAddress { address: addr }
+            );
+        }
+        assert_eq!(
+            FastInit::new(&fast_cfg(addr)).unwrap_err(),
+            LinkError::AliasedAddress { address: addr }
+        );
+    }
+}
+
+#[test]
+fn no_kw2_complement_echo_is_collision() {
+    // Gemini M2 #4: nothing at all after ~KW2 means the ~KW2 echo is missing: 0x3ED collision.
+    let mut s = up_to_keywords(0x7A, 400, ok(&[0x55, 0xD0, 0x8F]));
+    s.extend([
+        (sleep(25), done()),
+        (write(&[0x70], 0), done()),
+        (read(2, 400), timeout(&[])),
+    ]);
+    assert_eq!(
+        run_five_baud(&sirius32(), &s),
+        Step::Failed(LinkError::Collision {
+            sent: vec![0x70],
+            echo: vec![]
+        })
+    );
+}
+
+#[test]
+fn fast_init_response_pending_then_c1() {
+    let mut s = wake_up();
+    let mut pending = vec![0x83, 0xF1, 0x7A, 0x7F, 0x81, 0x78];
+    pending.push(clio_core::frame::checksum(&pending));
+    let mut reply = vec![0x83, 0xF1, 0x7A, 0xC1, 0xD0, 0x8F];
+    reply.push(clio_core::frame::checksum(&reply));
+    s.extend([
+        (flush(), done()),
+        (write(&START_COMM_7A, 0), done()),
+        (read(5, 300), ok(&START_COMM_7A)),
+        (read(1, 300), ok(&pending[..1])),
+        (read(6, 300), ok(&pending[1..])),
+        // 0x78: no new StartCommunication, wait up to 5000 ms for the real reply.
+        (read(1, 5000), ok(&reply[..1])),
+        (read(6, 300), ok(&reply[1..])),
+        (sleep(20), done()),
+    ]);
+    let Step::Done(o) = run_fast(&fast_cfg(0x7A), &s) else {
+        panic!("init failed")
+    };
+    assert_eq!(o.keywords(), (0xD0, 0x8F));
+}
+
+#[test]
+fn fast_init_echo_collision() {
+    let mut s = wake_up();
+    let bad = [0x81, 0x7A, 0xF1, 0x81, 0x6C];
+    s.extend([
+        (flush(), done()),
+        (write(&START_COMM_7A, 0), done()),
+        (read(5, 300), ok(&bad)),
+    ]);
+    assert_eq!(
+        run_fast(&fast_cfg(0x7A), &s),
+        Step::Failed(LinkError::Collision {
+            sent: START_COMM_7A.to_vec(),
+            echo: bad.to_vec()
+        })
+    );
+}
+
+#[test]
+fn keyword_window_is_configurable() {
+    // Default: KW2Timeout + 100 (DDT2000). Override widens both 5-baud reads.
+    let mut cfg = sirius32();
+    cfg.kw_window_ms = Some(1000);
+    let mut s = up_to_keywords(0x7A, 1000, ok(&[0x55, 0xD0, 0x8F]));
+    s.extend([
+        (sleep(25), done()),
+        (write(&[0x70], 0), done()),
+        (read(2, 1000), ok(&[0x70, 0x85])),
+        (sleep(20), done()),
+    ]);
+    assert!(matches!(run_five_baud(&cfg, &s), Step::Done(_)));
+    assert_eq!(LinkConfig::new(0x7A, KTiming::default()).kw_window_ms, None);
 }

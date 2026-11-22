@@ -14,9 +14,48 @@
 //! driver's business: it stops feeding events and drops the machine.
 
 use alloc::vec::Vec;
+use core::fmt;
+
+/// Bytes to put on the K line, produced only inside this crate.
+///
+/// There is no public constructor, `From` impl or `Clone`: a transport can read the bytes with
+/// [`Frame::bytes`] but cannot make a frame of its own, so every [`Action::Write`] it performs
+/// is a frame the core built (from a safety [`Permit`](crate::safety::Permit) or a protocol
+/// handshake byte). Security review M2 finding 4.
+#[derive(PartialEq, Eq)]
+pub struct Frame {
+    bytes: Vec<u8>,
+}
+
+impl Frame {
+    pub(crate) fn new(bytes: Vec<u8>) -> Frame {
+        Frame { bytes }
+    }
+
+    /// The bytes to transmit, in order.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+}
+
+impl fmt::Debug for Frame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Frame({:02X?})", self.bytes)
+    }
+}
 
 /// What the driver must do next.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Not `Clone`: an action is performed once.
+#[derive(Debug, PartialEq, Eq)]
 pub enum Action {
     /// Set (true) or clear (false) the DTR modem line.
     SetDtr(bool),
@@ -29,8 +68,9 @@ pub enum Action {
     CheckBreakLoopback,
     /// Discard everything in the RX buffer.
     FlushRx,
-    /// Transmit `bytes`. `inter_byte_ms == 0`: in one write; otherwise byte by byte with this gap.
-    Write { bytes: Vec<u8>, inter_byte_ms: u32 },
+    /// Transmit `frame.bytes()`. `inter_byte_ms == 0`: in one write; otherwise byte by byte with
+    /// this gap.
+    Write { frame: Frame, inter_byte_ms: u32 },
     /// Read exactly `count` bytes within `timeout_ms` in total.
     Read { count: usize, timeout_ms: u32 },
 }
@@ -49,7 +89,7 @@ pub enum Event {
 }
 
 /// Result of feeding a machine.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Step<T, E> {
     /// Perform this action and report its event.
     Act(Action),

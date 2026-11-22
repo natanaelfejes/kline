@@ -5,8 +5,8 @@ use alloc::vec;
 use crate::error::LinkError;
 use crate::exchange::{Exchange, ExchangeParams};
 use crate::frame::{Framing, KwpHeader, Reply};
-use crate::io::{Action, Event, Step};
-use crate::safety::{self, Protocol, Target};
+use crate::io::{Action, Event, Frame, Step};
+use crate::safety::{self, Protocol, ProtocolFrame, Target};
 use crate::seq::Seq;
 use crate::timing::{consts, InitKind, KTiming, LinkConfig};
 
@@ -15,26 +15,94 @@ pub const START_COMMUNICATION: u8 = 0x81;
 /// Positive StartCommunication response id.
 pub const START_COMMUNICATION_OK: u8 = 0xC1;
 
-/// What an init found out.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What an init found out, and the link it opened.
+///
+/// Opaque: only [`FiveBaudInit`] and [`FastInit`] make one, and `Session::new` consumes it, so a
+/// session always uses the config, init kind, key bytes and target of an init that actually ran
+/// (security review M2 finding 3). Not `Clone`: one init, one session.
+#[derive(Debug, PartialEq, Eq)]
 pub struct InitOutcome {
-    pub kind: InitKind,
-    /// Byte bit-banged at 5 baud (None for fast init).
-    pub address_byte: Option<u8>,
-    /// First byte after the 5-baud address; 0x55 expected, not enforced (None for fast init).
-    pub sync: Option<u8>,
-    pub kw1: u8,
-    pub kw2: u8,
-    /// The ~address byte after ~KW2, logged, not validated (None when there is no handshake).
-    pub address_complement: Option<u8>,
-    /// Some(true/false) when the config has expected key bytes.
-    pub keywords_match: Option<bool>,
+    cfg: LinkConfig,
+    kind: InitKind,
+    target: Target,
+    address_byte: Option<u8>,
+    sync: Option<u8>,
+    kw1: u8,
+    kw2: u8,
+    address_complement: Option<u8>,
+    keywords_match: Option<bool>,
 }
 
 impl InitOutcome {
+    /// The init kind that ran.
+    pub fn kind(&self) -> InitKind {
+        self.kind
+    }
+
+    /// The config the init ran with.
+    pub fn config(&self) -> &LinkConfig {
+        &self.cfg
+    }
+
+    /// The ECU the init woke: ISO8/KWP from the init kind, address derived from the 5-baud wake
+    /// byte or the StartCommunication header target.
+    pub fn target(&self) -> Target {
+        self.target
+    }
+
+    /// Byte bit-banged at 5 baud (None for fast init).
+    pub fn address_byte(&self) -> Option<u8> {
+        self.address_byte
+    }
+
+    /// First byte after the 5-baud address; 0x55 expected, not enforced (None for fast init).
+    pub fn sync(&self) -> Option<u8> {
+        self.sync
+    }
+
     pub fn keywords(&self) -> (u8, u8) {
         (self.kw1, self.kw2)
     }
+
+    /// The ~address byte after ~KW2, logged, not validated (None when there is no handshake).
+    pub fn address_complement(&self) -> Option<u8> {
+        self.address_complement
+    }
+
+    /// Some(true/false) when the config has expected key bytes.
+    pub fn keywords_match(&self) -> Option<bool> {
+        self.keywords_match
+    }
+}
+
+/// The policy target of `cfg` as seen on the wire.
+///
+/// Renault K-line addresses are 7-bit; a byte with bit 7 set is the Multipoint wake byte of
+/// `address & 0x7F` (RE: KWP2000Diag4 Multipoint XOR 0x80), so a declared 0xA6 would wake the
+/// BMT while the policy saw 0xA6. Such addresses are refused. For a 5-baud init the address is
+/// derived back from the byte that is actually bit-banged and must equal the header target.
+fn wire_target(cfg: &LinkConfig, kind: InitKind) -> Result<Target, LinkError> {
+    let address = cfg.ecu_address;
+    if address & consts::MULTIPOINT_ADDRESS_XOR != 0 {
+        return Err(LinkError::AliasedAddress { address });
+    }
+    let derived = match kind {
+        InitKind::KwpFast { .. } => address,
+        InitKind::Iso8FiveBaud | InitKind::KwpFiveBaud { .. } => {
+            cfg.five_baud_address_byte() & !consts::MULTIPOINT_ADDRESS_XOR
+        }
+    };
+    if derived != address {
+        return Err(LinkError::AliasedAddress { address });
+    }
+    Ok(Target {
+        protocol: if kind.is_iso8() {
+            Protocol::Iso8
+        } else {
+            Protocol::Kwp
+        },
+        ecu_address: derived,
+    })
 }
 
 fn keywords_match(cfg: &LinkConfig, kw: (u8, u8)) -> Result<Option<bool>, LinkError> {
@@ -49,7 +117,7 @@ fn keywords_match(cfg: &LinkConfig, kw: (u8, u8)) -> Result<Option<bool>, LinkEr
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum FbState {
     StartBit,
     Keywords,
@@ -71,10 +139,13 @@ enum FbState {
 /// 200 ms each (0 = break, 1 = idle), release 100 ms (stop bit), DTR high, flush RX, read
 /// `55 KW1 KW2` within KW2Timeout + 100 ms. KWP only: wait KW2 delay, send ~KW2, read
 /// `[echo, ~address]`. Then wait FirstRequest.
-#[derive(Debug, Clone)]
+///
+/// Not `Clone` (security review M2 finding 2).
+#[derive(Debug)]
 pub struct FiveBaudInit {
     cfg: LinkConfig,
     t: KTiming,
+    target: Target,
     address_byte: u8,
     handshake: bool,
     seq: Seq,
@@ -90,9 +161,11 @@ impl FiveBaudInit {
             InitKind::KwpFiveBaud { .. } => true,
             InitKind::KwpFast { .. } => return Err(LinkError::WrongInitKind),
         };
+        let target = wire_target(cfg, t.init)?;
         Ok(FiveBaudInit {
             cfg: cfg.clone(),
             t,
+            target,
             address_byte: cfg.five_baud_address_byte(),
             handshake,
             seq: Seq::default(),
@@ -151,7 +224,10 @@ impl FiveBaudInit {
         if self.seq.has_queued() {
             return self.next();
         }
-        let window = self.t.kw2_read_window_ms();
+        let window = self
+            .cfg
+            .kw_window_ms
+            .unwrap_or_else(|| self.t.kw2_read_window_ms());
         let state = core::mem::replace(&mut self.state, FbState::Finished);
         match (state, ev) {
             (FbState::StartBit, Event::BreakLoopbackSeen(false)) => {
@@ -191,7 +267,7 @@ impl FiveBaudInit {
                 if self.handshake {
                     self.seq.sleep(self.t.kw2_delay_ms);
                     self.seq.push(Action::Write {
-                        bytes: vec![!kw2],
+                        frame: Frame::new(vec![!kw2]),
                         inter_byte_ms: 0,
                     });
                     self.seq.push(Action::Read {
@@ -224,13 +300,13 @@ impl FiveBaudInit {
                     Event::ReadTimeout(b) => (false, b),
                     _ => unreachable!(),
                 };
-                if let Some(&echo) = rx.first() {
-                    if echo != !kw2 {
-                        return self.fail(LinkError::Collision {
-                            sent: vec![!kw2],
-                            echo: rx,
-                        });
-                    }
+                // No echo of ~KW2, or a wrong one: collision (RE: IOTBD32V3 FUN_100014f0 returns
+                // 0x3ED when the echo count is 0).
+                if rx.first() != Some(&!kw2) {
+                    return self.fail(LinkError::Collision {
+                        sent: vec![!kw2],
+                        echo: rx,
+                    });
                 }
                 if !complete {
                     return self.fail(LinkError::NoAddressComplement { received: rx });
@@ -252,7 +328,9 @@ impl FiveBaudInit {
         keywords_match: Option<bool>,
     ) -> InitOutcome {
         InitOutcome {
+            cfg: self.cfg.clone(),
             kind: self.t.init,
+            target: self.target,
             address_byte: Some(self.address_byte),
             sync: Some(sync),
             kw1,
@@ -263,19 +341,25 @@ impl FiveBaudInit {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum FastState {
     Pattern,
     Exchange(Exchange),
+    /// FirstRequest wait after StartCommunication.
+    Ready(InitOutcome),
     Finished,
 }
 
 /// KWP fast init: [idle] DTR high, 1 ms, break 25 ms, idle 25 ms, then StartCommunication
-/// `81 tgt F1 81 cs` and its `C1 KW1 KW2` reply.
-#[derive(Debug, Clone)]
+/// `81 tgt F1 81 cs` and its `C1 KW1 KW2` reply, then wait FirstRequest (RE: IOTBD32V3 worker
+/// FUN_100015a0 sleeps FirstRequestDelay after StartCommunication, before the first frame).
+///
+/// Not `Clone` (security review M2 finding 2).
+#[derive(Debug)]
 pub struct FastInit {
     cfg: LinkConfig,
     t: KTiming,
+    target: Target,
     seq: Seq,
     state: FastState,
 }
@@ -286,9 +370,11 @@ impl FastInit {
         if !matches!(t.init, InitKind::KwpFast { .. }) {
             return Err(LinkError::WrongInitKind);
         }
+        let target = wire_target(cfg, t.init)?;
         Ok(FastInit {
             cfg: cfg.clone(),
             t,
+            target,
             seq: Seq::default(),
             state: FastState::Pattern,
         })
@@ -298,7 +384,7 @@ impl FastInit {
     /// byte (RE: KWP2000Diag4 LenInFmt default true).
     pub fn framing(&self) -> Framing {
         Framing::Kwp(KwpHeader {
-            target: self.cfg.ecu_address,
+            target: self.target.ecu_address,
             source: self.cfg.tool_address,
             length_in_format: true,
         })
@@ -331,14 +417,8 @@ impl FastInit {
                     self.state = FastState::Pattern;
                     return Step::Act(a);
                 }
-                let target = Target {
-                    protocol: Protocol::Kwp,
-                    ecu_address: self.cfg.ecu_address,
-                };
-                let permit = match safety::check(&target, &[START_COMMUNICATION]) {
-                    Ok(p) => p,
-                    Err(d) => return self.fail(d.into()),
-                };
+                let permit =
+                    safety::protocol_permit(&self.target, ProtocolFrame::StartCommunication);
                 let t = &self.t;
                 let params = ExchangeParams {
                     gap_ms: 0,
@@ -366,21 +446,36 @@ impl FastInit {
                     if p.len() >= 3 && p[0] == START_COMMUNICATION_OK =>
                 {
                     let kw = (p[1], p[2]);
-                    match keywords_match(&self.cfg, kw) {
-                        Ok(m) => Step::Done(InitOutcome {
-                            kind: self.t.init,
-                            address_byte: None,
-                            sync: None,
-                            kw1: kw.0,
-                            kw2: kw.1,
-                            address_complement: None,
-                            keywords_match: m,
-                        }),
-                        Err(e) => self.fail(e),
+                    let m = match keywords_match(&self.cfg, kw) {
+                        Ok(m) => m,
+                        Err(e) => return self.fail(e),
+                    };
+                    let outcome = InitOutcome {
+                        cfg: self.cfg.clone(),
+                        kind: self.t.init,
+                        target: self.target,
+                        address_byte: None,
+                        sync: None,
+                        kw1: kw.0,
+                        kw2: kw.1,
+                        address_complement: None,
+                        keywords_match: m,
+                    };
+                    self.seq.sleep(self.t.first_request_ms);
+                    match self.seq.emit() {
+                        Some(a) => {
+                            self.state = FastState::Ready(outcome);
+                            Step::Act(a)
+                        }
+                        None => Step::Done(outcome),
                     }
                 }
                 Step::Done(Some(r)) => self.fail(LinkError::UnexpectedStartReply(r)),
                 Step::Done(None) => self.fail(LinkError::NoReply),
+            },
+            FastState::Ready(outcome) => match self.seq.accept(&ev) {
+                Ok(()) => Step::Done(outcome),
+                Err(e) => self.fail(e),
             },
         }
     }

@@ -21,6 +21,7 @@ pub mod frame;
 pub mod init;
 pub mod io;
 pub mod safety;
+pub mod scan;
 mod seq;
 pub mod session;
 #[cfg(feature = "spec")]
@@ -28,5 +29,112 @@ pub mod spec;
 pub mod timing;
 
 pub use error::LinkError;
+
+/// Compile-time regressions for security review M2 (doctests only, no items).
+///
+/// Control: the types below exist under these paths and the trait check compiles for a `Clone`
+/// type, so each `compile_fail` below fails for the reason it names, not for a typo.
+///
+/// ```
+/// fn assert_clone<T: Clone>() {}
+/// assert_clone::<clio_core::LinkConfig>();
+/// fn _named(
+///     _: clio_core::session::Session,
+///     _: clio_core::init::FiveBaudInit,
+///     _: clio_core::init::FastInit,
+///     _: clio_core::init::InitOutcome,
+///     _: clio_core::io::Frame,
+///     _: clio_core::Action,
+/// ) {
+/// }
+/// fn _bytes(f: &clio_core::io::Frame) -> &[u8] {
+///     f.bytes()
+/// }
+/// ```
+///
+/// F2: `Session` is not `Clone` (one approval, one write).
+/// ```compile_fail,E0277
+/// fn assert_clone<T: Clone>() {}
+/// assert_clone::<clio_core::session::Session>();
+/// ```
+/// F2: `FiveBaudInit` is not `Clone`.
+/// ```compile_fail,E0277
+/// fn assert_clone<T: Clone>() {}
+/// assert_clone::<clio_core::init::FiveBaudInit>();
+/// ```
+/// F2: `FastInit` is not `Clone` (it holds the StartCommunication exchange).
+/// ```compile_fail,E0277
+/// fn assert_clone<T: Clone>() {}
+/// assert_clone::<clio_core::init::FastInit>();
+/// ```
+/// F2/F3: `InitOutcome` is not `Clone`: one init, one session.
+/// ```compile_fail,E0277
+/// fn assert_clone<T: Clone>() {}
+/// assert_clone::<clio_core::init::InitOutcome>();
+/// ```
+/// F2/F4: an `Action` (and its `Frame`) cannot be duplicated.
+/// ```compile_fail,E0277
+/// fn assert_clone<T: Clone>() {}
+/// assert_clone::<clio_core::Action>();
+/// ```
+/// ```compile_fail,E0277
+/// fn assert_clone<T: Clone>() {}
+/// assert_clone::<clio_core::io::Frame>();
+/// ```
+/// F3b/F3c: an `InitOutcome` cannot be fabricated by a caller.
+/// ```compile_fail,E0451
+/// let _ = clio_core::init::InitOutcome {
+///     cfg: clio_core::LinkConfig::new(0x26, clio_core::KTiming::default()),
+///     kind: clio_core::InitKind::Iso8FiveBaud,
+///     target: clio_core::safety::Target {
+///         protocol: clio_core::safety::Protocol::Iso8,
+///         ecu_address: 0x26,
+///     },
+///     address_byte: None,
+///     sync: None,
+///     kw1: 0xD0,
+///     kw2: 0x8F,
+///     address_complement: None,
+///     keywords_match: None,
+/// };
+/// ```
+/// F4: a transport cannot build a frame of its own, by literal ...
+/// ```compile_fail,E0451
+/// let _ = clio_core::io::Frame { bytes: vec![0x82, 0x26, 0xF1, 0x27, 0x01, 0xC1] };
+/// ```
+/// ... or by the crate-private constructor.
+/// ```compile_fail,E0624
+/// let _ = clio_core::io::Frame::new(vec![0x27, 0x01]);
+/// ```
+/// F4: a safety `Permit` cannot be fabricated either.
+/// ```compile_fail,E0624
+/// let t = clio_core::safety::Target { protocol: clio_core::safety::Protocol::Kwp, ecu_address: 0x26 };
+/// let _ = clio_core::safety::Permit::new(&[0x27, 0x01], t, clio_core::safety::Tier::Read);
+/// ```
+#[cfg_attr(
+    not(feature = "approved-routines"),
+    doc = "F1: without the `approved-routines` feature there is no approval type at all.\n\
+           ```compile_fail,E0425\n\
+           let _ = clio_core::safety::Approval::confirm;\n\
+           ```"
+)]
+#[cfg_attr(
+    not(feature = "approved-routines"),
+    doc = "Nor a way to ask for one.\n\
+           ```compile_fail,E0599\n\
+           fn f(s: &mut clio_core::session::Session) { let _ = s.service_challenge(&[0x14, 0xFF, 0x00]); }\n\
+           ```"
+)]
+#[cfg_attr(
+    feature = "approved-routines",
+    doc = "F1 (feature on): an `Approval` has no public constructor besides `confirm`.\n\
+           ```compile_fail,E0451\n\
+           let _ = clio_core::safety::Approval { session: 0, request: 0, \
+           target: clio_core::safety::Target { protocol: clio_core::safety::Protocol::Kwp, ecu_address: 0x26 }, \
+           tier: clio_core::safety::Tier::Service, payload: vec![0x31, 0xC7, 0, 0, 0], identification: None, \
+           risk: clio_core::safety::assess(&clio_core::safety::Target { protocol: clio_core::safety::Protocol::Kwp, ecu_address: 0x26 }, &[0x31, 0xC7, 0, 0, 0]).unwrap() };\n\
+           ```"
+)]
+pub mod security_regressions {}
 pub use io::{Action, Event, Step};
 pub use timing::{InitKind, InitVariant, KTiming, LinkConfig};

@@ -6,8 +6,8 @@ use alloc::vec::Vec;
 use crate::echo::{strip_echo, EchoError};
 use crate::error::LinkError;
 use crate::frame::{Framing, Reply, ReplyNeed};
-use crate::io::{Action, Event, Step};
-use crate::safety::Permit;
+use crate::io::{Action, Event, Frame, Step};
+use crate::safety::{Permit, Protocol};
 use crate::seq::Seq;
 
 #[derive(Debug, Clone, Copy)]
@@ -24,7 +24,7 @@ pub(crate) struct ExchangeParams {
     pub reply_optional: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum State {
     Echo { residue_used: bool, rx: Vec<u8> },
     First,
@@ -33,7 +33,8 @@ enum State {
     Finished,
 }
 
-#[derive(Debug, Clone)]
+/// Not `Clone`: a cloned exchange would write its frame twice (security review M2 finding 2).
+#[derive(Debug)]
 pub(crate) struct Exchange {
     framing: Framing,
     frame: Vec<u8>,
@@ -52,6 +53,14 @@ impl Exchange {
         permit: Permit,
         p: ExchangeParams,
     ) -> Result<Exchange, LinkError> {
+        let t = permit.target();
+        let matches = match framing {
+            Framing::Iso8 => t.protocol == Protocol::Iso8,
+            Framing::Kwp(h) => t.protocol == Protocol::Kwp && h.target == t.ecu_address,
+        };
+        if !matches {
+            return Err(LinkError::PermitMismatch);
+        }
         let frame = framing.encode(permit.payload())?;
         Ok(Exchange {
             framing,
@@ -71,7 +80,7 @@ impl Exchange {
         // RE: IOTBD32V3 send routine: purge RX before every transmission.
         self.seq.push(Action::FlushRx);
         self.seq.push(Action::Write {
-            bytes: self.frame.clone(),
+            frame: Frame::new(self.frame.clone()),
             inter_byte_ms: self.p.inter_byte_ms,
         });
         self.read(self.frame.len(), self.p.read_timeout_ms);
@@ -212,5 +221,49 @@ impl Exchange {
         self.state = State::First;
         self.read(1, timeout_ms);
         self.next()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frame::KwpHeader;
+    use crate::safety::{Target, Tier};
+
+    fn params() -> ExchangeParams {
+        ExchangeParams {
+            gap_ms: 0,
+            inter_byte_ms: 0,
+            read_timeout_ms: 300,
+            pending_timeout_ms: 5000,
+            max_pending: 10,
+            reply_optional: false,
+        }
+    }
+
+    #[test]
+    fn permit_must_match_framing() {
+        let kwp_7a = Framing::Kwp(KwpHeader {
+            target: 0x7A,
+            source: 0xF1,
+            length_in_format: true,
+        });
+        let to = |protocol, ecu_address| Target {
+            protocol,
+            ecu_address,
+        };
+        let p = |t| Permit::new(&[0x21, 0xA0], t, Tier::Read);
+        for (framing, target) in [
+            (kwp_7a, to(Protocol::Kwp, 0x26)),
+            (kwp_7a, to(Protocol::Iso8, 0x7A)),
+            (Framing::Iso8, to(Protocol::Kwp, 0x7A)),
+        ] {
+            assert_eq!(
+                Exchange::new(framing, p(target), params()).unwrap_err(),
+                LinkError::PermitMismatch
+            );
+        }
+        assert!(Exchange::new(kwp_7a, p(to(Protocol::Kwp, 0x7A)), params()).is_ok());
+        assert!(Exchange::new(Framing::Iso8, p(to(Protocol::Iso8, 0x7A)), params()).is_ok());
     }
 }

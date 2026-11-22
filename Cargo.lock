@@ -91,6 +91,7 @@ name = "clio-core"
 version = "0.1.0"
 dependencies = [
  "clio-spec",
+ "getrandom",
  "proptest",
  "thiserror",
 ]
