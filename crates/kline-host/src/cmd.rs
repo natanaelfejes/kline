@@ -950,11 +950,16 @@ fn read_one(
         }
     };
     let decoded = defs::decode_reply(o.ecu.def(), payload, &reply);
+    let (alts, alt_human) = alternatives(o, payload, &reply);
+    let mut j = json!({"event": "read", "t_ms": t_ms, "request": hex(payload), "names": names,
+               "reply": hex(&reply), "decoded": defs::decoded_json(&decoded)});
+    if o.ecu.defs.len() > 1 {
+        j["alternatives"] = json!(alts);
+    }
     ctx.out.emit(
-        json!({"event": "read", "t_ms": t_ms, "request": hex(payload), "names": names,
-               "reply": hex(&reply), "decoded": defs::decoded_json(&decoded)}),
+        j,
         format!(
-            "{} -> {}\n{}",
+            "{} -> {}\n{}\n{alt_human}",
             hex_sp(payload),
             hex_sp(&reply),
             defs::decoded_human(&decoded)
@@ -971,6 +976,110 @@ fn read_one(
     Ok(reply)
 }
 
+/// With several candidate definitions loaded (`--ecu bmt` while `BMT_SAGEM.xml` is present):
+/// say once that the choice is open and which one decodes the values.
+fn definition_choice_notice(ctx: &Ctx, o: &Open) {
+    if o.ecu.defs.len() < 2 {
+        return;
+    }
+    let names: Vec<String> = o.ecu.defs.iter().map(defs::def_stem).collect();
+    ctx.out.emit(
+        json!({"event": "definition_choice", "unresolved": true, "candidates": names,
+               "decoded_with": names[0]}),
+        format!(
+            "definition choice unresolved: {}; values below decoded with {} (fine for reads; to choose: {})",
+            names.join(", "),
+            names[0],
+            choose_hint(&o.ecu)
+        ),
+    );
+}
+
+/// `name display unit` of a decoded item, for one-line lists.
+fn item_text(i: &kline_spec::DecodedItem) -> String {
+    let mut t = format!("{} {}", i.name, i.display.as_deref().unwrap_or("-"));
+    if let Some(u) = i.unit.as_deref().filter(|u| !u.is_empty()) {
+        t.push(' ');
+        t.push_str(u);
+    }
+    t
+}
+
+/// The other candidates' decodings of `reply` where they differ from the first one's: the items
+/// (name and shown value) that are not the same in both. JSON per other candidate, and the
+/// human lines (empty when every candidate decodes it alike).
+fn alternatives(o: &Open, payload: &[u8], reply: &[u8]) -> (Vec<Json>, String) {
+    if o.ecu.defs.len() < 2 {
+        return (Vec::new(), String::new());
+    }
+    let items = |def: &kline_spec::EcuDef| -> Vec<kline_spec::DecodedItem> {
+        defs::decode_reply(def, payload, reply)
+            .into_iter()
+            .filter_map(|(_, r)| r.ok())
+            .flatten()
+            .collect()
+    };
+    let key = |i: &kline_spec::DecodedItem| (i.name.trim().to_string(), i.display.clone());
+    let primary = items(o.ecu.def());
+    let mut json_out = Vec::new();
+    let mut lines = Vec::new();
+    let mut primary_diff: Vec<&kline_spec::DecodedItem> = Vec::new();
+    for d in &o.ecu.defs[1..] {
+        let other = items(&d.def);
+        if other.is_empty() {
+            continue;
+        }
+        let pk: Vec<_> = primary.iter().map(key).collect();
+        let ok: Vec<_> = other.iter().map(key).collect();
+        let theirs: Vec<&kline_spec::DecodedItem> =
+            other.iter().filter(|i| !pk.contains(&key(i))).collect();
+        for i in primary.iter().filter(|i| !ok.contains(&key(i))) {
+            if !primary_diff.iter().any(|p| key(p) == key(i)) {
+                primary_diff.push(i);
+            }
+        }
+        if theirs.is_empty() && primary_diff.is_empty() {
+            continue;
+        }
+        json_out.push(json!({"definition": defs::def_stem(d),
+                             "differing": theirs.iter().map(|i| defs::item_json(i)).collect::<Vec<_>>()}));
+        lines.push(format!(
+            "    {}: {}",
+            defs::def_stem(d),
+            if theirs.is_empty() {
+                "-".to_string()
+            } else {
+                theirs
+                    .iter()
+                    .map(|i| item_text(i))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            }
+        ));
+    }
+    if lines.is_empty() {
+        return (json_out, String::new());
+    }
+    let mut human = format!(
+        "  decoded differently by the candidates:\n    {}: {}",
+        defs::def_stem(o.ecu.primary()),
+        if primary_diff.is_empty() {
+            "-".to_string()
+        } else {
+            primary_diff
+                .iter()
+                .map(|i| item_text(i))
+                .collect::<Vec<_>>()
+                .join("; ")
+        }
+    );
+    for l in lines {
+        human.push('\n');
+        human.push_str(&l);
+    }
+    (json_out, human)
+}
+
 /// Refuse a non-read before any init (kline-core refuses again when it is sent).
 fn precheck_read(ecu: &Ecu, payload: &[u8]) -> Result<(), CliError> {
     let t = ecu.target()?;
@@ -984,6 +1093,7 @@ pub fn read(ctx: &mut Ctx, a: &ReadArgs) -> Result<(), CliError> {
     let r = defs::resolve_request_with(ecu.def(), &a.request, &a.set)?;
     precheck_read(&ecu, &r.payload)?;
     with_session(ctx, &a.link, "read", |ctx, o| {
+        definition_choice_notice(ctx, o);
         read_one(ctx, o, &r.payload, &r.names).map(drop)
     })
 }
@@ -1187,6 +1297,7 @@ pub fn live(ctx: &mut Ctx, a: &LiveArgs) -> Result<(), CliError> {
     let period = (1000.0 / a.rate) as u64;
     let policy = a.link.retry_policy();
     with_session(ctx, &a.link, "live", |ctx, o| {
+        definition_choice_notice(ctx, o);
         let mut cycle = 0u64;
         // DDT2000 screen refresh (RE: DdtDiagScrXml 0x5204ce50): only a cycle in which EVERY
         // request failed counts; it is retried after 400 ms, at most 3 times, then "Fatal error,
@@ -1202,15 +1313,21 @@ pub fn live(ctx: &mut Ctx, a: &LiveArgs) -> Result<(), CliError> {
                         Ok(reply) => {
                             any_ok = true;
                             let decoded = defs::decode_reply(o.ecu.def(), &f.payload, reply);
-                            ctx.out.emit(
-                                json!({"event": "live", "cycle": cycle, "t_ms": t_ms,
+                            let (alts, alt_human) = alternatives(o, &f.payload, reply);
+                            let mut j = json!({"event": "live", "cycle": cycle, "t_ms": t_ms,
                                        "request": hex(&f.payload), "reply": hex(reply),
-                                       "decoded": defs::decoded_json(&decoded)}),
+                                       "decoded": defs::decoded_json(&decoded)});
+                            if o.ecu.defs.len() > 1 {
+                                j["alternatives"] = json!(alts);
+                            }
+                            ctx.out.emit(
+                                j,
                                 format!(
-                                    "#{cycle} t={t_ms} ms {}\n{}",
+                                    "#{cycle} t={t_ms} ms {}\n{}\n{alt_human}",
                                     hex_sp(&f.payload),
                                     defs::decoded_human(&decoded)
-                                ),
+                                )
+                                .trim_end(),
                             );
                         }
                         Err(e) => {

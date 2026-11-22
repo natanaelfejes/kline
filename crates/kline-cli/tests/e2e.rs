@@ -1662,3 +1662,56 @@ fn ambiguous_ident_explains_the_impact_and_names_the_differing_bits() {
     assert_eq!(r.code, 0);
     assert!(!r.stdout.contains("AMBIGUOUS"), "{}", r.stdout);
 }
+
+#[test]
+fn read_and_live_with_an_unresolved_bmt_choice_show_both_decodings_where_they_differ() {
+    let defs = differing_bmt_defs();
+    let (r, j) = run(
+        bmt_ecu(),
+        &["--defs", &defs, "read", "--ecu", "bmt", "21A1"],
+    );
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    for needle in [
+        "definition choice unresolved: BMT_X65_ph1_p, BMT_SAGEM; values below decoded with BMT_X65_ph1_p",
+        "Option A  1",
+        "decoded differently by the candidates:",
+        "    BMT_X65_ph1_p: Option A 1",
+        "    BMT_SAGEM: Option B 1; Option C 0",
+    ] {
+        assert!(r.stdout.contains(needle), "missing {needle:?} in\n{}", r.stdout);
+    }
+    j.assert_no_writes();
+    // Same layout in both: no second decoding.
+    let (r, _) = run(
+        bmt_ecu(),
+        &["--defs", &defs, "read", "--ecu", "bmt", "21A3"],
+    );
+    assert_eq!(r.code, 0);
+    assert!(
+        r.stdout.contains("definition choice unresolved"),
+        "{}",
+        r.stdout
+    );
+    assert!(!r.stdout.contains("decoded differently"), "{}", r.stdout);
+    // live, and JSON.
+    let (r, _) = run(
+        bmt_ecu(),
+        &[
+            "--json", "--defs", &defs, "live", "--ecu", "bmt", "--frames", "21A1", "--count", "1",
+        ],
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let c = &r.event("definition_choice")[0];
+    assert_eq!(c["unresolved"], true);
+    assert_eq!(c["decoded_with"], "BMT_X65_ph1_p");
+    let alt = &r.event("live")[0]["alternatives"][0];
+    assert_eq!(alt["definition"], "BMT_SAGEM");
+    assert_eq!(alt["differing"][0]["name"], "Option B");
+    // Named definition: nothing about a choice.
+    let (r, _) = run(
+        bmt_ecu(),
+        &["--defs", &defs, "read", "--ecu", "bmt-ph1p", "21A1"],
+    );
+    assert_eq!(r.code, 0);
+    assert!(!r.stdout.contains("unresolved"), "{}", r.stdout);
+}
