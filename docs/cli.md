@@ -66,7 +66,7 @@ These options apply to every command that talks to an ECU, and to `risk`, `prepa
 | `--xml PATH` | any DDT2000 ECU definition; repeat for `ident` candidates (the first one sets up the link) |
 | `--address 0xNN` | overrides the definition's `<Function Address>` (also the safety target) |
 | `--vehicle PATH` | vehicle addressing file (e.g. `vehicles/x65_addressing.xml`): function name, protocols, tool address |
-| `--variant auto\|single\|multi\|fast` | init variant ([protocol.md](protocol.md#init-variants-single-ecu-multipoint-fast-init)). `auto` tries FastInit, SingleEcu (DDT2000's detection order), then MultiEcu, skips variants that would run the identical init, and logs each attempt (`init_attempt` events with `round`) |
+| `--variant auto\|single\|multi\|fast` | init variant ([protocol.md](protocol.md#init-variants-single-ecu-multipoint-fast-init)). `auto` tries FastInit, SingleEcu (DDT2000's detection order), then MultiEcu, skips variants that would run the identical init, and logs each attempt (`init_attempt` events with `round`). In human output a failed attempt that another one follows is information, not an error: `init fast   fast init not answered (normal for many Renault K-line ECUs), trying 5-baud byte 7A`; the trace has `INIT attempt fast (round 1) failed: no reply from ECU` |
 | `--init-attempts N` | rounds over the variants, 500 ms apart (default 3, DDT2000) |
 | `--nrc-tries N` | `ident`: tries of a request answered `7F xx 21`/`23` (default 10; 200/500 ms) |
 | `--periodic-tester-present` | `3E` every 2000 ms with a required reply (DDT2000 screen option) instead of after 3000 ms idle |

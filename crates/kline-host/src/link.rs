@@ -464,6 +464,15 @@ pub fn connect(
             address_byte,
             error: r.as_ref().err().map(|e| e.to_string()),
         };
+        if let Some(e) = &a.error {
+            link.trace.line(
+                link.t.now_us(),
+                format!(
+                    "INIT attempt {} (round {round}) failed: {e}",
+                    variant_label(v)
+                ),
+            );
+        }
         on_attempt(&a);
         attempts.push(a);
         if let Ok(o) = r {

@@ -1421,3 +1421,47 @@ fn human_output_is_saved_next_to_the_capture_and_ends_with_done() {
     let c = &r.event("capture")[0];
     assert!(c["out"].as_str().unwrap().ends_with(".out.txt"), "{c}");
 }
+
+#[test]
+fn an_unanswered_fast_init_before_a_working_5_baud_reads_as_information() {
+    let (r, _) = run(
+        sirius_with(AddressAccept::Plain, false),
+        &["--trace", "connect", "--xml", &xml("sirius_cli.xml")],
+    );
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains(
+            "init fast   fast init not answered (normal for many Renault K-line ECUs), trying 5-baud byte 7A"
+        ),
+        "{}",
+        r.stdout
+    );
+    assert!(r.stdout.contains("init single byte 7A: ok"), "{}", r.stdout);
+    assert!(!r.stdout.contains("no reply from ECU"), "{}", r.stdout);
+    // Full detail in the trace.
+    assert!(
+        r.stderr
+            .contains("INIT attempt fast (round 1) failed: no reply from ECU"),
+        "{}",
+        r.stderr
+    );
+    // A failing 5-baud before multi names the next attempt.
+    let (r, _) = run(
+        sirius_with(AddressAccept::Xor80, false),
+        &["connect", "--xml", &xml("sirius_cli.xml")],
+    );
+    assert_eq!(r.code, 0);
+    assert!(
+        r.stdout.contains(
+            "init single byte 7A: no keywords received (got nothing), trying 5-baud byte FA"
+        ),
+        "{}",
+        r.stdout
+    );
+    // JSON keeps the raw error.
+    let (r, _) = run(
+        sirius_with(AddressAccept::Plain, false),
+        &["--json", "connect", "--xml", &xml("sirius_cli.xml")],
+    );
+    assert_eq!(r.event("init_attempt")[0]["error"], "no reply from ECU");
+}

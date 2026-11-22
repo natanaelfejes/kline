@@ -390,27 +390,61 @@ pub fn open_session(
     let mut link = Link::new(t, tracer, Some(cap));
     let variants = link::variants(&cfg, args.variant);
     let out = ctx.out.clone();
+    // The whole schedule, so a failed attempt can say what comes next.
+    let schedule: Vec<(u8, kline_core::InitVariant)> = (1..=policy.init_attempts.max(1))
+        .flat_map(|r| variants.iter().map(move |&v| (r, v)))
+        .collect();
+    let address_of = |v: kline_core::InitVariant| {
+        let mut c = cfg.clone();
+        c.variant = v;
+        (!matches!(c.init_kind(), InitKind::KwpFast { .. })).then(|| c.five_baud_address_byte())
+    };
+    let what = |b: Option<u8>| {
+        b.map(|b| format!("byte {b:02X}"))
+            .unwrap_or_else(|| "fast init".into())
+    };
     let (mut session, connected) = link::connect(&mut link, &cfg, &variants, &policy, &mut |a| {
-        out.emit(
-            a.to_json(),
+        let retry = if a.round > 1 {
             format!(
-                "init {:<6} {}{}: {}",
-                link::variant_label(a.variant),
-                if a.round > 1 {
-                    format!(
-                        "retry {}/{} ",
-                        a.round - 1,
-                        policy.init_attempts.saturating_sub(1)
-                    )
+                "retry {}/{} ",
+                a.round - 1,
+                policy.init_attempts.saturating_sub(1)
+            )
+        } else {
+            String::new()
+        };
+        let next = schedule
+            .iter()
+            .position(|&(r, v)| r == a.round && v == a.variant)
+            .and_then(|i| schedule.get(i + 1));
+        let head = format!("init {:<6} {retry}", link::variant_label(a.variant));
+        let human = match &a.error {
+            None => format!("{head}{}: ok", what(a.address_byte)),
+            // Not the last attempt: information, not an error (the next variant may work).
+            Some(e) => {
+                let then = match next {
+                    Some(&(r, v)) if r == a.round => match address_of(v) {
+                        Some(b) => format!("trying 5-baud byte {b:02X}"),
+                        None => "trying fast init".into(),
+                    },
+                    Some(&(r, _)) => format!(
+                        "next round {r}/{} in {} ms",
+                        policy.init_attempts, policy.init_retry_ms
+                    ),
+                    None => String::new(),
+                };
+                if next.is_none() {
+                    format!("{head}{}: {e}", what(a.address_byte))
+                } else if a.address_byte.is_none()
+                    && *e == kline_core::LinkError::NoReply.to_string()
+                {
+                    format!("{head}fast init not answered (normal for many Renault K-line ECUs), {then}")
                 } else {
-                    String::new()
-                },
-                a.address_byte
-                    .map(|b| format!("byte {b:02X}"))
-                    .unwrap_or_else(|| "fast init".into()),
-                a.error.as_deref().unwrap_or("ok")
-            ),
-        )
+                    format!("{head}{}: {e}, {then}", what(a.address_byte))
+                }
+            }
+        };
+        out.emit(a.to_json(), human)
     })?;
     if connected.break_loopback == Some(false) {
         ctx.out.emit(
