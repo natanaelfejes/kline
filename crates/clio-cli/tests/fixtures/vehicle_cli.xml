@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Hand-written clio-cli vehicle addressing fixture (invented). -->
+<Functions>
+<Tool Address="241"/>
+<ProtocolList>
+<Protocol Code="4" InitMode="2" MultiPoint="0" Name="KWP2000 FastInit MonoPoint"/>
+</ProtocolList>
+<Function Address="40" Name="ABS">
+<Name xml:lang="en">Anti-lock brakes</Name>
+<ProtocolList><Protocol Code="4" InitMode="2" MultiPoint="0" Name="KWP2000 FastInit MonoPoint"/></ProtocolList>
+</Function>
+</Functions>

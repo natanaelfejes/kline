@@ -261,9 +261,10 @@ Without it no approval type or challenge method exists, so a library user, an MC
 human, never execute.
 
 Only the interactive `clio` CLI may enable the feature. It must read the confirmation from
-`/dev/tty` (not stdin, so a pipe cannot answer) and never offer approvals with `--json`. Any
-future `clio-mcp` crate must depend on `clio-core` without it; a CI check of
-`cargo tree -e features -i clio-core` for that crate is to be added when it exists.
+`/dev/tty` (not stdin, so a pipe cannot answer) and never offer approvals with `--json`. `clio-agent`
+(the AI binary) depends on `clio-core` without it; `crates/clio-agent/tests/agent.rs` runs
+`cargo tree -p clio-agent -e features` and fails if the feature or `clio-cli` appears. Any future
+`clio-mcp` crate needs the same check (docs/cli.md).
 
 Flow: `Session::service_challenge(payload)` / `config_write_challenge(payload,
 identification)` / `expert_challenge(payload)` returns an `ApprovalChallenge` with the exact

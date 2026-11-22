@@ -1,6 +1,13 @@
 [workspace]
 resolver = "2"
-members = ["crates/clio-spec", "crates/clio-core", "crates/clio-sim"]
+members = [
+    "crates/clio-spec",
+    "crates/clio-core",
+    "crates/clio-sim",
+    "crates/clio-host",
+    "crates/clio-cli",
+    "crates/clio-agent",
+]
 
 [workspace.package]
 edition = "2021"

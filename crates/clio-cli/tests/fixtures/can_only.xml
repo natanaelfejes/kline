@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Hand-written clio-cli fixture: a CAN-only definition (invented). -->
+<Target Name="CLI fixture CAN" xmlns="http://www-diag.renault.com/2002/ECU">
+<Function Name="Gateway" Address="122"/>
+<CAN BaudRate="500000"><SendId><CANId Value="2016"/></SendId><ReceiveId><CANId Value="2024"/></ReceiveId></CAN>
+<Datas></Datas>
+<Requests Endian="Big"></Requests>
+</Target>

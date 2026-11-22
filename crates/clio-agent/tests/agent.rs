@@ -1,0 +1,160 @@
+//! clio-agent: built without approvals, and unable to send any non-read (checked on the
+//! simulator's write log over a real pty session).
+
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+
+use clio_sim::bus::{Bus, BusConfig};
+use clio_sim::ecu::{EcuProfile, SpecEcu};
+use clio_sim::journal::Journal;
+use clio_sim::pty::PtySim;
+use clio_sim::scenario::Scenario;
+use clio_sim::timing::Tolerance;
+use clio_spec::EcuDef;
+
+fn fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../clio-cli/tests/fixtures")
+        .join(name)
+}
+
+/// `cargo tree -p clio-agent -e features`: clio-core must resolve without `approved-routines`.
+#[test]
+fn agent_is_built_without_approved_routines() {
+    let ws = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let out = Command::new(cargo)
+        .args([
+            "tree",
+            "--offline",
+            "-p",
+            "clio-agent",
+            "-e",
+            "features",
+            "--manifest-path",
+        ])
+        .arg(&ws)
+        .output()
+        .expect("run cargo tree");
+    let tree = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(tree.contains("clio-core"), "tree lists clio-core:\n{tree}");
+    assert!(
+        !tree.contains("approved-routines"),
+        "clio-agent resolves clio-core with approved-routines:\n{tree}"
+    );
+    assert!(
+        !tree.contains("clio-cli"),
+        "clio-agent must not depend on clio-cli:\n{tree}"
+    );
+}
+
+fn sim(tag: &str) -> Option<(PtySim, Journal)> {
+    let def = EcuDef::from_xml_bytes(&std::fs::read(fixture("sirius_cli.xml")).unwrap()).unwrap();
+    let mut p = EcuProfile::sirius32();
+    p.tolerance = Tolerance::lenient();
+    let sc = Scenario::new().number("Engine speed", 850.0);
+    let ecu = SpecEcu::new(p, def, sc).unwrap();
+    let j = ecu.journal();
+    let bus = Bus::new(ecu, BusConfig::default(), Tolerance::lenient(), j.clone());
+    let ctl = std::env::temp_dir().join(format!("clio-agent-{tag}-{}.ctl", std::process::id()));
+    let _ = std::fs::remove_file(&ctl);
+    match PtySim::spawn(bus, &ctl) {
+        Ok(s) => Some((s, j)),
+        Err(e) => {
+            eprintln!("SKIPPED: pty not available here ({e})");
+            None
+        }
+    }
+}
+
+fn agent(sim: &PtySim, args: &[&str]) -> (Option<i32>, Vec<serde_json::Value>, String) {
+    let caps = std::env::temp_dir().join(format!("clio-agent-caps-{}", std::process::id()));
+    let o = Command::new(env!("CARGO_BIN_EXE_clio-agent"))
+        .arg("--port")
+        .arg(sim.tty_path())
+        .arg("--sim-control")
+        .arg(sim.control_path())
+        .arg("--capture-dir")
+        .arg(&caps)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&o.stdout).to_string();
+    let ev = out
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("not JSON {l:?}: {e}")))
+        .collect();
+    (
+        o.status.code(),
+        ev,
+        String::from_utf8_lossy(&o.stderr).to_string(),
+    )
+}
+
+#[test]
+fn agent_reads_but_cannot_send_any_non_read() {
+    let Some((sim, j)) = sim("nonread") else {
+        return;
+    };
+    let x = fixture("sirius_cli.xml").display().to_string();
+    // A read works end to end (JSON without --json: the agent always emits JSON lines).
+    let (code, ev, err) = agent(&sim, &["read", "--xml", &x, "21A9"]);
+    assert_eq!(code, Some(0), "{ev:?}\n{err}");
+    assert!(ev.iter().any(|e| e["event"] == "read"));
+    for req in [
+        "11FF",
+        "Reset learning",
+        "140000",
+        "3BD01005",
+        "31A0A0",
+        "31A400",
+        "2701",
+        "1085",
+        "82",
+        "3E",
+    ] {
+        let (code, ev, _) = agent(&sim, &["read", "--xml", &x, req]);
+        let ok_tp = req == "3E";
+        if ok_tp {
+            // 3E is a Tier 0 read; the ECU's TesterPresent reply is fine.
+            assert_eq!(code, Some(0), "{req}: {ev:?}");
+        } else {
+            assert_eq!(code, Some(7), "{req}: {ev:?}");
+        }
+    }
+    // There is no exec in this binary.
+    let (code, _, _) = agent(&sim, &["exec", "--xml", &x, "11FF"]);
+    assert_eq!(code, Some(2));
+    j.assert_no_writes();
+}
+
+#[test]
+fn prepare_prints_risk_and_the_exact_human_command() {
+    let Some((sim, j)) = sim("prepare") else {
+        return;
+    };
+    let x = fixture("sirius_cli.xml").display().to_string();
+    let (code, ev, _) = agent(&sim, &["prepare", "--xml", &x, "Reset learning"]);
+    assert_eq!(code, Some(0), "{ev:?}");
+    let p = &ev[0];
+    assert_eq!(p["event"], "prepare");
+    assert_eq!(p["risk"]["tier_number"], 1);
+    assert_eq!(
+        p["risk"]["warnings"],
+        serde_json::json!(["ERASES_LEARNED_VALUES"])
+    );
+    let cmd = p["command"].as_str().unwrap();
+    assert!(cmd.starts_with("clio --port "), "{cmd}");
+    assert!(cmd.ends_with(&format!(" exec --xml {x} 11FF")), "{cmd}");
+    // Forbidden: no command at all.
+    let (code, ev, _) = agent(&sim, &["prepare", "--xml", &x, "2701"]);
+    assert_eq!(code, Some(7));
+    assert_eq!(ev[0]["command"], serde_json::Value::Null);
+    j.assert_no_writes();
+}
