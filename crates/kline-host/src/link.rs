@@ -528,21 +528,53 @@ pub fn positive(o: &SessionOutcome) -> Result<&[u8], CliError> {
     }
 }
 
-/// KWP2000 negative response code names (ISO 14230-3).
+/// KWP2000 negative response code names (ISO 14230-3), plus the codes DDT2000's errors.xml
+/// names (`kwpcode`, step 7b FIX-2).
 pub fn nrc_name(nrc: u8) -> &'static str {
     match nrc {
         0x10 => "generalReject",
         0x11 => "serviceNotSupported",
         0x12 => "subFunctionNotSupported-invalidFormat",
+        0x13 => "incorrectMessageLengthOrInvalidFormat",
         0x21 => "busy-repeatRequest",
         0x22 => "conditionsNotCorrect",
         0x23 => "routineNotComplete",
+        0x26 => "failurePreventsExecutionOfRequestedAction",
         0x31 => "requestOutOfRange",
         0x33 => "securityAccessDenied",
         0x35 => "invalidKey",
         0x36 => "exceedNumberOfAttempts",
+        0x72 => "generalProgrammingFailure",
         0x78 => "responsePending",
+        0x7E => "subFunctionNotSupportedInActiveSession",
+        0x7F => "serviceNotSupportedInActiveSession",
         0x80 => "serviceNotSupportedInActiveDiagnosticSession",
+        // DDT2000's name (errors.xml E_KWP_87); not an ISO 14230 code.
+        0x87 => "errorDuringWriting",
         _ => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod nrc_tests {
+    use super::nrc_name;
+
+    /// Step 7b FIX-2: the NRC names DDT2000's errors.xml knows (`kwpcode`).
+    #[test]
+    fn nrc_names_include_the_ddt2000_codes() {
+        for (nrc, name) in [
+            (0x13, "incorrectMessageLengthOrInvalidFormat"),
+            (0x26, "failurePreventsExecutionOfRequestedAction"),
+            (0x72, "generalProgrammingFailure"),
+            (0x7E, "subFunctionNotSupportedInActiveSession"),
+            (0x7F, "serviceNotSupportedInActiveSession"),
+            (0x87, "errorDuringWriting"),
+            (0x21, "busy-repeatRequest"),
+            (0x78, "responsePending"),
+            (0x80, "serviceNotSupportedInActiveDiagnosticSession"),
+            (0x99, "unknown"),
+        ] {
+            assert_eq!(nrc_name(nrc), name, "{nrc:02X}");
+        }
     }
 }
