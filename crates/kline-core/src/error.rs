@@ -13,7 +13,7 @@ pub enum LinkError {
     #[error("K line inactive")]
     KLineInactive,
     /// Fewer than 3 bytes (0x55 KW1 KW2) after the 5-baud address (0x3E8).
-    #[error("no keywords received (got {received:02X?})")]
+    #[error("no keywords received (got {})", HexSp(received))]
     NoKeywords { received: Vec<u8> },
     /// Key bytes differ from the definition and `reject_keyword_mismatch` is set.
     #[error("keywords {received:02X?} differ from expected {expected:02X?}")]
@@ -22,16 +22,16 @@ pub enum LinkError {
         received: (u8, u8),
     },
     /// No ~address byte after ~KW2 (0x3E9).
-    #[error("address complement not received (got {received:02X?})")]
+    #[error("address complement not received (got {})", HexSp(received))]
     NoAddressComplement { received: Vec<u8> },
     /// Echo differs from what was sent, or stops short (0x3ED).
-    #[error("data collision on K line: sent {sent:02X?}, echo {echo:02X?}")]
+    #[error("data collision on K line: sent {}, echo {}", HexSp(sent), HexSp(echo))]
     Collision { sent: Vec<u8>, echo: Vec<u8> },
     /// No reply byte within RequestToReply timeout (DDT2000 0x7D0).
     #[error("no reply from ECU")]
     NoReply,
     /// The reply stopped before its declared length (0x3EE).
-    #[error("incomplete reply {received:02X?}")]
+    #[error("incomplete reply {}", HexSp(received))]
     IncompleteReply { received: Vec<u8> },
     /// The reply frame is malformed.
     #[error("bad reply frame: {0}")]
@@ -70,4 +70,52 @@ pub enum LinkError {
         late_us: u64,
         max_late_us: u64,
     },
+}
+
+/// Bytes as spaced upper-case hex (`86 F1 26`), the format of every frame in the trace;
+/// `nothing` when empty.
+pub(crate) struct HexSp<'a>(pub &'a [u8]);
+
+impl core::fmt::Display for HexSp<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if self.0.is_empty() {
+            return f.write_str("nothing");
+        }
+        for (i, b) in self.0.iter().enumerate() {
+            if i > 0 {
+                f.write_str(" ")?;
+            }
+            write!(f, "{b:02X}")?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::string::ToString;
+    use alloc::vec;
+
+    #[test]
+    fn byte_lists_print_as_spaced_hex_like_the_trace() {
+        let e = LinkError::IncompleteReply {
+            received: vec![0x86, 0xF1, 0x26, 0x61, 0xA3, 0x03, 0x00, 0x00],
+        };
+        assert_eq!(e.to_string(), "incomplete reply 86 F1 26 61 A3 03 00 00");
+        let e = LinkError::NoKeywords { received: vec![] };
+        assert_eq!(e.to_string(), "no keywords received (got nothing)");
+        let e = LinkError::NoAddressComplement {
+            received: vec![0x55],
+        };
+        assert_eq!(e.to_string(), "address complement not received (got 55)");
+        let e = LinkError::Collision {
+            sent: vec![0x81, 0x7A],
+            echo: vec![0x81],
+        };
+        assert_eq!(
+            e.to_string(),
+            "data collision on K line: sent 81 7A, echo 81"
+        );
+    }
 }

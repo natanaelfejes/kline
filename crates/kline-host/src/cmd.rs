@@ -1565,7 +1565,7 @@ fn exchange(tx: &[u8], rx: &[u8], iso8: bool, t_ms: u64) -> Option<Exchange> {
             }
         };
         if rest.len() < need {
-            replies.push(Err(format!("incomplete reply {}", hex(rest))));
+            replies.push(Err(format!("incomplete reply {}", hex_sp(rest))));
             break;
         }
         let (f, tail) = rest.split_at(need);
