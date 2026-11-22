@@ -100,3 +100,46 @@ fn replay_without_a_definition_still_splits_frames() {
     assert_eq!(ex[1]["request"], "21B1");
     assert_eq!(ex[1]["replies"][0]["positive"], "61B1109A1081");
 }
+
+/// Re-review N5: an ISO8 status reply in a capture shows up in the replay JSON with its
+/// DDT2000 name next to the raw code, for each of the four codes.
+#[test]
+fn replay_json_names_iso8_status_replies() {
+    let d = temp_dir("iso8-status");
+    let p = d.join("status.jsonl");
+    let cases = [
+        ("37", "requestUnknown"),
+        ("38", "receiveError"),
+        ("39", "invalidRequest"),
+        ("15", "invalidRequest"),
+    ];
+    let mut log = String::new();
+    for (i, (code, _)) in cases.iter().enumerate() {
+        let t = 100 * (i as u64 + 1);
+        let c = u8::from_str_radix(code, 16).unwrap();
+        log += &format!("{{\"t_ms\":{t},\"dir\":\"tx\",\"hex\":\"03335187\"}}\n");
+        log += &format!(
+            "{{\"t_ms\":{},\"dir\":\"rx\",\"hex\":\"02{code}{:02X}\"}}\n",
+            t + 20,
+            2u8.wrapping_add(c)
+        );
+    }
+    std::fs::write(&p, log).unwrap();
+    let (r, _) = run(
+        iso8_nofaults_ecu(),
+        &[
+            "--json",
+            "replay",
+            &path_str(&p),
+            "--xml",
+            &xml("iso8_nofaults.xml"),
+        ],
+    );
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    let ex = r.event("exchange");
+    assert_eq!(ex.len(), cases.len(), "{}", r.stdout);
+    for (e, (code, name)) in ex.iter().zip(cases) {
+        assert_eq!(e["replies"][0]["iso8_status"], code, "{e}");
+        assert_eq!(e["replies"][0]["name"], name, "{e}");
+    }
+}

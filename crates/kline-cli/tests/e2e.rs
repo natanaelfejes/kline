@@ -1778,9 +1778,16 @@ fn unresolved_bmt_refuses_expert_3b_d2_like_tier_2() {
     let (r, j) = exec("3BD20E01");
     assert_eq!(r.code, 7, "{}\n{}", r.stdout, r.stderr);
     assert!(r.stderr.contains("--ecu bmt-ph1p"), "{}", r.stderr);
-    assert!(!r.stderr.contains("REFUSED:"), "refused by the choice, not the policy");
+    assert!(
+        !r.stderr.contains("REFUSED:"),
+        "refused by the choice, not the policy"
+    );
     j.assert_no_writes();
-    let msg = |s: &str| s.lines().find(|l| l.contains("--ecu bmt-ph1p")).map(str::to_owned);
+    let msg = |s: &str| {
+        s.lines()
+            .find(|l| l.contains("--ecu bmt-ph1p"))
+            .map(str::to_owned)
+    };
     assert_eq!(msg(&t2.stderr), msg(&r.stderr));
 }
 
