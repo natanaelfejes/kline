@@ -184,7 +184,9 @@ const MAX_DRAIN: usize = 4096;
 /// the bit or pulse is already wrong: the next call fails with [`InitTimingError`]. In a 5-baud
 /// address it first holds K low through the stop-bit slot (a framing error, which covers a late
 /// wake-up; a longer host stall can still leave another valid byte), then releases K and raises DTR. The idle, the
-/// 1 ms before TiniL and the stop-bit wait are not guarded: their lateness is harmless.
+/// 1 ms before TiniL and the stop-bit wait are not guarded: their lateness is harmless. For the
+/// 1 ms that holds because a fast-init chain restarts its pacing at the real falling edge
+/// (TiniL and TWuP are timed from there), so a late pre-sleep only lengthens the idle line.
 pub struct KklLine<P: SerialIo, C: Clock> {
     port: P,
     clock: C,
@@ -374,11 +376,19 @@ impl<P: SerialIo, C: Clock> Transport for KklLine<P, C> {
             self.loopback_rx.clear();
         }
         self.chain = true;
+        let edge_us = self.clock.now_us();
         self.port.set_break(on)?;
         self.break_on = on;
         self.edges += 1;
         if self.five_baud && self.edges == 1 && on {
             self.frame_start_us = Some(self.clock.now_us());
+        }
+        if !self.five_baud && self.edges == 1 && on {
+            // Fast init: TiniL and TWuP are paced from the real falling edge, not from the
+            // 1 ms pre-sleep's deadline, so a late pre-sleep only lengthens the idle line and
+            // never shortens TiniL (final critique F03). Taken before the ioctl, like the
+            // off-edge, which starts at its deadline.
+            self.pace_us = Some(edge_us);
         }
         Ok(())
     }
@@ -1241,6 +1251,46 @@ mod tests {
         l.set_break(false).unwrap();
         l.sleep_ms(25);
         assert!(l.write(&[0x81], 0).is_err());
+    }
+
+    #[test]
+    fn a_late_pre_sleep_does_not_shorten_tinil_or_twup() {
+        // Final critique F03: TiniL's deadline was the 1 ms pre-sleep's deadline plus 25 ms, so
+        // a pre-sleep that woke late moved the falling edge but not the rising one (1.03 ms late
+        // gave TiniL 23.97 ms) and StartCommunication still went out. The chain now starts at
+        // the real falling edge.
+        for late_us in [1_030u64, 3_000, 5_000] {
+            let (mut l, m) = line(500);
+            l.set_init_guard(true);
+            m.0.borrow_mut().oversleep_nth = Some((0, late_us));
+            l.set_dtr(true).unwrap();
+            l.sleep_ms(1);
+            l.set_break(true).unwrap();
+            l.sleep_ms(25);
+            l.set_break(false).unwrap();
+            l.sleep_ms(25);
+            l.write(&[0x81], 0).unwrap();
+            let b = break_times(&m);
+            let tinil = b[1].1 - b[0].1;
+            assert!(
+                (24_500..=25_500).contains(&tinil),
+                "pre-sleep {late_us} us late: TiniL {tinil} us"
+            );
+            let write_t =
+                m.0.borrow()
+                    .calls
+                    .iter()
+                    .find_map(|c| match c {
+                        Call::Write(_, t) => Some(*t),
+                        _ => None,
+                    })
+                    .unwrap();
+            let twup = write_t - b[1].1;
+            assert!(
+                (24_000..=25_500).contains(&twup),
+                "pre-sleep {late_us} us late: TWuP {twup} us"
+            );
+        }
     }
 
     #[test]

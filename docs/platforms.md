@@ -172,8 +172,13 @@ edge (code review L9; a unit test checks that a 3 ms drain does not shorten Tini
 During an init (`Link::init`) a guard checks the sleeps whose lateness corrupts the wake-up:
 the 5-baud start and data bits (+-10 ms, ISO 9141-2) and the fast-init TiniL and TWuP (+-1 ms,
 ISO 14230-2). The idle before the init, the 1 ms before TiniL and the 5-baud stop-bit wait are
-not guarded: a late idle or pre-sleep only lengthens the idle line, a late stop-bit wait only
-delays the keyword read after a complete address. When a guarded sleep wakes up too late:
+not guarded: a late idle only lengthens the idle line, a late stop-bit wait only delays the
+keyword read after a complete address. A late pre-sleep is harmless because a fast-init chain
+restarts its pacing at the real falling edge (the time the break-on call starts): TiniL and
+TWuP are timed from there and keep their full 25 ms, and the lateness only lengthens the idle
+line. Before this fix TiniL was paced from the pre-sleep's deadline, so a pre-sleep 1.03 ms
+late gave a 23.97 ms TiniL that no guard saw (final critique F03; a unit test now injects
+1.03, 3 and 5 ms and asserts TiniL and TWuP). When a guarded sleep wakes up too late:
 
 - in a 5-baud address the transport holds K low through the remaining bit slots and the
   stop-bit slot (until start + 10 bit times), so a receiver sampling at the bit centres sees a
