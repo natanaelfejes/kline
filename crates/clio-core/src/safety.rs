@@ -266,7 +266,6 @@ pub fn forbidden(target: &Target, payload: &[u8]) -> Option<DenyReason> {
     };
     let p1 = payload.get(1).copied();
     let bmt = target.ecu_address == BMT_ADDRESS;
-    let kwp = target.protocol == Protocol::Kwp;
     // Rule 3 first, on any protocol (security review M2 F3b: no protocol confusion).
     if bmt {
         let immo = match service {
@@ -286,7 +285,9 @@ pub fn forbidden(target: &Target, payload: &[u8]) -> Option<DenyReason> {
             return Some(DenyReason::Immobilizer);
         }
     }
-    if !bmt && kwp {
+    // Sirius rules on any protocol too (re-review M2 finding 1: a Target { Iso8, 0x7A } must not
+    // turn `31 A0 A3` or a write to an immobilizer frame into an expert request).
+    if !bmt {
         let reset = payload.len() >= 3
             && payload[..3] == [0x31, SIRIUS_SPECIAL_FUNCTION, SIRIUS_BACKUP_MEMORY_RESET];
         let immo_write = matches!(service, 0x2E | 0x2F | 0x3B)
@@ -302,7 +303,9 @@ pub fn forbidden(target: &Target, payload: &[u8]) -> Option<DenyReason> {
         (_, 0x27) | (Protocol::Kwp, 0x34..=0x37) | (Protocol::Iso8, 0x34 | 0x35 | 0x37) => {
             Some(DenyReason::Forbidden { service })
         }
-        (Protocol::Kwp, 0x10)
+        // SAFETY.md rule 3: sessions other than 10 81 / 10 A0 are forbidden always, whatever
+        // the protocol (re-review M2 finding 1).
+        (_, 0x10)
             if !(payload.len() == 2
                 && matches!(p1, Some(DEFAULT_SESSION | RENAULT_DIAG_SESSION))) =>
         {
@@ -319,8 +322,8 @@ pub fn forbidden(target: &Target, payload: &[u8]) -> Option<DenyReason> {
 /// KWP, Tier 0: `3E [x]`, `10 81`, `10 A0`, `1A xx`, `21 xx` exactly two bytes (any ECU, BMT
 /// `21A4` included; `21 A1 xx` would write CALTERMI on the BMT), `17`/`18` with 1-3 parameter
 /// bytes. ISO8 (Safir), Tier 0: `21` (bare), `33 50`, `33 51`, `33 52`, `33 54`.
-/// KWP, Tier 1: `14 xx xx`, `30 lid` + 1-4 bytes, `11 FF`, `32 xx` + 0-2 bytes; Sirius (KWP,
-/// not BMT) `31 A0 A0`; BMT `31C7000000`, `31C8000000`, actuator `31 out param count` with
+/// KWP, Tier 1: `14 xx xx`; not BMT: `30 lid` + 1-4 bytes, `11 FF`, exactly `32 A0 00` (end of
+/// injector inhibition, the only `32` in the definitions), `31 A0 A0`; BMT `31C7000000`, `31C8000000`, actuator `31 out param count` with
 /// `out` in 0xA0..=0xB3. KWP, Tier 2: BMT `3B D2 index 00|01` (index 0..=13, not 2), other
 /// ECUs `3B lid` + 1-4 bytes.
 pub fn classify(target: &Target, payload: &[u8]) -> Result<Tier, Denied> {
@@ -348,12 +351,16 @@ pub fn classify(target: &Target, payload: &[u8]) -> Result<Tier, Denied> {
         (Iso8, 0x33) => (len == 2 && p1.is_some_and(|b| SAFIR_SALVES.contains(&b))).then_some(Read),
         // Tier 1: ClearDiagnosticInformation with a 2-byte group (BMT 14FF00, Sirius 140000).
         (Kwp, 0x14) => (len == 3).then_some(Service),
-        // Tier 1: InputOutputControlByLocalIdentifier (Sirius 30D0xxxx).
-        (Kwp, 0x30) => (3..=6).contains(&len).then_some(Service),
+        // Tier 1: InputOutputControlByLocalIdentifier (Sirius 30D0xxxx). The BMT definitions
+        // have no `30`, `11` or `32`: Expert there (re-review M2 finding 2).
+        (Kwp, 0x30) if !bmt => (3..=6).contains(&len).then_some(Service),
         // Tier 1: Renault "Reinit apprentissages" (adaptation reset), only `11 FF`.
-        (Kwp, 0x11) => (p1 == Some(0xFF) && len == 2).then_some(Service),
-        // Tier 1: Renault stop functions / adaptation reset (Sirius 32A000).
-        (Kwp, 0x32) => (2..=4).contains(&len).then_some(Service),
+        (Kwp, 0x11) if !bmt => (p1 == Some(0xFF) && len == 2).then_some(Service),
+        // Tier 1: only `32 A0 00` (Sirius/S2000 "end of injector inhibition"); any other `32`
+        // is undocumented: Expert (re-review M2 finding 2).
+        (Kwp, 0x32) if !bmt => {
+            (payload == [0x32, SIRIUS_SPECIAL_FUNCTION, 0x00]).then_some(Service)
+        }
         // Tier 1, BMT: remote learning, and the actuator command `31 out param count`
         // ("COMMANDE DES ACTUATEURS" 31000000).
         (Kwp, 0x31) if bmt => (is_remote_learning(payload)
@@ -434,11 +441,11 @@ fn risk_info(target: &Target, payload: &[u8], tier: Tier) -> RiskInfo {
             &["drive cycle afterwards to relearn"],
             &[Warning::ErasesLearnedValues],
         ),
-        (Tier::Service, [0x32, ..]) => r(
-            "stops a running ECU function (e.g. ends injector inhibition)",
-            "unknown side effects of the stopped function",
+        (Tier::Service, [0x32, SIRIUS_SPECIAL_FUNCTION, 0x00]) => r(
+            "ends the injector inhibition started by 31 A0 A0 (the engine may run again)",
+            "the engine can start running if it is being cranked",
             true,
-            NONE,
+            &["vehicle stationary"],
             &[],
         ),
         (Tier::Service, [0x31, SIRIUS_SPECIAL_FUNCTION, SIRIUS_INJECTOR_INHIBITION]) if !bmt => r(
@@ -471,7 +478,7 @@ fn risk_info(target: &Target, payload: &[u8], tier: Tier) -> RiskInfo {
         ),
         (Tier::ConfigWrite, [0x3B, BMT_CONFIG_WRITE_LID, ..]) if bmt => r(
             "rewrites one BMT configuration option (index in byte 3, value in byte 4) in EEPROM",
-            "index meaning differs between BMT_X65_ph1_p and BMT_SAGEM: a wrong definition              changes another option; an interrupted write can corrupt the config",
+            "index meaning differs between BMT_X65_ph1_p and BMT_SAGEM: a wrong definition changes another option; an interrupted write can corrupt the config",
             true,
             &[
                 "21 80 read and the definition chosen from it",
@@ -484,7 +491,11 @@ fn risk_info(target: &Target, payload: &[u8], tier: Tier) -> RiskInfo {
             "writes an ECU setting (e.g. Sirius idle correction) in EEPROM",
             "wrong setting changes engine behaviour; an interrupted write can corrupt it",
             true,
-            &["21 <identifier> backup read in this session", "read back after the write"],
+            &[
+                "21 80 read and the definition chosen from it",
+                "21 <identifier> backup read in this session",
+                "read back after the write",
+            ],
             &[Warning::EepromWrite],
         ),
         _ => r(

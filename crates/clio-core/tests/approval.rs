@@ -355,3 +355,27 @@ fn unframeable_request_is_a_frame_error() {
     ));
     assert!(!s.is_busy());
 }
+
+/// Re-review test gap: a failed or negative `21 A1` after the challenge removes the backup, so
+/// the approved write is refused.
+#[test]
+fn config_write_refused_when_backup_is_invalidated_after_challenge() {
+    let mut s = bmt();
+    let write = [0x3B, 0xD2, 0x07, 0x01];
+    let ident = [0x61, 0x80, 0x01];
+    read_ok(&mut s, 0x26, 0x80, &ident[2..], 0);
+    read_ok(&mut s, 0x26, 0xA1, &[0x12, 0x34], 100);
+    let ch = s.config_write_challenge(&write, &ident).unwrap();
+    let code = ch.code().to_string();
+    let a = Approval::confirm(ch, &code).unwrap();
+    let first = s.request(&[0x21, 0xA1], 200).unwrap();
+    assert!(matches!(
+        exchange(&mut s, first, 0x26, &[0x21, 0xA1], &[0x7F, 0x21, 0x22], 200),
+        Step::Done(SessionOutcome::Reply(Reply::Negative { .. }))
+    ));
+    assert_eq!(s.config_read(0xA1), None);
+    assert!(matches!(
+        s.request_approved(&write, a, 300),
+        Err(SessionError::Denied(ref d)) if d.reason == DenyReason::PreReadRequired { identifier: 0xA1 }
+    ));
+}

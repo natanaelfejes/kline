@@ -245,7 +245,7 @@ target taken from the init that actually ran, never request names.
 | Tier | Requests (exact bytes) | How |
 |---|---|---|
 | 0 Read | KWP: `3E [x]`, `10 81`, `10 A0`, `1A xx`, `21 xx` (exactly 2 bytes, BMT `21 A4` transponder *status* included), `17`/`18` + 1-3 bytes. ISO8 (Safir): `21`, `33 50`, `33 51`, `33 52`, `33 54` (exactly what Safir_1/Safir_2 contain) | `Session::request`; autonomous use OK (CLI, `--json`, MCP). Read-only scan via `ScanPlan` (below) |
-| 1 Service | KWP: `14 xx xx` clear DTC; `30 lid` + 1-4 bytes output control; `11 FF` adaptation reset; `32 xx` + 0-2 bytes stop function; Sirius `31 A0 A0` injector inhibition (warning `StopsEngine`); BMT `31 C7 00 00 00` / `31 C8 00 00 00` remote learning, BMT actuator `31 out param count` with `out` 0xA0..=0xB3 | human `Approval` per request |
+| 1 Service | KWP: `14 xx xx` clear DTC; not BMT: `30 lid` + 1-4 bytes output control, `11 FF` adaptation reset, exactly `32 A0 00` (end of injector inhibition; other `32`, and BMT `30`/`11`/`32`, are Expert: Gemini re-review M2 finding 2); Sirius `31 A0 A0` injector inhibition (warning `StopsEngine`); BMT `31 C7 00 00 00` / `31 C8 00 00 00` remote learning, BMT actuator `31 out param count` with `out` 0xA0..=0xB3 | human `Approval` per request |
 | 2 Config write | BMT `3B D2 index value` (index 0..=13 except 2, value 0/1); other KWP ECUs `3B lid` + 1-4 bytes | human `Approval`, plus in the same session: a positive backup read (`21 A1` for BMT `3B D2`, else `21 lid`) and a positive `21 80` whose exact reply the caller says it chose the ECU definition from (BMT config indices differ between BMT_X65_ph1_p and BMT_SAGEM) |
 | 3 Expert | any other request that is not forbidden (undocumented service, identifier, parameters or length) | human *expert* `Approval` (10-character code), `RiskInfo` says "unknown effect" |
 | forbidden | see below | never, not even in expert mode |
@@ -256,11 +256,11 @@ target taken from the init that actually ran, never request names.
   remote-learning routines (C0-C3, C5, C6 are the immobilizer functions; catalogue 9.1: all
   of C0-C8 are immobilizer related); every `2E`/`2F`; every `3B` except `3B D2`; `3B D2 02 ..`
   (AP1CLE, key related); `21 A4` with anything after it.
-- Sirius (KWP, not BMT): `31 A0 A3 ..` (reset of the backed-up memory, may touch the
+- Not BMT, any protocol claim (an ISO8 target at 0x7A included, re-review M2 finding 1): `31 A0 A3 ..` (reset of the backed-up memory, may touch the
   "verrou logiciel" area); `2E`/`2F`/`3B` on `A0`, `A2`, `AE`, `BD` (frames carrying
   immobilizer / verrou fields, catalogue 4.4).
 - `27` security access (any protocol), `34`-`37` (KWP; ISO8 `34`, `35`, `37`), any
-  `10 xx` other than `10 81` / `10 A0` (e.g. `10 85`, `10 86`, `10 B0`, `10 C0`).
+  `10 xx` other than `10 81` / `10 A0` on any protocol (e.g. `10 85`, `10 86`, `10 B0`, `10 C0`).
 - Link frames `81`, `82` (KWP) and `36`, `3F` (ISO8) as requests: only the init machines and
   `Session::tester_present` / `Session::stop` send them. ISO8 `36` (keep-alive) and `3F`
   (stop) are protocol-required (RE: KWP2000Diag4 ISO8Ecu init) although no Safir definition

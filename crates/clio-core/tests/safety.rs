@@ -387,3 +387,67 @@ fn iso8_allowlist_matches_safir_definitions() {
         assert!(classify(&SAFIR, p).is_err(), "{p:02X?}");
     }
 }
+
+/// Gemini re-review of M2, finding 1: the Sirius immobilizer rules and the session rule do not
+/// depend on the protocol of the target.
+#[test]
+fn sirius_immobilizer_and_session_rules_hold_under_iso8() {
+    let iso8_7a = Target {
+        protocol: Protocol::Iso8,
+        ecu_address: 0x7A,
+    };
+    for p in [
+        &[0x31, 0xA0, 0xA3][..],
+        &[0x3B, 0xAE, 0x01],
+        &[0x2E, 0xA0, 0x00],
+        &[0x2F, 0xBD, 0x00],
+    ] {
+        assert_eq!(
+            reason(&iso8_7a, p),
+            Some(DenyReason::Immobilizer),
+            "{p:02X?}"
+        );
+        assert!(tier_of(&iso8_7a, p).is_err());
+    }
+    for p in [&[0x10, 0x85][..], &[0x10, 0xC0], &[0x10]] {
+        assert_eq!(
+            reason(&iso8_7a, p),
+            Some(DenyReason::Forbidden { service: 0x10 }),
+            "{p:02X?}"
+        );
+    }
+}
+
+/// Re-review finding 2: only documented `30`/`11`/`32` are Tier 1, and only off the BMT.
+#[test]
+fn undocumented_service_requests_are_expert() {
+    for (t, p) in [
+        (SIRIUS, &[0x32, 0xA1, 0x00][..]),
+        (SIRIUS, &[0x32, 0xA0]),
+        (SIRIUS, &[0x32, 0xA0, 0x00, 0x00]),
+        (BMT, &[0x32, 0xA0, 0x00]),
+        (BMT, &[0x30, 0xD0, 0x00, 0x0A]),
+        (BMT, &[0x11, 0xFF]),
+    ] {
+        assert!(classify(&t, p).is_err(), "{t:?} {p:02X?}");
+        let r = assess(&t, p).unwrap();
+        assert_eq!(r.tier, Tier::Expert, "{t:?} {p:02X?}");
+        assert_eq!(r.warnings, &[Warning::UnknownEffect]);
+        assert!(!r.reversible);
+    }
+    assert_eq!(tier(&SIRIUS, &[0x32, 0xA0, 0x00]), Tier::Service);
+    // Finding 2c: the non-BMT 3B RiskInfo names the 21 80 prerequisite the session enforces.
+    let r = assess(&SIRIUS, &[0x3B, 0xD0, 0x10]).unwrap();
+    assert!(
+        r.prerequisites.iter().any(|p| p.contains("21 80")),
+        "{:?}",
+        r.prerequisites
+    );
+    // Finding 3: no run of spaces in any RiskInfo text.
+    let r = assess(&BMT, &[0x3B, 0xD2, 0x07, 0x01]).unwrap();
+    assert!(
+        !r.what_can_go_wrong.contains("  "),
+        "{}",
+        r.what_can_go_wrong
+    );
+}
