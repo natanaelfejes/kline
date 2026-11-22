@@ -36,13 +36,19 @@ The policy lives in `kline-core`, not in the CLI, and is default-deny on the exa
 | 0 Read | documented reads: identification, live data, fault codes | autonomous, also from `--json` and the AI binary |
 | 1 Service | clear fault codes, output tests, remote learning, ... | human approval per request |
 | 2 Config write | writing configuration | human approval plus a backup read first |
-| 3 Expert | any other non-forbidden request ("unknown effect") | human approval with a longer confirmation code |
-| Forbidden | immobilizer/key functions, security access, memory/programming services | never |
+| 3 Expert | any other non-forbidden request ("unknown effect"), including security access, flashing services and other sessions, with explicit "may brick the ECU" warnings | human approval with a longer confirmation code |
+| Forbidden | immobilizer/transponder/key functions only (BMT/UCH/decoder and Sirius immobilizer fields, plus definition requests named like them) | never |
 
 Approvals exist only with the cargo feature `approved-routines`, which only the interactive
 `kline` binary enables; it reads the confirmation from `/dev/tty`. `kline-agent` (read-only,
 JSON, for AI use) is built without it and can only *prepare* a request. Details:
 [docs/protocol.md](docs/protocol.md).
+
+**What the confirmation code is, honestly:** an anti-accident gate. It stops pipes, scripts,
+`--json` and agents without terminal access from sending a non-read by mistake. It is *not*
+protection against an AI agent that drives a terminal: such an agent can read the code off the
+screen and type it. The owner allows that deliberately when he lets an agent run `kline exec`. If
+you run AI agents and do not want that, do not give them a terminal that can run `kline`.
 
 ## Build and run
 
@@ -58,8 +64,9 @@ Captures (JSONL) go to `~/.local/share/kline/captures` by default; override with
 `--captures DIR` (alias `--capture-dir`) or `KLINE_CAPTURE_DIR`. Full command reference:
 [docs/cli.md](docs/cli.md). Simulator: [docs/sim.md](docs/sim.md).
 
-Do not build `kline-cli` and `kline-agent` in one cargo invocation if you want the agent without
-the approval types compiled in (feature unification; see docs/cli.md).
+Build `kline-agent` on its own (`cargo build --release -p kline-agent`). Built together with
+`kline-cli` (one cargo invocation, `--workspace` or `--all-features`), cargo unifies the approval
+feature into it and `kline-agent` then refuses to start (exit 7; see docs/cli.md).
 
 ## Layout
 

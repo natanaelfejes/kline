@@ -238,7 +238,8 @@ Enforced in `kline-core` (SAFETY.md rule 2 and 3; owner-approved policy v2 and o
 2026-11-22). The core writes only frames it built itself: `Action::Write` carries a
 crate-private `Frame` (bytes readable, no public constructor, not `Clone`), and every request
 frame comes from a crate-private `Permit`. Decisions use the exact payload bytes and the
-target taken from the init that actually ran, never request names.
+target taken from the init that actually ran; the loaded definition's `DefinitionGuard` (class
+and immobilizer-named requests) can only add refusals.
 
 ### Tiers
 
@@ -247,24 +248,32 @@ target taken from the init that actually ran, never request names.
 | 0 Read | KWP: `3E [x]`, `10 81`, `10 A0`, `1A xx`, `21 xx` (exactly 2 bytes, BMT `21 A4` transponder *status* included), `17`/`18` + 1-3 bytes. ISO8 (Safir): `21`, `33 50`, `33 51`, `33 52`, `33 54` (exactly what Safir_1/Safir_2 contain) | `Session::request`; autonomous use OK (CLI, `--json`, MCP). Read-only scan via `ScanPlan` (below) |
 | 1 Service | KWP: `14 xx xx` clear DTC; not BMT: `30 lid` + 1-4 bytes output control, `11 FF` adaptation reset, exactly `32 A0 00` (end of injector inhibition; other `32`, and BMT `30`/`11`/`32`, are Expert: Gemini re-review M2 finding 2); Sirius `31 A0 A0` injector inhibition (warning `StopsEngine`); BMT `31 C7 00 00 00` / `31 C8 00 00 00` remote learning, BMT actuator `31 out param count` with `out` 0xA0..=0xB3 | human `Approval` per request |
 | 2 Config write | BMT `3B D2 index value` (index 0..=13 except 2, value 0/1); other KWP ECUs `3B lid` + 1-4 bytes | human `Approval`, plus in the same session: a positive backup read (`21 A1` for BMT `3B D2`, else `21 lid`) and a positive `21 80` whose exact reply the caller says it chose the ECU definition from (BMT config indices differ between BMT_X65_ph1_p and BMT_SAGEM) |
-| 3 Expert | any other request that is not forbidden (undocumented service, identifier, parameters or length) | human *expert* `Approval` (10-character code), `RiskInfo` says "unknown effect" |
-| forbidden | see below | never, not even in expert mode |
+| 3 Expert | any other request that is not forbidden (undocumented service, identifier, parameters or length), including `27` security access (`SecurityAccess`, `MayBrickEcu`), `34`-`37` transfer (`MayBrickEcu`, `MayLeaveProgrammingSession`), `10 xx` other than `10 81`/`10 A0` (`MayLeaveProgrammingSession`), `3D`/`38`-`3A`/`2C`/`23` on non-immobilizer ECUs (owner decision 2026-11-22, final) | human *expert* `Approval` (10-character code), `RiskInfo` with "unknown effect" and the specific warnings |
+| forbidden | the immobilizer line only, see below | never, not even in expert mode |
 
-**Forbidden always** (`DenyReason::Immobilizer`, `Forbidden`, `ProtocolReserved`, `Empty`):
+**Forbidden always** (`DenyReason::Immobilizer`, `ImmobilizerNamed`; plus `ProtocolReserved`,
+`Empty`, which are not safety rules):
 
-- BMT (any protocol claim): `30`/`31`/`32` with byte 2 in 0xC0..=0xC8 except the two exact
-  remote-learning routines (C0-C3, C5, C6 are the immobilizer functions; catalogue 9.1: all
-  of C0-C8 are immobilizer related); every `2E`/`2F`; every `3B` except `3B D2`; `3B D2 02 ..`
-  (AP1CLE, key related); `21 A4` with anything after it.
-- Not BMT, any protocol claim (an ISO8 target at 0x7A included, re-review M2 finding 1): `31 A0 A3 ..` (reset of the backed-up memory, may touch the
-  "verrou logiciel" area); `2E`/`2F`/`3B` on `A0`, `A2`, `AE`, `BD` (frames carrying
-  immobilizer / verrou fields, catalogue 4.4).
-- `27` security access (any protocol), `34`-`37` (KWP; ISO8 `34`, `35`, `37`), any
-  `10 xx` other than `10 81` / `10 A0` on any protocol (e.g. `10 85`, `10 86`, `10 B0`, `10 C0`).
-- Link frames `81`, `82` (KWP) and `36`, `3F` (ISO8) as requests: only the init machines and
-  `Session::tester_present` / `Session::stop` send them. ISO8 `36` (keep-alive) and `3F`
-  (stop) are protocol-required (RE: KWP2000Diag4 ISO8Ecu init) although no Safir definition
-  lists them.
+- BMT/UCH/decoder: address 0x26 or 0xA6, or a definition whose `Target@Name`/`<Function Name>`
+  says BMT/UCH/UCBIC/decoder/anti-demarrage/immobilizer (`kline_core::spec::ecu_class`), at any
+  address and protocol claim: `3D`, `38`, `39`, `3A`, `2C` (memory write / routine by address /
+  dynamic define: EEPROM with key codes); `30`/`31`/`32`/`33` with byte 2 in 0xC0..=0xC9 except
+  the two exact remote-learning routines (catalogue 9.1: C0-C8 immobilizer, C9 added by owner
+  decision); every `2E`/`2F`; every `3B` except `3B D2`; `3B D2 02 ..` (AP1CLE, key related);
+  `21 A4` with anything after it.
+- Not BMT, any protocol claim (an ISO8 target at 0x7A included, re-review M2 finding 1):
+  `31`/`32`/`33`/`38`-`3A` with `A0 A3` (reset of the backed-up memory, may touch the "verrou
+  logiciel" area); `2E`/`2F`/`3B` on `A0`, `A2`, `AE`, `BD` (frames carrying immobilizer /
+  verrou fields, catalogue 4.4).
+- Sirius (0x7A or a Sirius definition): also `30` output control on `A0`/`A2`/`AE`/`BD`, and
+  `31`-`33`/`38`-`3A` on `A2`/`AE`/`BD` (`31 A0 A0` / `32 A0 00` stay Tier 1: `A0` there is the
+  special-function routine).
+- Name guard (`DefinitionGuard`, set on the `Session` by the CLI): Tier 1-3 requests of the loaded
+  definition whose names or data items look immobilizer/transponder/key related (docs/cli.md).
+- Link frames `81`, `82` (KWP) and `36`, `3F` (ISO8) as requests (`ProtocolReserved`, session
+  integrity rather than safety): only the init machines and `Session::tester_present` /
+  `Session::stop` send them. ISO8 `36` (keep-alive) and `3F` (stop) are protocol-required
+  (RE: KWP2000Diag4 ISO8Ecu init) although no Safir definition lists them.
 
 Every non-read request has a machine-readable `RiskInfo { tier, what_it_changes,
 what_can_go_wrong, reversible, prerequisites, warnings }` (`safety::assess`), from the
@@ -281,7 +290,9 @@ Without it no approval type or challenge method exists, so a library user, an MC
 human, never execute.
 
 Only the interactive `kline` CLI may enable the feature. It must read the confirmation from
-`/dev/tty` (not stdin, so a pipe cannot answer) and never offer approvals with `--json`. `kline-agent`
+`/dev/tty` (not stdin, so a pipe cannot answer) and never offer approvals with `--json`. The code
+is an anti-accident gate: an agent driving a pty can type it (permitted by the owner when he
+chooses). `kline-agent`
 (the AI binary) depends on `kline-core` without it; `crates/kline-agent/tests/agent.rs` runs
 `cargo tree -p kline-agent -e features` and fails if the feature or `kline-cli` appears. Any future
 `kline-mcp` crate needs the same check (docs/cli.md).

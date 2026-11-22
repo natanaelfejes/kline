@@ -17,9 +17,11 @@ cargo build --release -p kline-agent    # target/release/kline-agent
 
 Cargo unifies features across the packages of one build. `cargo build -p kline-cli -p kline-agent`
 (or `--workspace`, or `--all-features`) compiles kline-core once, with `approved-routines`, and
-links that copy into kline-agent too. kline-agent still has no code path to an approval (it has no
-`exec`, and kline-host has none), but in such a build the approval types are present in the binary.
-kline-agent prints a warning on stderr when this happened (`safety::APPROVALS_COMPILED`).
+links that copy into kline-agent too. kline-agent has no code path to an approval (it has no
+`exec`, and kline-host has none), but in such a build the approval types are present in the binary,
+so kline-agent **refuses to start** (exit 7, message on stderr) when `safety::APPROVALS_COMPILED`
+is set. Always build it alone: `cargo build --release -p kline-agent`. In a joint `cargo test`
+the agent's session tests are skipped with a message; `cargo test -p kline-agent` runs them.
 
 ## Common options
 
@@ -45,7 +47,7 @@ ECU selection (every command that talks to an ECU, and `risk`/`prepare`/`replay`
 | `--init-attempts N` | rounds over the variants, 500 ms apart (default 3, DDT2000) |
 | `--nrc-tries N` | `ident`: tries of a request answered `7F xx 21`/`23` (default 10; 200/500 ms) |
 | `--periodic-tester-present` | `3E` every 2000 ms with a required reply (DDT2000 screen option) instead of after 3000 ms idle |
-| `--session auto\|none\|a0\|81` | after the init: `auto` sends `10 A0` if the definition has it, else `10 81` if it has that (KWP only). A negative answer is reported (`note: not retried with another session`) and the command continues; no other session is tried (e.g. `10 C0`, seen in other Renault 0x7A logs, stays forbidden by policy) |
+| `--session auto\|none\|a0\|81` | after the init: `auto` sends `10 A0` if the definition has it, else `10 81` if it has that (KWP only). A negative answer is reported (`note: not retried with another session`) and the command continues; no other session is tried (e.g. `10 C0`, seen in other Renault 0x7A logs, is an Expert request only) |
 
 Protocol and timing come from the definition's `<K>` section through kline-core (`spec::k_timing`):
 ISO8 5-baud, KWP 5-baud (with ~KW2 handshake), KWP fast init. A definition with only `<CAN>`
@@ -78,14 +80,19 @@ the session, and for Tier 2 (config write) first reads `21 80` (the definition m
 It then makes the kline-core challenge, shows it on `/dev/tty` with a random code (6
 characters, 10 for expert tier) and reads the answer from `/dev/tty` (not stdin), sending
 TesterPresent while it waits (default 120 s, `--confirm-timeout`). A wrong code, timeout or
-Ctrl-C is exit 9 and nothing is sent.
+Ctrl-C is exit 9 and nothing is sent. Definition names on these screens are printed sanitized
+(control characters, escape sequences and bidi overrides shown as `\u{..}`).
 
-Name guard (all ECUs, Tier 1-3): a request is refused (exit 7) when a definition request with
+The code is an anti-accident gate: an AI agent that drives a pseudo-terminal can read and type
+it, and the owner permits that when he chooses. It is not a defence against such an agent.
+
+Name guard (kline-core, all ECUs, Tier 1-3; `Session` applies it with the definition the CLI
+loaded, `kline_core::spec::definition_guard`): a request is refused (exit 7) when a definition request with
 those bytes, or one of its data items (name, description, mnemonic), contains an
 immobilizer/transponder/key keyword (`kline_core::safety::immobilizer_keyword`: anti-demarrage,
 transpond, immo, verlog, verrou, apptrp, ap1cle, code cle, key code, wegfahr, and the words
-cle/cles/key/keys). The exact BMT remote-learning payloads `31C7000000`/`31C8000000` on 0x26
-are exempt (their names contain "CLE"). "verrou" also matches central locking; that is refused too.
+cle/cles/key/keys). The exact BMT remote-learning payloads `31C7000000`/`31C8000000` on a BMT/UCH/decoder
+(0x26/0xA6 or a BMT/UCH/decoder definition) are exempt (their names contain "CLE"). "verrou" also matches central locking; that is refused too.
 
 ## Exit codes
 
@@ -189,7 +196,7 @@ socket and the Mac; ignition ON, engine off; nothing else (DDT2000, another test
 - A public ELM327 log shows 5-baud init to 0x7A failing where fast init worked (web hint):
   consistent with the fast-init-first `auto` order, not verified on this car.
 - Some Renault 0x7A logs use `10 C0`; our Sirius definition says `10 A0`. Definition-driven, a
-  refusal is reported, `10 C0` stays forbidden.
+  refusal is reported, `10 C0` is never tried automatically (it is an Expert request with a programming-session warning).
 
 ## kline-agent
 
