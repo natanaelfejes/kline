@@ -238,6 +238,12 @@ impl Ecu {
         }
     }
 
+    /// The policy's view of the definition ([`kline_core::safety::DefinitionGuard`]): its
+    /// BMT/UCH/decoder class and its immobilizer-named requests.
+    pub fn guard(&self) -> kline_core::safety::DefinitionGuard {
+        kline_core::spec::definition_guard(self.def())
+    }
+
     /// The policy target the init would produce (address from the definition or --address).
     pub fn target(&self) -> Result<Target, CliError> {
         Ok(Target {
@@ -464,19 +470,5 @@ pub fn choose_by_ident(ecu: &Ecu, keywords: (u8, u8), sent: &[u8], reply: &[u8])
         chosen: fits.first().copied(),
         ambiguous: fits.len() > 1,
         results,
-    }
-}
-
-/// Name guard for non-read requests (coordinator scope addition 2026-11-22): refuse when a
-/// matching request or one of its data items looks immobilizer / transponder / key related.
-pub fn name_guard(def: &EcuDef, target: &Target, payload: &[u8]) -> Result<(), CliError> {
-    let hits = kline_core::spec::immobilizer_named_requests(def, target, payload);
-    if hits.is_empty() {
-        Ok(())
-    } else {
-        Err(CliError::refused(format!(
-            "request {} refused: definition request(s) {hits:?} look immobilizer/transponder/key related (SAFETY.md rule 3)",
-            crate::hex(payload)
-        )))
     }
 }

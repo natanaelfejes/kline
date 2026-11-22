@@ -9,6 +9,7 @@
 use kline_spec::{EcuDef, KLine, KProtocol};
 use thiserror::Error;
 
+use crate::safety::{DefinitionGuard, EcuClass};
 use crate::timing::{consts, InitKind, KTiming, LinkConfig};
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -100,24 +101,75 @@ pub fn link_config(ecu: &EcuDef) -> Result<LinkConfig, SpecMapError> {
     Ok(cfg)
 }
 
-/// Names of the requests of `ecu` that `payload` would send (its `SentBytes` up to the first
-/// sent data item are a prefix of `payload`) and whose request name, or the name, description
-/// or mnemonic of one of its data items, contains an immobilizer keyword
-/// ([`crate::safety::immobilizer_keyword`]). Empty: no such request.
-///
-/// The two owner-approved BMT remote-learning routines (exact `31C7000000` / `31C8000000` on
-/// [`crate::safety::BMT_ADDRESS`]) are exempt: their BMT names contain "CLE" (remote key).
-/// Additive guard for generic ECUs (coordinator scope addition 2026-11-22); the address-based
-/// policy in [`crate::safety`] still applies first.
-pub fn immobilizer_named_requests(
-    ecu: &EcuDef,
-    target: &crate::safety::Target,
-    payload: &[u8],
-) -> Vec<String> {
-    use crate::safety::{immobilizer_keyword, BMT_ADDRESS, BMT_REMOTE_LEARNING};
-    if target.ecu_address == BMT_ADDRESS && BMT_REMOTE_LEARNING.iter().any(|r| r[..] == *payload) {
-        return Vec::new();
+/// Substrings (folded: lowercase, accents removed, only letters and digits) of a definition's
+/// `Target@Name` or `<Function Name>` that mark it as a BMT/UCH/immobilizer decoder
+/// (owner decision 2026-11-22: "any ECU whose loaded definition is a BMT/UCH/decoder"). The
+/// Clio BMT definitions are named "BMT ..." with function "UCBIC/BFR".
+pub const IMMOBILIZER_ECU_SUBSTRINGS: &[&str] = &[
+    "bmt",
+    "ucbic",
+    "decodeur",
+    "decoder",
+    "antidemarr",
+    "immobili",
+    "wegfahr",
+];
+/// Folded substring of a Sirius injection definition name (e.g. "SIRIUS32 - EMS3132 ...").
+pub const SIRIUS_ECU_SUBSTRING: &str = "sirius";
+/// Whole words with the same meaning: `uch` (unite centrale habitacle), `immo`.
+pub const IMMOBILIZER_ECU_WORDS: &[&str] = &["uch", "immo"];
+
+fn folded_words(s: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut w = String::new();
+    for c in s.chars().chain(core::iter::once(' ')) {
+        match crate::safety::fold_char(c) {
+            Some(f) => w.push(f),
+            None if !w.is_empty() => words.push(core::mem::take(&mut w)),
+            None => {}
+        }
     }
+    words
+}
+
+/// [`EcuClass::Immobilizer`] for a BMT/UCH/decoder definition, [`EcuClass::Sirius`] for a
+/// Sirius definition, else [`EcuClass::Generic`].
+pub fn ecu_class(ecu: &EcuDef) -> EcuClass {
+    let names = [
+        Some(ecu.name.as_str()),
+        ecu.function.as_ref().map(|f| f.name.as_str()),
+    ];
+    let hit = names.iter().flatten().any(|n| {
+        let words = folded_words(n);
+        let compact: String = words.concat();
+        IMMOBILIZER_ECU_SUBSTRINGS
+            .iter()
+            .any(|k| compact.contains(k))
+            || words
+                .iter()
+                .any(|w| IMMOBILIZER_ECU_WORDS.contains(&w.as_str()))
+    });
+    let sirius = names
+        .iter()
+        .flatten()
+        .any(|n| folded_words(n).concat().contains(SIRIUS_ECU_SUBSTRING));
+    if hit {
+        EcuClass::Immobilizer
+    } else if sirius {
+        EcuClass::Sirius
+    } else {
+        EcuClass::Generic
+    }
+}
+
+/// The policy's view of `ecu` ([`DefinitionGuard`]): its class ([`ecu_class`]) and every
+/// request whose request name, or the name, description, comment or mnemonic of one of its
+/// data items, contains an immobilizer keyword ([`crate::safety::immobilizer_keyword`]),
+/// flagged with its fixed sent bytes (up to the first sent data item). `Session` applies it to
+/// every request once it is set with `Session::set_definition_guard`.
+pub fn definition_guard(ecu: &EcuDef) -> DefinitionGuard {
+    use crate::safety::immobilizer_keyword;
+    let mut g = DefinitionGuard::new(ecu_class(ecu));
     let flagged = |name: &str| -> bool {
         if immobilizer_keyword(name).is_some() {
             return true;
@@ -128,26 +180,36 @@ pub fn immobilizer_named_requests(
                 .any(|t| t.as_deref().and_then(immobilizer_keyword).is_some())
         })
     };
-    ecu.requests
-        .iter()
-        .filter(|r| {
-            let sent = &r.sent_bytes.0;
-            let fixed = r
-                .sent_items
+    for r in &ecu.requests {
+        let sent = &r.sent_bytes.0;
+        let fixed = r
+            .sent_items
+            .iter()
+            .map(|i| (i.first_byte as usize).saturating_sub(1))
+            .min()
+            .unwrap_or(sent.len())
+            .min(sent.len());
+        let hit = flagged(&r.name)
+            || r.sent_items
                 .iter()
-                .map(|i| (i.first_byte as usize).saturating_sub(1))
-                .min()
-                .unwrap_or(sent.len())
-                .min(sent.len());
-            fixed > 0 && payload.starts_with(&sent[..fixed])
-        })
-        .filter(|r| {
-            flagged(&r.name)
-                || r.sent_items
-                    .iter()
-                    .chain(r.received_items.iter())
-                    .any(|i| flagged(&i.name))
-        })
-        .map(|r| r.name.clone())
-        .collect()
+                .chain(r.received_items.iter())
+                .any(|i| flagged(&i.name));
+        if fixed > 0 && hit {
+            g.flag(sent[..fixed].to_vec(), r.name.clone());
+        }
+    }
+    g
+}
+
+/// Names of the requests of `ecu` that `payload` would send (their fixed sent bytes are a
+/// prefix of `payload`) and that [`definition_guard`] flags. Empty: no such request. The two
+/// owner-approved BMT remote-learning routines (exact `31C7000000` / `31C8000000` on an
+/// immobilizer ECU, [`crate::safety::is_immobilizer_ecu`]) are exempt: their BMT names contain
+/// "CLE" (remote key).
+pub fn immobilizer_named_requests(
+    ecu: &EcuDef,
+    target: &crate::safety::Target,
+    payload: &[u8],
+) -> Vec<String> {
+    definition_guard(ecu).immobilizer_names(target, payload)
 }

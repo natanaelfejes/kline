@@ -288,7 +288,7 @@ pub fn exec(
             "\n==== APPROVAL REQUIRED: {} ====\nrequest:  {}{}\nECU:      {:02X} ({})\n{}\n\nType the code {} and Enter to send exactly this request once; anything else aborts.",
             tier_name(challenge.tier()),
             hex_sp(challenge.payload()),
-            if names.is_empty() { String::new() } else { format!(" = {}", names.join(" / ")) },
+            if names.is_empty() { String::new() } else { format!(" = {}", kline_host::sanitize_list(&names)) },
             t.ecu_address,
             cmd::proto_name(t.protocol),
             risk_human(challenge.risk()),
@@ -386,7 +386,7 @@ fn config_write_prereads(
             o.ecu.defs[chosen].path.display()
         )));
     }
-    let backup = safety::config_backup_read(&o.target(), payload)
+    let backup = safety::config_backup_read_in(o.session.definition_guard(), &o.target(), payload)
         .ok_or_else(|| CliError::refused("no backup read defined for this write"))?;
     let r = o
         .link

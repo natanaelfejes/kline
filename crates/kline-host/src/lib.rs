@@ -64,6 +64,31 @@ pub fn parse_hex(s: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+/// `s` safe to print on a terminal: control characters (C0, DEL, C1 such as the 8-bit CSI
+/// `9B`), escape sequences and bidirectional overrides are replaced by a visible `\u{..}`
+/// escape, so a crafted definition name cannot redraw or hide part of a security prompt.
+pub fn sanitize(s: &str) -> String {
+    let mut o = String::with_capacity(s.len());
+    for c in s.chars() {
+        let bidi = matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}');
+        if c.is_control() || bidi {
+            o.push_str(&format!("\\u{{{:x}}}", c as u32));
+        } else {
+            o.push(c);
+        }
+    }
+    o
+}
+
+/// Names joined with " / ", each [`sanitize`]d.
+pub fn sanitize_list(names: &[String]) -> String {
+    names
+        .iter()
+        .map(|n| sanitize(n))
+        .collect::<Vec<_>>()
+        .join(" / ")
+}
+
 pub fn tier_name(t: Tier) -> &'static str {
     match t {
         Tier::Read => "read (tier 0)",
@@ -82,6 +107,9 @@ pub fn warning_name(w: Warning) -> &'static str {
         Warning::MovesActuator => "MOVES_ACTUATOR",
         Warning::EepromWrite => "EEPROM_WRITE",
         Warning::UnknownEffect => "UNKNOWN_EFFECT",
+        Warning::MayBrickEcu => "MAY_BRICK_ECU",
+        Warning::MayLeaveProgrammingSession => "MAY_LEAVE_PROGRAMMING_SESSION",
+        Warning::SecurityAccess => "SECURITY_ACCESS",
     }
 }
 
@@ -127,6 +155,18 @@ pub fn risk_human(r: &RiskInfo) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sanitize_escapes_controls_escape_sequences_and_bidi() {
+        let s =
+            super::sanitize("Reset\nAPPROVED \u{1b}[2J\u{1b}]0;x\u{7}\u{9b}31m\u{202e}ok\u{7f}");
+        assert_eq!(
+            s,
+            "Reset\\u{a}APPROVED \\u{1b}[2J\\u{1b}]0;x\\u{7}\\u{9b}31m\\u{202e}ok\\u{7f}"
+        );
+        assert!(!s.chars().any(|c| c.is_control()));
+        assert_eq!(super::sanitize("Réinit flags é"), "Réinit flags é");
+    }
+
     #[test]
     fn hex_round_trip_and_separators() {
         assert_eq!(super::parse_hex("21 a9"), Some(vec![0x21, 0xA9]));

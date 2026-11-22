@@ -83,8 +83,10 @@ fn reads_need_exactly_one_identifier() {
     );
 }
 
+/// Owner decision 2026-11-22 (final): other sessions are Expert, with a programming-session
+/// warning, not forbidden.
 #[test]
-fn only_default_and_renault_sessions() {
+fn only_default_and_renault_sessions_are_reads() {
     for p in [
         &[0x10, 0x85][..],
         &[0x10, 0x86],
@@ -97,11 +99,12 @@ fn only_default_and_renault_sessions() {
     ] {
         assert_eq!(
             reason(&SIRIUS, p),
-            Some(DenyReason::Forbidden { service: 0x10 }),
+            Some(DenyReason::ParametersNotAllowed { service: 0x10 }),
             "{p:02X?}"
         );
-        // Not even in expert mode.
-        assert!(tier_of(&SIRIUS, p).is_err());
+        let r = assess(&SIRIUS, p).unwrap();
+        assert_eq!(r.tier, Tier::Expert);
+        assert!(r.warnings.contains(&Warning::MayLeaveProgrammingSession));
     }
 }
 
@@ -274,8 +277,10 @@ fn immobilizer_is_forbidden_always() {
     );
 }
 
+/// Owner decision 2026-11-22 (final): security access and transfer services are Expert with
+/// brick / lockout warnings, not forbidden.
 #[test]
-fn forbidden_even_for_experts() {
+fn security_access_and_transfer_are_expert_with_warnings() {
     for (t, p, service) in [
         (SIRIUS, &[0x27, 0x01][..], 0x27),
         (BMT, &[0x27, 0x01], 0x27),
@@ -290,11 +295,17 @@ fn forbidden_even_for_experts() {
     ] {
         assert_eq!(
             reason(&t, p),
-            Some(DenyReason::Forbidden { service }),
+            Some(DenyReason::ServiceNotAllowed { service }),
             "{p:02X?}"
         );
-        assert!(tier_of(&t, p).is_err());
-        assert!(assess(&t, p).is_err());
+        let r = assess(&t, p).unwrap();
+        assert_eq!(r.tier, Tier::Expert, "{p:02X?}");
+        let w = if service == 0x27 {
+            Warning::SecurityAccess
+        } else {
+            Warning::MayBrickEcu
+        };
+        assert!(r.warnings.contains(&w), "{p:02X?} {r:?}");
     }
 }
 
@@ -328,7 +339,8 @@ fn undocumented_requests_are_expert_only() {
         (SIRIUS, &[0x31, 0xA0, 0xA2]),
         (SIRIUS, &[0x31, 0xA0, 0xA0, 0x00]),
         (SIRIUS, &[0x31, 0xA4, 0x00]),
-        (SIRIUS, &[0x31, 0xA2, 0x01, 0x00, 0x00]),
+        // (31 A2 .. is forbidden since the owner decision 2026-11-22: routine on an
+        // immobilizer LID; tests/secfinal.rs.)
         (SIRIUS, &[0x31, 0xC7, 0x00, 0x00, 0x00]),
         (BMT, &[0x31, 0x00, 0x00, 0x00, 0x00]),
         (BMT, &[0x31, 0x00, 0x00, 0x00]),
@@ -410,11 +422,7 @@ fn sirius_immobilizer_and_session_rules_hold_under_iso8() {
         assert!(tier_of(&iso8_7a, p).is_err());
     }
     for p in [&[0x10, 0x85][..], &[0x10, 0xC0], &[0x10]] {
-        assert_eq!(
-            reason(&iso8_7a, p),
-            Some(DenyReason::Forbidden { service: 0x10 }),
-            "{p:02X?}"
-        );
+        assert_eq!(tier_of(&iso8_7a, p).unwrap(), Tier::Expert, "{p:02X?}");
     }
 }
 

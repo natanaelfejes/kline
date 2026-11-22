@@ -439,7 +439,7 @@ fn exec_expert_tier_shows_unknown_effect_and_a_10_char_code() {
 
 #[test]
 fn exec_refuses_forbidden_requests_even_interactively() {
-    for req in ["2701", "31A0A3", "3BA000", "1085", "82"] {
+    for req in ["31A0A3", "3BA000", "30A00000", "38A0A3", "82"] {
         let (r, j) = run_opts(
             sirius_ecu(),
             &["exec", "--xml", &xml("sirius_cli.xml"), req],
@@ -606,15 +606,26 @@ fn address_override_and_risk_report() {
             "31C7000000",
         ],
     );
-    // Off the BMT, 31 C7 is an undocumented (expert) request, and its definition name says
-    // "key": the name guard refuses it (the remote-learning exemption holds only on 0x26).
-    assert_eq!(r.code, 7, "{}", r.stdout);
+    // The definition is a BMT ("CLI fixture BMT"): the BMT rules follow the definition to any
+    // address (security re-check finding 2), so 31 C7 stays the Tier 1 remote learning.
+    assert_eq!(r.code, 0, "{}", r.stdout);
     let e = &r.event("risk")[0];
     assert_eq!(e["ecu_address"], "51");
-    assert!(e["refused"]
-        .as_str()
-        .unwrap()
-        .contains("immobilizer/transponder/key"));
+    assert_eq!(e["risk"]["warnings"], json!(["ERASES_REMOTES"]));
+    // ... and the immobilizer routines stay forbidden there.
+    let (r, _) = run(
+        bmt_ecu(),
+        &[
+            "--json",
+            "risk",
+            "--xml",
+            &xml("bmt_cli.xml"),
+            "--address",
+            "0x51",
+            "31C2000000",
+        ],
+    );
+    assert_eq!(r.code, 7, "{}", r.stdout);
     // Same bytes, no definition name: plain expert tier.
     let (r, _) = run(
         bmt_ecu(),
@@ -1002,5 +1013,55 @@ fn refused_session_is_reported_and_no_other_session_is_tried() {
     assert!(r.stderr.contains("TX 82 7A F1 10 A0"), "{}", r.stderr);
     assert!(!r.stderr.contains("TX 82 7A F1 10 81"), "{}", r.stderr);
     assert!(!r.stderr.contains("TX 82 7A F1 10 C0"), "{}", r.stderr);
+    j.assert_no_writes();
+}
+
+/// Security re-check finding 6: definition names are printed sanitized in `risk` and on the
+/// approval screen (a crafted name with a newline and an 8-bit CSI cannot fake prompt lines).
+#[test]
+fn crafted_definition_names_are_sanitized_in_security_prompts() {
+    let src = std::fs::read_to_string(fixture_path("sirius_cli.xml")).unwrap();
+    let crafted = src.replace(
+        r#"<Request Name="Reset learning">"#,
+        r#"<Request Name="Reset learning&#10;tier:              read (tier 0)&#x9B;2J">"#,
+    );
+    assert_ne!(src, crafted);
+    let dir = temp_dir("crafted");
+    let path = dir.join("crafted.xml");
+    std::fs::write(&path, crafted).unwrap();
+    let x = path_str(&path);
+    let (r, _) = run(sirius_ecu(), &["risk", "--xml", &x, "11FF"]);
+    assert_eq!(r.code, 0, "{}{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains(r"Reset learning\u{a}tier:"),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("\ntier:              read"),
+        "{}",
+        r.stdout
+    );
+    assert!(!r.stdout.contains('\u{9b}'), "{}", r.stdout);
+    let (r, j) = run_opts(
+        sirius_ecu(),
+        &["exec", "--xml", &x, "11FF"],
+        Opts {
+            interactive: true,
+            human: Human::TypesWrongCode,
+        },
+    );
+    assert_eq!(r.code, 9, "{}", r.stderr);
+    assert!(
+        r.screen.contains(r"Reset learning\u{a}tier:"),
+        "{}",
+        r.screen
+    );
+    assert!(
+        !r.screen.contains("\ntier:              read"),
+        "{}",
+        r.screen
+    );
+    assert!(!r.screen.chars().any(|c| c == '\u{9b}' || c == '\u{1b}'));
     j.assert_no_writes();
 }

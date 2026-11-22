@@ -367,6 +367,9 @@ pub fn open_session(
             ),
         )
     })?;
+    // SAFETY.md rule 3: the core applies the definition's class and immobilizer names to every
+    // request of this session.
+    session.set_definition_guard(ecu.guard());
     let t = session.target();
     ctx.out.emit(
         json!({
@@ -1130,7 +1133,7 @@ pub fn scan(ctx: &mut Ctx, a: &ScanArgs) -> Result<(), CliError> {
 }
 
 /// The policy's view of a request without sending anything: tier and RiskInfo, or why it is
-/// refused (address-based policy first, then the definition name guard for tiers 1-3).
+/// refused (kline-core policy with the definition's guard, `kline_core::spec::definition_guard`).
 pub struct Assessment {
     pub target: Target,
     pub payload: Vec<u8>,
@@ -1141,13 +1144,9 @@ pub struct Assessment {
 pub fn assess(ecu: &Ecu, request: &str) -> Result<Assessment, CliError> {
     let r = defs::resolve_request(ecu.def(), request)?;
     let target = ecu.target()?;
-    let risk = match safety::assess(&target, &r.payload) {
-        Err(d) => Err(CliError::denied(&d)),
-        Ok(risk) if risk.tier != Tier::Read => {
-            defs::name_guard(ecu.def(), &target, &r.payload).map(|()| risk)
-        }
-        Ok(risk) => Ok(risk),
-    };
+    // Same policy as the session (kline-core): byte rules plus the definition guard.
+    let risk =
+        safety::assess_in(&ecu.guard(), &target, &r.payload).map_err(|d| CliError::denied(&d));
     Ok(Assessment {
         target,
         payload: r.payload,
@@ -1177,7 +1176,7 @@ pub fn assessment_human(a: &Assessment) -> String {
         if a.names.is_empty() {
             String::new()
         } else {
-            format!(" = {}", a.names.join(" / "))
+            format!(" = {}", crate::sanitize_list(&a.names))
         }
     );
     match &a.risk {

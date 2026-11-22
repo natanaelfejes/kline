@@ -122,9 +122,10 @@ pub fn deny_text(r: &DenyReason) -> String {
         DenyReason::Immobilizer => {
             "immobilizer/transponder related: forbidden always (SAFETY.md rule 3)".into()
         }
-        DenyReason::Forbidden { service } => {
-            format!("service {service:02X} (security access, flashing or session change) is forbidden always")
-        }
+        DenyReason::ImmobilizerNamed { names } => format!(
+            "definition request(s) {} look immobilizer/transponder/key related: forbidden always (SAFETY.md rule 3)",
+            crate::sanitize_list(names)
+        ),
         DenyReason::ProtocolReserved { service } => {
             format!("{service:02X} is a link frame, sent only by init / TesterPresent / Stop")
         }

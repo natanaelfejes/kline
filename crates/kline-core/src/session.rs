@@ -15,7 +15,7 @@ use crate::frame::{FrameError, Framing, KwpHeader, Reply};
 use crate::init::InitOutcome;
 use crate::io::{Action, Event, Step};
 use crate::retry::TesterPresentMode;
-use crate::safety::{self, Denied, Protocol, ProtocolFrame, Target};
+use crate::safety::{self, DefinitionGuard, Denied, Protocol, ProtocolFrame, Target};
 #[cfg(feature = "approved-routines")]
 use crate::safety::{Approval, ApprovalChallenge, ChallengeIds, DenyReason, RiskInfo, Tier};
 use crate::scan::ScanRequest;
@@ -97,6 +97,9 @@ pub struct Session {
     /// (`21 80`) and pre-read backups for Tier 2 writes. A failed or negative read of `lid`
     /// removes the entry.
     config_reads: BTreeMap<u8, Vec<u8>>,
+    /// What the loaded ECU definition adds to the byte policy (class, immobilizer-named
+    /// requests). Applied to every request and challenge.
+    guard: DefinitionGuard,
     /// Random per-session nonce, made with the first approval challenge.
     #[cfg(feature = "approved-routines")]
     nonce: Option<u64>,
@@ -160,11 +163,28 @@ impl Session {
             next_tp_ms,
             closed: false,
             config_reads: BTreeMap::new(),
+            guard: DefinitionGuard::default(),
             #[cfg(feature = "approved-routines")]
             nonce: None,
             #[cfg(feature = "approved-routines")]
             pending_approval: None,
         }
+    }
+
+    /// Apply the loaded ECU definition's guard (`kline_core::spec::definition_guard`) to every
+    /// later request and challenge: BMT rules for a BMT/UCH/decoder definition at any address,
+    /// and refusal of Tier 1-3 requests whose definition names look immobilizer related. It
+    /// can only add refusals to the byte policy. Invalidates an outstanding challenge.
+    pub fn set_definition_guard(&mut self, guard: DefinitionGuard) {
+        self.guard = guard;
+        #[cfg(feature = "approved-routines")]
+        {
+            self.pending_approval = None;
+        }
+    }
+
+    pub fn definition_guard(&self) -> &DefinitionGuard {
+        &self.guard
     }
 
     pub fn framing(&self) -> Framing {
@@ -199,7 +219,7 @@ impl Session {
     /// [`Session::tester_present`] and [`Session::stop`].
     pub fn request(&mut self, payload: &[u8], now_ms: u64) -> Result<Action, SessionError> {
         self.ready()?;
-        let permit = safety::check(&self.target, payload)?;
+        let permit = safety::check_in(&self.guard, &self.target, payload)?;
         self.begin(Kind::Request, permit, now_ms)
     }
 
@@ -281,7 +301,7 @@ impl Session {
         identification: Option<&[u8]>,
     ) -> Result<RiskInfo, SessionError> {
         let deny = |reason| -> SessionError { Denied::new(payload, reason).into() };
-        let risk = safety::assess(&self.target, payload)?;
+        let risk = safety::assess_in(&self.guard, &self.target, payload)?;
         if risk.tier != tier || tier == Tier::Read {
             return Err(deny(DenyReason::ApprovalMismatch));
         }
@@ -290,7 +310,7 @@ impl Session {
             if ident.is_none() || ident != identification {
                 return Err(deny(DenyReason::IdentificationMismatch));
             }
-            let backup = safety::config_backup_read(&self.target, payload)
+            let backup = safety::config_backup_read_in(&self.guard, &self.target, payload)
                 .ok_or_else(|| deny(DenyReason::ApprovalMismatch))?;
             if self.config_read(backup[1]).is_none() {
                 return Err(deny(DenyReason::PreReadRequired {

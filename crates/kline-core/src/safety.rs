@@ -6,19 +6,22 @@
 //! | [`Tier::Read`] | documented reads, `10 81`/`10 A0`, `3E` | anyone: [`check`] / `Session::request` (CLI, `--json`, MCP) |
 //! | [`Tier::Service`] | clear DTC, output tests, adaptation reset, Sirius `31 A0 A0`, BMT remote learning and actuators | a human, one typed `Approval` per request |
 //! | [`Tier::ConfigWrite`] | `3B` config writes | a human `Approval`, after the backup read and (BMT) the `21 80` identification the definition was chosen from |
-//! | [`Tier::Expert`] | any other request that is not forbidden (undocumented service or identifier) | a human expert `Approval` that shows "unknown effect" |
-//! | forbidden | immobilizer/transponder functions and config, `27`, `34`-`37`, sessions other than `10 81`/`10 A0`, link frames | nobody, never |
+//! | [`Tier::Expert`] | any other request that is not forbidden: undocumented services and identifiers, security access `27`, download/upload/transfer `34`-`37`, other `10 xx` sessions, memory/routine-by-address services on non-immobilizer ECUs (with specific warnings such as [`Warning::MayBrickEcu`]) | a human expert `Approval` that shows the risk |
+//! | forbidden | the immobilizer line only (owner decision 2026-11-22, final): on a BMT/UCH/decoder (address `26`/`A6` or a BMT/UCH/decoder definition, [`DefinitionGuard`]) `3D`, `38`-`3A`, `2C`, `30`-`33` with `C0`-`C9` (except exact `31C7000000`/`31C8000000`), `2E`/`2F`, `3B` other than `3B D2` and `3B D2 02` (AP1CLE), `21 A4` with extra bytes; elsewhere (Sirius) `2E`/`2F`/`3B`/`30` on `A0`/`A2`/`AE`/`BD`, routines on `A2`/`AE`/`BD` and `A0 A3`; definition requests named like immobilizer/transponder/key ([`DenyReason::ImmobilizerNamed`]) | nobody, never |
+//!
+//! Link frames (`81`, `82`, ISO8 `36`/`3F`) are refused as requests ([`DenyReason::ProtocolReserved`]),
+//! not as a safety rule: sent as a request they would desynchronise the session state machine.
 //!
 //! Approvals exist only with the cargo feature `approved-routines` (off by default; interactive
 //! CLI only). Without it, and in AI/MCP/`--json` use, [`assess`] still *prepares* any request:
 //! it returns its [`RiskInfo`] (or the refusal) so the caller can print it with the exact command
 //! for a human, but nothing except Tier 0 can be executed.
 //!
-//! Link frames (`81`, `82`, ISO8 `36`/`3F`) are not requests: only the init machines and
-//! `Session::tester_present`/`Session::stop` send them ([`DenyReason::ProtocolReserved`]).
+//! Only the init machines and `Session::tester_present`/`Session::stop` send link frames.
 //!
 //! Every frame the core writes carries a [`Permit`]. Decisions use the exact payload bytes and
-//! the target, never request names, so a definition that lists a write cannot unlock it.
+//! the target first; the loaded definition's [`DefinitionGuard`] can only add refusals, so a
+//! definition that lists a write cannot unlock it.
 
 use alloc::vec::Vec;
 
@@ -26,6 +29,13 @@ use thiserror::Error;
 
 /// BMT (UCH) K-line address.
 pub const BMT_ADDRESS: u8 = 0x26;
+/// Second address the immobilizer line treats as BMT/UCH/decoder (owner decision 2026-11-22:
+/// "address 0x26/0xA6").
+pub const BMT_ADDRESS_ALT: u8 = 0xA6;
+/// Memory write / routine by address / dynamic definition services (`3D`, `38`, `39`, `3A`,
+/// `2C`): on a BMT/UCH/decoder they can write the EEPROM that holds the key codes, so they are
+/// forbidden there always (owner decision 2026-11-22). On other ECUs they stay Expert.
+pub const BMT_MEMORY_SERVICES: [u8; 5] = [0x3D, 0x38, 0x39, 0x3A, 0x2C];
 /// BMT `21A4` "ETATS TRANSPONDEUR": transponder/immobilizer *status* flags. A read, Tier 0
 /// under policy v2 (diagnose intermittent start refusals). Only the exact two bytes; anything
 /// after `21 A4` is refused as immobilizer related.
@@ -33,10 +43,11 @@ pub const BMT_TRANSPONDER_READ: [u8; 2] = [0x21, 0xA4];
 /// BMT routine function numbers (`31 [fn] ..`, "LANCEMENT DES ROUTINES") that write, learn or
 /// code the immobilizer/transponder (policy v2).
 pub const BMT_IMMOBILIZER_FUNCTIONS: [u8; 6] = [0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6];
-/// "Anything resembling" them: on the BMT, a `30`/`31`/`32` payload whose second byte is in
-/// this range is refused as [`DenyReason::Immobilizer`], except the two exact remote-learning
-/// routines. Capability catalogue 9.1: 0xC0..=0xC8 are all immobilizer functions.
-pub const BMT_IMMOBILIZER_RANGE: core::ops::RangeInclusive<u8> = 0xC0..=0xC8;
+/// "Anything resembling" them: on the BMT, a `30`/`31`/`32`/`33` payload whose second byte is
+/// in this range is refused as [`DenyReason::Immobilizer`], except the two exact
+/// remote-learning routines. Capability catalogue 9.1: 0xC0..=0xC8 are all immobilizer
+/// functions; 0xC9 added by owner decision 2026-11-22 ("31 C0-C6/C9 family").
+pub const BMT_IMMOBILIZER_RANGE: core::ops::RangeInclusive<u8> = 0xC0..=0xC9;
 /// BMT `31C7000000` erase all remotes and learn remote 1, `31C8000000` learn remote 2.
 pub const BMT_REMOTE_LEARNING: [[u8; 5]; 2] = [
     [0x31, 0xC7, 0x00, 0x00, 0x00],
@@ -64,8 +75,16 @@ pub const SIRIUS_INJECTOR_INHIBITION: u8 = 0xA0;
 pub const SIRIUS_BACKUP_MEMORY_RESET: u8 = 0xA3;
 /// Sirius local identifiers whose frames carry immobilizer / "verrou logiciel" fields
 /// (catalogue 4.4: Trame 01 `A0`, Trame 03 `A2`, Trame 15 `AE` verrou type, Trame 30 `BD`).
-/// Reading them is Tier 0; any `2E`/`2F`/`3B` with one of them is refused always.
+/// Reading them is Tier 0. Refused always (owner decision 2026-11-22): on every
+/// non-immobilizer ECU any write (`2E`/`2F`/`3B`) of one of them and any routine service
+/// (`31`-`33`, `38`-`3A`) on `A0 A3`; on a Sirius ([`is_sirius_ecu`]) also output control
+/// (`30`) of one of them and any routine service on `A2`/`AE`/`BD`. `31`/`32` with `A0` is the special-function
+/// routine (`31 A0 A0` / `32 A0 00` stay Tier 1), so `A0` alone is not refused there.
 pub const SIRIUS_IMMOBILIZER_LIDS: [u8; 4] = [0xA0, 0xA2, 0xAE, 0xBD];
+/// Sirius 32 / 34 injection K-line address (`<Function Address="122">`).
+pub const SIRIUS_ADDRESS: u8 = 0x7A;
+/// Routine services: start/stop/results by local id (`31`-`33`) and by address (`38`-`3A`).
+pub const ROUTINE_SERVICES: [u8; 6] = [0x31, 0x32, 0x33, 0x38, 0x39, 0x3A];
 /// ECU identification read; the definition used for a Tier 2 write must have been chosen from
 /// this session's reply to it.
 pub const IDENTIFICATION_READ: [u8; 2] = [0x21, 0x80];
@@ -90,6 +109,80 @@ pub struct Target {
     pub protocol: Protocol,
     pub ecu_address: u8,
 }
+
+/// What the loaded ECU definition says the ECU is, for the immobilizer line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EcuClass {
+    /// Not known to be an immobilizer ECU by its definition (the address rules still apply).
+    #[default]
+    Generic,
+    /// A BMT/UCH/immobilizer-decoder definition: the BMT rules apply at any address.
+    Immobilizer,
+    /// A Sirius injection definition: the Sirius immobilizer-LID rules apply at any address.
+    Sirius,
+}
+
+/// What the loaded definition adds to the byte policy (SAFETY.md rule 3 for ECUs the address
+/// rules do not know): its [`EcuClass`] and the requests whose names look immobilizer /
+/// transponder / key related. The byte rules stay primary: the guard only adds refusals, and
+/// the names only apply to Tier 1-3. Build one from an `EcuDef` with
+/// `kline_core::spec::definition_guard` (feature `spec`); the default guard adds nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DefinitionGuard {
+    pub class: EcuClass,
+    /// `(fixed sent-byte prefix, request name)` of each flagged request.
+    flagged: Vec<(Vec<u8>, alloc::string::String)>,
+}
+
+impl DefinitionGuard {
+    pub fn new(class: EcuClass) -> DefinitionGuard {
+        DefinitionGuard {
+            class,
+            flagged: Vec::new(),
+        }
+    }
+
+    /// Flag the request `name` that sends `prefix` (its fixed bytes) as immobilizer related.
+    /// An empty prefix is ignored (it would match every payload by accident of the XML).
+    pub fn flag(&mut self, prefix: Vec<u8>, name: alloc::string::String) {
+        if !prefix.is_empty() {
+            self.flagged.push((prefix, name));
+        }
+    }
+
+    /// Names of the flagged requests `payload` would send (their prefix starts it). The two
+    /// owner-approved BMT remote-learning routines are exempt on an immobilizer ECU: their BMT
+    /// names contain "CLE" (remote key).
+    pub fn immobilizer_names(&self, target: &Target, payload: &[u8]) -> Vec<alloc::string::String> {
+        if is_immobilizer_ecu(self, target) && is_remote_learning(payload) {
+            return Vec::new();
+        }
+        self.flagged
+            .iter()
+            .filter(|(p, _)| payload.starts_with(p))
+            .map(|(_, n)| n.clone())
+            .collect()
+    }
+}
+
+/// True when the BMT rules apply: address 0x26 or 0xA6, or a BMT/UCH/decoder definition.
+pub fn is_immobilizer_ecu(guard: &DefinitionGuard, target: &Target) -> bool {
+    matches!(target.ecu_address, BMT_ADDRESS | BMT_ADDRESS_ALT)
+        || guard.class == EcuClass::Immobilizer
+}
+
+/// True when the Sirius immobilizer-LID rules for output control and routines apply: address
+/// 0x7A or a Sirius definition (and not an immobilizer ECU). Writes (`2E`/`2F`/`3B`) to those
+/// LIDs and `.. A0 A3` routines are refused on every non-immobilizer ECU.
+pub fn is_sirius_ecu(guard: &DefinitionGuard, target: &Target) -> bool {
+    !is_immobilizer_ecu(guard, target)
+        && (target.ecu_address == SIRIUS_ADDRESS || guard.class == EcuClass::Sirius)
+}
+
+const NO_GUARD: DefinitionGuard = DefinitionGuard {
+    class: EcuClass::Generic,
+    flagged: Vec::new(),
+};
 
 /// Policy tier of a payload that is not forbidden.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +215,15 @@ pub enum Warning {
     EepromWrite,
     /// Undocumented request: the effect is unknown.
     UnknownEffect,
+    /// Can leave the ECU unable to run or to be diagnosed again (flash/memory/routine by
+    /// address; an interrupted transfer).
+    MayBrickEcu,
+    /// Can leave the ECU in a programming or other non-default session (normal program not
+    /// running) until it times out or the ignition is cycled.
+    MayLeaveProgrammingSession,
+    /// Security access: unlocks protected services; failed attempts can lock the ECU out for a
+    /// delay.
+    SecurityAccess,
 }
 
 /// What a non-read request does, shown to the human before approval and quoted by the
@@ -149,9 +251,9 @@ pub enum DenyReason {
     /// Writes, learns or codes the immobilizer/transponder, or may (SAFETY.md rule 3).
     /// Forbidden always, also in expert mode.
     Immobilizer,
-    /// Security access `27`, download/upload/transfer `34`-`37`, a diagnostic session other than
-    /// `10 81`/`10 A0`. Forbidden always, also in expert mode.
-    Forbidden { service: u8 },
+    /// A Tier 1-3 request of the loaded definition whose name looks immobilizer / transponder
+    /// / key related ([`DefinitionGuard`]). Forbidden always, also in expert mode.
+    ImmobilizerNamed { names: Vec<alloc::string::String> },
     /// A link-layer frame (`81`, `82`, ISO8 `36`/`3F`): sent only by the init machines and
     /// `Session::tester_present` / `Session::stop`, never as a request.
     ProtocolReserved { service: u8 },
@@ -174,7 +276,7 @@ impl DenyReason {
             self,
             DenyReason::Empty
                 | DenyReason::Immobilizer
-                | DenyReason::Forbidden { .. }
+                | DenyReason::ImmobilizerNamed { .. }
                 | DenyReason::ProtocolReserved { .. }
         )
     }
@@ -259,20 +361,44 @@ fn is_remote_learning(payload: &[u8]) -> bool {
     BMT_REMOTE_LEARNING.iter().any(|r| r[..] == *payload)
 }
 
-/// The refusals no approval can lift (also in expert mode), or `None`.
+/// The refusals no approval can lift (also in expert mode), or `None`. Byte and address rules
+/// only; [`forbidden_in`] adds the loaded definition's [`DefinitionGuard`].
 pub fn forbidden(target: &Target, payload: &[u8]) -> Option<DenyReason> {
+    forbidden_in(&NO_GUARD, target, payload)
+}
+
+/// [`forbidden`] with the loaded definition's guard: its class (BMT rules at any address) and,
+/// for requests that are not Tier 0, its immobilizer-named requests.
+pub fn forbidden_in(
+    guard: &DefinitionGuard,
+    target: &Target,
+    payload: &[u8],
+) -> Option<DenyReason> {
+    let r = forbidden_bytes(guard, target, payload);
+    if r.is_some() {
+        return r;
+    }
+    let names = guard.immobilizer_names(target, payload);
+    if !names.is_empty() && classify_bytes(guard, target, payload) != Ok(Tier::Read) {
+        return Some(DenyReason::ImmobilizerNamed { names });
+    }
+    None
+}
+
+fn forbidden_bytes(guard: &DefinitionGuard, target: &Target, payload: &[u8]) -> Option<DenyReason> {
     let Some(&service) = payload.first() else {
         return Some(DenyReason::Empty);
     };
     let p1 = payload.get(1).copied();
-    let bmt = target.ecu_address == BMT_ADDRESS;
+    let bmt = is_immobilizer_ecu(guard, target);
     // Rule 3 first, on any protocol (security review M2 F3b: no protocol confusion).
     if bmt {
         let immo = match service {
-            0x30..=0x32 => {
+            0x30..=0x33 => {
                 p1.is_some_and(|b| BMT_IMMOBILIZER_RANGE.contains(&b))
                     && !is_remote_learning(payload)
             }
+            s if BMT_MEMORY_SERVICES.contains(&s) => true,
             0x2E | 0x2F => true,
             0x3B => {
                 p1 != Some(BMT_CONFIG_WRITE_LID)
@@ -288,11 +414,20 @@ pub fn forbidden(target: &Target, payload: &[u8]) -> Option<DenyReason> {
     // Sirius rules on any protocol too (re-review M2 finding 1: a Target { Iso8, 0x7A } must not
     // turn `31 A0 A3` or a write to an immobilizer frame into an expert request).
     if !bmt {
-        let reset = payload.len() >= 3
-            && payload[..3] == [0x31, SIRIUS_SPECIAL_FUNCTION, SIRIUS_BACKUP_MEMORY_RESET];
-        let immo_write = matches!(service, 0x2E | 0x2F | 0x3B)
-            && p1.is_some_and(|b| SIRIUS_IMMOBILIZER_LIDS.contains(&b));
-        if reset || immo_write {
+        let routine = ROUTINE_SERVICES.contains(&service);
+        let reset = routine
+            && payload.len() >= 3
+            && payload[1..3] == [SIRIUS_SPECIAL_FUNCTION, SIRIUS_BACKUP_MEMORY_RESET];
+        let lid = p1.is_some_and(|b| SIRIUS_IMMOBILIZER_LIDS.contains(&b));
+        let sirius = is_sirius_ecu(guard, target);
+        // A0 is also the special-function routine number (31 A0 A0 / 32 A0 00, Tier 1).
+        let immo_routine = sirius && routine && lid && p1 != Some(SIRIUS_SPECIAL_FUNCTION);
+        let immo_write = match service {
+            0x2E | 0x2F | 0x3B => lid,
+            0x30 => sirius && lid,
+            _ => false,
+        };
+        if reset || immo_routine || immo_write {
             return Some(DenyReason::Immobilizer);
         }
     }
@@ -300,17 +435,8 @@ pub fn forbidden(target: &Target, payload: &[u8]) -> Option<DenyReason> {
         (Protocol::Kwp, 0x81 | 0x82) | (Protocol::Iso8, 0x36 | 0x3F) => {
             Some(DenyReason::ProtocolReserved { service })
         }
-        (_, 0x27) | (Protocol::Kwp, 0x34..=0x37) | (Protocol::Iso8, 0x34 | 0x35 | 0x37) => {
-            Some(DenyReason::Forbidden { service })
-        }
-        // SAFETY.md rule 3: sessions other than 10 81 / 10 A0 are forbidden always, whatever
-        // the protocol (re-review M2 finding 1).
-        (_, 0x10)
-            if !(payload.len() == 2
-                && matches!(p1, Some(DEFAULT_SESSION | RENAULT_DIAG_SESSION))) =>
-        {
-            Some(DenyReason::Forbidden { service })
-        }
+        // Owner decision 2026-11-22 (final): security access `27`, download/upload/transfer
+        // `34`-`37` and other sessions are Expert (with specific warnings), not forbidden.
         _ => None,
     }
 }
@@ -327,20 +453,43 @@ pub fn forbidden(target: &Target, payload: &[u8]) -> Option<DenyReason> {
 /// `out` in 0xA0..=0xB3. KWP, Tier 2: BMT `3B D2 index 00|01` (index 0..=13, not 2), other
 /// ECUs `3B lid` + 1-4 bytes.
 pub fn classify(target: &Target, payload: &[u8]) -> Result<Tier, Denied> {
-    if let Some(reason) = forbidden(target, payload) {
+    classify_in(&NO_GUARD, target, payload)
+}
+
+/// [`classify`] with the loaded definition's [`DefinitionGuard`].
+pub fn classify_in(
+    guard: &DefinitionGuard,
+    target: &Target,
+    payload: &[u8],
+) -> Result<Tier, Denied> {
+    if let Some(reason) = forbidden_in(guard, target, payload) {
+        return Err(Denied::new(payload, reason));
+    }
+    classify_bytes(guard, target, payload)
+}
+
+/// Documented tier on bytes and class only (no name guard).
+fn classify_bytes(
+    guard: &DefinitionGuard,
+    target: &Target,
+    payload: &[u8],
+) -> Result<Tier, Denied> {
+    if let Some(reason) = forbidden_bytes(guard, target, payload) {
         return Err(Denied::new(payload, reason));
     }
     let service = payload[0];
     let len = payload.len();
     let p1 = payload.get(1).copied();
-    let bmt = target.ecu_address == BMT_ADDRESS;
+    let bmt = is_immobilizer_ecu(guard, target);
     use Protocol::{Iso8, Kwp};
     use Tier::{ConfigWrite, Read, Service};
     let tier = match (target.protocol, service) {
         // TesterPresent, optional responseRequired byte.
         (Kwp, 0x3E) => (len <= 2).then_some(Read),
-        // StartDiagnosticSession: forbidden() already refused everything but 10 81 / 10 A0.
-        (Kwp, 0x10) => Some(Read),
+        // StartDiagnosticSession: only 10 81 / 10 A0 are Tier 0; any other session is Expert.
+        (Kwp, 0x10) => {
+            (len == 2 && matches!(p1, Some(DEFAULT_SESSION | RENAULT_DIAG_SESSION))).then_some(Read)
+        }
         // ReadEcuIdentification / ReadDataByLocalIdentifier: exactly one identifier byte.
         (Kwp, 0x1A | 0x21) => (len == 2).then_some(Read),
         // ReadStatusOfDTC / ReadDTCByStatus.
@@ -387,7 +536,16 @@ pub fn classify(target: &Target, payload: &[u8]) -> Result<Tier, Denied> {
 /// Tier of any `payload`: its documented tier, [`Tier::Expert`] for an undocumented request,
 /// or the refusal for a forbidden one.
 pub fn tier_of(target: &Target, payload: &[u8]) -> Result<Tier, Denied> {
-    match classify(target, payload) {
+    tier_of_in(&NO_GUARD, target, payload)
+}
+
+/// [`tier_of`] with the loaded definition's [`DefinitionGuard`].
+pub fn tier_of_in(
+    guard: &DefinitionGuard,
+    target: &Target,
+    payload: &[u8],
+) -> Result<Tier, Denied> {
+    match classify_in(guard, target, payload) {
         Ok(t) => Ok(t),
         Err(d) if d.reason.is_forbidden() => Err(d),
         Err(_) => Ok(Tier::Expert),
@@ -398,14 +556,22 @@ pub fn tier_of(target: &Target, payload: &[u8]) -> Result<Tier, Denied> {
 /// This is what AI/MCP/`--json` callers use for non-read requests: print the risk and the exact
 /// command for a human to run in the interactive CLI.
 pub fn assess(target: &Target, payload: &[u8]) -> Result<RiskInfo, Denied> {
-    let tier = tier_of(target, payload)?;
-    Ok(risk_info(target, payload, tier))
+    assess_in(&NO_GUARD, target, payload)
+}
+
+/// [`assess`] with the loaded definition's [`DefinitionGuard`].
+pub fn assess_in(
+    guard: &DefinitionGuard,
+    target: &Target,
+    payload: &[u8],
+) -> Result<RiskInfo, Denied> {
+    let tier = tier_of_in(guard, target, payload)?;
+    Ok(risk_info(is_immobilizer_ecu(guard, target), payload, tier))
 }
 
 const NONE: &[&str] = &[];
 
-fn risk_info(target: &Target, payload: &[u8], tier: Tier) -> RiskInfo {
-    let bmt = target.ecu_address == BMT_ADDRESS;
+fn risk_info(bmt: bool, payload: &[u8], tier: Tier) -> RiskInfo {
     let r = |what_it_changes, what_can_go_wrong, reversible, prerequisites, warnings| RiskInfo {
         tier,
         what_it_changes,
@@ -498,6 +664,55 @@ fn risk_info(target: &Target, payload: &[u8], tier: Tier) -> RiskInfo {
             ],
             &[Warning::EepromWrite],
         ),
+        (Tier::Expert, [0x27, ..]) => r(
+            "security access: unlocks protected services (programming, protected writes)",
+            "wrong keys count as failed attempts and can lock the ECU out for a delay; an unlocked ECU accepts writes that can brick it",
+            false,
+            &["you know the seed/key procedure of this exact ECU"],
+            &[Warning::SecurityAccess, Warning::MayBrickEcu, Warning::UnknownEffect],
+        ),
+        (Tier::Expert, [0x34..=0x37, ..]) => r(
+            "download/upload/transfer: ECU (re)programming or memory dump",
+            "MAY BRICK THE ECU: an interrupted or wrong transfer can leave it unable to run or to be reflashed over K-line; may leave the ECU in a programming session",
+            false,
+            &["stable supply voltage", "the exact image and procedure for this ECU", "a recovery path (bench flasher)"],
+            &[Warning::MayBrickEcu, Warning::MayLeaveProgrammingSession, Warning::EepromWrite, Warning::UnknownEffect],
+        ),
+        (Tier::Expert, [0x10, ..]) => r(
+            "switches the ECU to another diagnostic session (e.g. programming / extended)",
+            "MAY LEAVE THE ECU IN A PROGRAMMING SESSION: the engine/body program may stop running until the session times out or the ignition is cycled; some sessions enable flashing",
+            true,
+            &["engine off, vehicle stationary", "know how to return to 10 81 or cycle the ignition"],
+            &[Warning::MayLeaveProgrammingSession, Warning::UnknownEffect],
+        ),
+        (Tier::Expert, [0x3D, ..]) => r(
+            "writes ECU memory at a raw address (RAM, EEPROM or calibration)",
+            "MAY BRICK THE ECU: a wrong address or value can corrupt calibration/EEPROM and stop it running",
+            false,
+            &["a backup read (23) of the same range", "the memory map of this exact ECU"],
+            &[Warning::MayBrickEcu, Warning::EepromWrite, Warning::UnknownEffect],
+        ),
+        (Tier::Expert, [0x38..=0x3A, ..]) => r(
+            "starts/stops/queries a routine at a raw memory address (runs ECU code)",
+            "MAY BRICK THE ECU: running code at a wrong address can crash it, erase memory or leave it in a programming state",
+            false,
+            &["the memory map of this exact ECU"],
+            &[Warning::MayBrickEcu, Warning::MayLeaveProgrammingSession, Warning::UnknownEffect],
+        ),
+        (Tier::Expert, [0x2C, ..]) => r(
+            "defines a dynamic local identifier (changes what a 21 read returns)",
+            "later reads of that identifier return other data until the ECU is reset; unknown side effects",
+            true,
+            NONE,
+            &[Warning::UnknownEffect],
+        ),
+        (Tier::Expert, [0x23, ..]) => r(
+            "reads ECU memory at a raw address (no write intended)",
+            "unknown on this ECU: some addresses are I/O registers where a read has side effects; the dump may contain protected data",
+            true,
+            NONE,
+            &[Warning::UnknownEffect],
+        ),
         _ => r(
             "unknown effect: undocumented service or identifier",
             "unknown: may write EEPROM, move actuators, erase data or drop communication",
@@ -511,7 +726,16 @@ fn risk_info(target: &Target, payload: &[u8], tier: Tier) -> RiskInfo {
 /// Permit a Tier 0 (read) payload. Every other tier is refused with
 /// [`DenyReason::ApprovalRequired`]; forbidden payloads with their reason.
 pub fn check(target: &Target, payload: &[u8]) -> Result<Permit, Denied> {
-    match classify(target, payload)? {
+    check_in(&NO_GUARD, target, payload)
+}
+
+/// [`check`] with the loaded definition's [`DefinitionGuard`].
+pub fn check_in(
+    guard: &DefinitionGuard,
+    target: &Target,
+    payload: &[u8],
+) -> Result<Permit, Denied> {
+    match classify_in(guard, target, payload)? {
         Tier::Read => Ok(Permit::new(payload, *target, Tier::Read)),
         tier => Err(Denied::new(payload, DenyReason::ApprovalRequired { tier })),
     }
@@ -521,8 +745,17 @@ pub fn check(target: &Target, payload: &[u8]) -> Result<Permit, Denied> {
 /// approved (mandatory pre-read backup): `21 A1` for BMT `3B D2 ..`, else `21 lid` for
 /// `3B lid ..`.
 pub fn config_backup_read(target: &Target, payload: &[u8]) -> Option<[u8; 2]> {
+    config_backup_read_in(&NO_GUARD, target, payload)
+}
+
+/// [`config_backup_read`] with the loaded definition's [`DefinitionGuard`].
+pub fn config_backup_read_in(
+    guard: &DefinitionGuard,
+    target: &Target,
+    payload: &[u8],
+) -> Option<[u8; 2]> {
     match payload {
-        [0x3B, BMT_CONFIG_WRITE_LID, ..] if target.ecu_address == BMT_ADDRESS => {
+        [0x3B, BMT_CONFIG_WRITE_LID, ..] if is_immobilizer_ecu(guard, target) => {
             Some(BMT_CONFIG_READ)
         }
         [0x3B, lid, ..] => Some([0x21, *lid]),
@@ -748,6 +981,12 @@ pub const IMMOBILIZER_SUBSTRINGS: &[&str] = &[
 /// Whole words (lowercase, accents folded) with the same meaning: `cle`/`cles` (French key, as
 /// in "APPRENT CLE 2 TEL") and `key`/`keys`.
 pub const IMMOBILIZER_WORDS: &[&str] = &["cle", "cles", "key", "keys"];
+
+/// Fold one character for keyword matching: lowercase ASCII, accents removed; `None` for
+/// anything that is not a letter or digit.
+pub fn fold_char(c: char) -> Option<char> {
+    fold(c)
+}
 
 fn fold(c: char) -> Option<char> {
     let c = match c {

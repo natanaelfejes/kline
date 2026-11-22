@@ -103,10 +103,12 @@ fn main() -> anyhow::Result<()> {
         .context("installing the Ctrl-C handler")?;
     if safety::APPROVALS_COMPILED {
         // Cargo unified kline-core's feature in from another member (e.g. a joint build with
-        // kline-cli). This binary still has no approval code path; build it alone to be sure.
+        // kline-cli): approval types exist in this binary. Refuse to start (security re-check
+        // finding 4); build it alone with `cargo build --release -p kline-agent`.
         env.stderr.line(
-            "kline-agent: warning: built with kline-core approved-routines unified in; build with `cargo build -p kline-agent` alone",
+            "kline-agent: refusing to start: built with kline-core `approved-routines` unified in; rebuild it alone with `cargo build --release -p kline-agent`",
         );
+        std::process::exit(i32::from(exit::REFUSED));
     }
     let code = match Cli::try_parse() {
         Ok(mut cli) => {

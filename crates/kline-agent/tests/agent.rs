@@ -56,6 +56,44 @@ fn agent_is_built_without_approved_routines() {
     );
 }
 
+/// The agent binary under test was built with approvals unified in (joint workspace build):
+/// it must refuse to start, so the session tests below are skipped. `cargo test -p kline-agent`
+/// alone runs them.
+fn unified() -> bool {
+    if kline_core::safety::APPROVALS_COMPILED {
+        eprintln!("SKIPPED: kline-agent built with approved-routines unified in; run `cargo test -p kline-agent` alone");
+        true
+    } else {
+        false
+    }
+}
+
+/// Finding 4: with `approved-routines` unified in, the agent refuses to start (exit 7) and
+/// sends nothing; built alone it runs.
+#[test]
+fn agent_refuses_to_start_when_approvals_are_compiled_in() {
+    let o = Command::new(env!("CARGO_BIN_EXE_kline-agent"))
+        .args(["risk", "--xml"])
+        .arg(fixture("sirius_cli.xml"))
+        .arg("21A9")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&o.stderr);
+    if kline_core::safety::APPROVALS_COMPILED {
+        assert_eq!(o.status.code(), Some(7), "{err}");
+        assert!(err.contains("refusing to start"), "{err}");
+        assert!(
+            o.stdout.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&o.stdout)
+        );
+    } else {
+        assert_eq!(o.status.code(), Some(0), "{err}");
+        assert!(!err.contains("refusing to start"), "{err}");
+    }
+}
+
 fn sim(tag: &str) -> Option<(PtySim, Journal)> {
     let def = EcuDef::from_xml_bytes(&std::fs::read(fixture("sirius_cli.xml")).unwrap()).unwrap();
     let mut p = EcuProfile::sirius32();
@@ -102,6 +140,9 @@ fn agent(sim: &PtySim, args: &[&str]) -> (Option<i32>, Vec<serde_json::Value>, S
 
 #[test]
 fn agent_reads_but_cannot_send_any_non_read() {
+    if unified() {
+        return;
+    }
     let Some((sim, j)) = sim("nonread") else {
         return;
     };
@@ -139,6 +180,9 @@ fn agent_reads_but_cannot_send_any_non_read() {
 
 #[test]
 fn prepare_prints_risk_and_the_exact_human_command() {
+    if unified() {
+        return;
+    }
     let Some((sim, j)) = sim("prepare") else {
         return;
     };
@@ -156,7 +200,7 @@ fn prepare_prints_risk_and_the_exact_human_command() {
     assert!(cmd.starts_with("kline --port "), "{cmd}");
     assert!(cmd.ends_with(&format!(" exec --xml {x} 11FF")), "{cmd}");
     // Forbidden: no command at all.
-    let (code, ev, _) = agent(&sim, &["prepare", "--xml", &x, "2701"]);
+    let (code, ev, _) = agent(&sim, &["prepare", "--xml", &x, "31A0A3"]);
     assert_eq!(code, Some(7));
     assert_eq!(ev[0]["command"], serde_json::Value::Null);
     j.assert_no_writes();
