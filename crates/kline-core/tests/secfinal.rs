@@ -96,30 +96,51 @@ fn owner_decision_undocumented_requests_stay_expert() {
     }
 }
 
-/// Finding 3 and exploit `sirius_immobilizer_variants`: output control, routines and their
-/// stop/results on the immobilizer LIDs and on 31 A0 A3 are forbidden.
+/// Finding 3 and exploit `sirius_immobilizer_variants`, narrowed by security review M1: on a
+/// Sirius, writes to the immobilizer frame LIDs and every `.. A0 A3` routine variant are
+/// forbidden. Output control `30` and routines `31`-`33` / `38`-`3A` whose byte 2 happens to be
+/// A0/A2/AE/BD are other number spaces (`30 A0` is the fast radiator fan, `31 A2 00 00 00`
+/// "SRBLI start test sav", `31 A2 01 00 00` "Status tests OBDFC"): normal tiers.
 #[test]
 fn sirius_immobilizer_lids_and_backup_reset_variants_are_forbidden() {
     let cases: &[&[u8]] = &[
-        &[0x30, 0xA0, 0x00, 0x00],
-        &[0x30, 0xBD, 0x01],
-        &[0x30, 0xA2, 0x01],
-        &[0x30, 0xAE, 0x01, 0x02],
         &[0x31, 0xA0, 0xA3],
         &[0x31, 0xA0, 0xA3, 0xFF],
         &[0x32, 0xA0, 0xA3],
         &[0x33, 0xA0, 0xA3],
         &[0x38, 0xA0, 0xA3],
-        &[0x31, 0xA2, 0x00],
-        &[0x31, 0xAE],
-        &[0x32, 0xBD],
+        &[0x39, 0xA0, 0xA3],
+        &[0x3A, 0xA0, 0xA3],
         &[0x2E, 0xA0, 0x01],
+        &[0x2E, 0xA2, 0x01],
         &[0x2F, 0xAE, 0x01],
         &[0x3B, 0xBD, 0x01],
+        &[0x3B, 0xA2, 0x01],
     ];
     for p in cases {
         assert!(immo(&SIRIUS, p), "{p:02X?}: {:?}", tier_of(&SIRIUS, p));
     }
+    // Not immobilizer: output control and routines on those byte values.
+    for (p, t) in [
+        (&[0x30, 0xA0, 0x00, 0x00][..], Tier::Service),
+        (&[0x30, 0xBD, 0x01], Tier::Service),
+        (&[0x30, 0xA2, 0x01], Tier::Service),
+        (&[0x30, 0xAE, 0x01, 0x02], Tier::Service),
+        (&[0x31, 0xA2, 0x00, 0x00, 0x00], Tier::Expert),
+        (&[0x31, 0xA2, 0x01, 0x00, 0x00], Tier::Expert),
+        (&[0x31, 0xAE], Tier::Expert),
+        (&[0x32, 0xBD], Tier::Expert),
+        (&[0x33, 0xA2], Tier::Expert),
+        (&[0x38, 0xA2, 0x00, 0x00], Tier::Expert),
+    ] {
+        assert_eq!(tier_of(&SIRIUS, p).unwrap(), t, "{p:02X?}");
+        let r = safety::assess(&SIRIUS, p).unwrap();
+        assert_eq!(r.tier, t, "{p:02X?}");
+    }
+    assert!(safety::assess(&SIRIUS, &[0x30, 0xA0, 0x01])
+        .unwrap()
+        .warnings
+        .contains(&safety::Warning::MovesActuator));
     // Documented Sirius service actions are unchanged.
     assert_eq!(
         tier_of(&SIRIUS, &[0x31, 0xA0, 0xA0]).unwrap(),
@@ -181,8 +202,9 @@ fn immobilizer_class_definition_gets_bmt_rules_at_any_address() {
     assert!(safety::forbidden(&BMT_ALT, &[0x2E, 1, 2]).is_some());
 }
 
-/// The Sirius output-control / routine LID rules follow a Sirius definition to any address and
-/// do not hit other ECUs' `30 A0` output tests.
+/// The Sirius LID-write rule follows a Sirius definition to any address and is limited to it
+/// (security review M1: on other ECUs A0/A2/AE/BD mean other things). `.. A0 A3` routines
+/// stay refused on every non-immobilizer ECU.
 #[test]
 fn sirius_lid_rules_follow_the_definition_only() {
     let t = Target {
@@ -190,7 +212,11 @@ fn sirius_lid_rules_follow_the_definition_only() {
         ecu_address: 0x40,
     };
     let sirius = DefinitionGuard::new(EcuClass::Sirius);
-    for p in [&[0x30, 0xA0, 0x01][..], &[0x31, 0xAE, 0x00], &[0x38, 0xBD]] {
+    for p in [
+        &[0x3B, 0xA0, 0x01][..],
+        &[0x2E, 0xAE, 0x00],
+        &[0x2F, 0xBD, 0x01],
+    ] {
         assert!(
             tier_of_in(&sirius, &t, p)
                 .unwrap_err()
@@ -198,11 +224,24 @@ fn sirius_lid_rules_follow_the_definition_only() {
                 .is_forbidden(),
             "{p:02X?}"
         );
+        // A generic ECU at 0x40: the LID rule does not apply.
+        assert!(!immo(&t, p), "{p:02X?}: {:?}", tier_of(&t, p));
     }
-    assert_eq!(tier_of(&t, &[0x30, 0xA0, 0x01]).unwrap(), Tier::Service);
-    // Writes to those LIDs and A0 A3 routines stay refused on every non-immobilizer ECU.
-    assert!(immo(&t, &[0x3B, 0xA0, 0x01]));
+    assert_eq!(tier_of(&t, &[0x3B, 0xA0, 0x01]).unwrap(), Tier::ConfigWrite);
+    assert_eq!(tier_of(&t, &[0x2E, 0xAE, 0x00]).unwrap(), Tier::Expert);
+    for g in [&sirius, &DefinitionGuard::default()] {
+        assert_eq!(
+            tier_of_in(g, &t, &[0x30, 0xA0, 0x01]).unwrap(),
+            Tier::Service
+        );
+        assert_eq!(
+            tier_of_in(g, &t, &[0x31, 0xAE, 0x00]).unwrap(),
+            Tier::Expert
+        );
+        assert_eq!(tier_of_in(g, &t, &[0x38, 0xBD]).unwrap(), Tier::Expert);
+    }
     assert!(immo(&t, &[0x32, 0xA0, 0xA3]));
+    assert!(immo(&t, &[0x31, 0xA0, 0xA3]));
 }
 
 /// Owner decision 2026-11-22 (final): nothing outside the immobilizer line is forbidden.

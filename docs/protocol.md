@@ -386,11 +386,14 @@ not safety rules:
   NOT VERIFIED; other indices above 0x0F stay Expert); `21 A4` with anything after it.
 - Not BMT, any protocol claim (an ISO8 target at 0x7A included, found in a review):
   `31`/`32`/`33`/`38`-`3A` with `A0 A3` (reset of the backed-up memory, may touch the "verrou
-  logiciel" area); `2E`/`2F`/`3B` on `A0`, `A2`, `AE`, `BD` (frames carrying immobilizer /
-  verrou fields).
-- Sirius (0x7A or a Sirius definition): also `30` output control on `A0`/`A2`/`AE`/`BD`, and
-  `31`-`33`/`38`-`3A` on `A2`/`AE`/`BD` (`31 A0 A0` / `32 A0 00` stay Tier 1: `A0` there is the
-  special-function routine).
+  logiciel" area).
+- Sirius (0x7A or a Sirius definition): `2E`/`2F`/`3B` on `A0`, `A2`, `AE`, `BD` (the `21`
+  frames carrying immobilizer / verrou fields). Output control `30` and routines
+  `31`-`33`/`38`-`3A` with byte 2 = `A0`/`A2`/`AE`/`BD` are not refused: those are I/O,
+  routine and address numbers, not frame identifiers (`30 A0` fast radiator fan, `31 A2 00 00
+  00` "SRBLI start test sav", `31 A2 01 00 00` "Status tests OBDFC"; security review M1). They
+  get their normal tier (`30 lid` Tier 1, other routines Expert). The write rule is Sirius
+  only: on other ECUs those identifiers mean other things.
 - Name guard (`DefinitionGuard`, set on the `Session` by the CLI): Tier 1-3 requests of the loaded
   definition whose names, data items or enumerated parameter values (list texts) look
   immobilizer/transponder/key related

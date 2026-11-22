@@ -63,9 +63,15 @@ In any tier, including expert. This is the only forbidden class (owner-approved)
   VERIFIED); `21A4` with extra
   bytes. `3B D2` index 3 (TRF) is the remote type, RF or infrared, not key related: Tier 2 with
   a specific warning (`ChangesRemoteType`).
-- **On non-immobilizer ECUs**: `31 A0 A3` (and `32`/`33`/`38`-`3A` `A0 A3`), writes
-  `2E`/`2F`/`3B` to `A0`/`A2`/`AE`/`BD`; on a Sirius (0x7A or a Sirius definition) also output
-  control `30` and routines on those LIDs.
+- **On non-immobilizer ECUs**: `31 A0 A3` (and `32`/`33`/`38`-`3A` `A0 A3`, reset of the
+  backed-up memory).
+- **On a Sirius** (0x7A or a Sirius definition): also writes `2E`/`2F`/`3B` to the frame
+  identifiers `A0`/`A2`/`AE`/`BD` (the `21` frames that carry the immobilizer / "verrou
+  logiciel" fields). Output control `30` and routines `31`-`33`/`38`-`3A` whose byte 2 is one
+  of those values are other number spaces (`30 A0` is the fast radiator fan, `31 A2 00 00 00`
+  "SRBLI start test sav", `31 A2 01 00 00` "Status tests OBDFC") and keep their normal tiers
+  (security review M1). On other ECUs those numbers mean other things, so the write rule is
+  Sirius only.
 - **Name guard**: a Tier 1-3 request whose definition names look immobilizer/transponder/key
   related, applied by `Session` in kline-core ([cli.md](cli.md#name-guard)). The texts of an
   enumerated sent parameter count too: the value whose text has such a word is refused (fixed

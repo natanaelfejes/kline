@@ -7,7 +7,7 @@
 //! | [`Tier::Service`] | clear DTC, output tests, adaptation reset, Sirius `31 A0 A0`, BMT remote learning and actuators | a human, one typed `Approval` per request |
 //! | [`Tier::ConfigWrite`] | `3B` config writes | a human `Approval`, after the backup read and (BMT) the `21 80` identification the definition was chosen from |
 //! | [`Tier::Expert`] | any other request that is not forbidden: undocumented services and identifiers, security access `27`, download/upload/transfer `34`-`37` and flash erase/checksum `31 81`/`31 82` (not on a BMT), other `10 xx` sessions, memory/routine-by-address services on non-immobilizer ECUs (with specific warnings such as [`Warning::MayBrickEcu`]) | a human expert `Approval` that shows the risk |
-//! | forbidden | the immobilizer line only (owner decision 2026-11-22, final): on a BMT/UCH/decoder (address `26`/`A6` or a BMT/UCH/decoder definition, [`DefinitionGuard`]) `3D`, `38`-`3A`, `2C`, `34`-`37`, `31`-`33` `81`/`82` (flash erase/checksum), `30`-`33` with `C0`-`C9` (except exact `31C7000000`/`31C8000000`) or with the immobilizer outputs `A6`/`AB`/`AC` ([`BMT_IMMOBILIZER_OUTPUTS`]), `2E`/`2F`, `3B` other than `3B D2` and `3B D2 x2` (AP1CLE, also with a high nibble), `21 A4` with extra bytes; elsewhere (Sirius) `2E`/`2F`/`3B`/`30` on `A0`/`A2`/`AE`/`BD`, routines on `A2`/`AE`/`BD` and `A0 A3`; definition requests named like immobilizer/transponder/key ([`DenyReason::ImmobilizerNamed`]) | nobody, never |
+//! | forbidden | the immobilizer line only (owner decision 2026-11-22, final): on a BMT/UCH/decoder (address `26`/`A6` or a BMT/UCH/decoder definition, [`DefinitionGuard`]) `3D`, `38`-`3A`, `2C`, `34`-`37`, `31`-`33` `81`/`82` (flash erase/checksum), `30`-`33` with `C0`-`C9` (except exact `31C7000000`/`31C8000000`) or with the immobilizer outputs `A6`/`AB`/`AC` ([`BMT_IMMOBILIZER_OUTPUTS`]), `2E`/`2F`, `3B` other than `3B D2` and `3B D2 x2` (AP1CLE, also with a high nibble), `21 A4` with extra bytes; on every other ECU routines `31`-`33`/`38`-`3A` on `A0 A3`; on a Sirius (`7A` or a Sirius definition) also writes `2E`/`2F`/`3B` to the frames `A0`/`A2`/`AE`/`BD`; definition requests named like immobilizer/transponder/key ([`DenyReason::ImmobilizerNamed`]) | nobody, never |
 //!
 //! Link frames (`81`, `82`, ISO8 `36`/`3F`) are refused as requests ([`DenyReason::ProtocolReserved`]),
 //! not as a safety rule: sent as a request they would desynchronise the session state machine.
@@ -96,11 +96,12 @@ pub const SIRIUS_INJECTOR_INHIBITION: u8 = 0xA0;
 pub const SIRIUS_BACKUP_MEMORY_RESET: u8 = 0xA3;
 /// Sirius local identifiers whose frames carry immobilizer / "verrou logiciel" fields
 /// (catalogue 4.4: Trame 01 `A0`, Trame 03 `A2`, Trame 15 `AE` verrou type, Trame 30 `BD`).
-/// Reading them is Tier 0. Refused always (owner decision 2026-11-22): on every
-/// non-immobilizer ECU any write (`2E`/`2F`/`3B`) of one of them and any routine service
-/// (`31`-`33`, `38`-`3A`) on `A0 A3`; on a Sirius ([`is_sirius_ecu`]) also output control
-/// (`30`) of one of them and any routine service on `A2`/`AE`/`BD`. `31`/`32` with `A0` is the special-function
-/// routine (`31 A0 A0` / `32 A0 00` stay Tier 1), so `A0` alone is not refused there.
+/// They are `21` frame identifiers. Reading them is Tier 0. On a Sirius ([`is_sirius_ecu`])
+/// any write by local identifier (`2E`/`2F`/`3B`) of one of them is refused always (owner
+/// decision 2026-11-22). Output control `30` and routines `31`-`33`/`38`-`3A` with the same
+/// byte value are other number spaces (`30 A0` fast radiator fan, `31 A2 00 00 00` "SRBLI
+/// start test sav") and keep their normal tiers (security review M1). Separately, any routine
+/// service on `A0 A3` (reset of the backed-up memory) is refused on every non-immobilizer ECU.
 pub const SIRIUS_IMMOBILIZER_LIDS: [u8; 4] = [0xA0, 0xA2, 0xAE, 0xBD];
 /// Sirius 32 / 34 injection K-line address (`<Function Address="122">`).
 pub const SIRIUS_ADDRESS: u8 = 0x7A;
@@ -192,9 +193,9 @@ pub fn is_immobilizer_ecu(guard: &DefinitionGuard, target: &Target) -> bool {
         || guard.class == EcuClass::Immobilizer
 }
 
-/// True when the Sirius immobilizer-LID rules for output control and routines apply: address
-/// 0x7A or a Sirius definition (and not an immobilizer ECU). Writes (`2E`/`2F`/`3B`) to those
-/// LIDs and `.. A0 A3` routines are refused on every non-immobilizer ECU.
+/// True when the Sirius immobilizer-LID write rule applies: address 0x7A or a Sirius
+/// definition (and not an immobilizer ECU). `.. A0 A3` routines are refused on every
+/// non-immobilizer ECU.
 pub fn is_sirius_ecu(guard: &DefinitionGuard, target: &Target) -> bool {
     !is_immobilizer_ecu(guard, target)
         && (target.ecu_address == SIRIUS_ADDRESS || guard.class == EcuClass::Sirius)
@@ -452,16 +453,13 @@ fn forbidden_bytes(guard: &DefinitionGuard, target: &Target, payload: &[u8]) -> 
         let reset = routine
             && payload.len() >= 3
             && payload[1..3] == [SIRIUS_SPECIAL_FUNCTION, SIRIUS_BACKUP_MEMORY_RESET];
-        let lid = p1.is_some_and(|b| SIRIUS_IMMOBILIZER_LIDS.contains(&b));
-        let sirius = is_sirius_ecu(guard, target);
-        // A0 is also the special-function routine number (31 A0 A0 / 32 A0 00, Tier 1).
-        let immo_routine = sirius && routine && lid && p1 != Some(SIRIUS_SPECIAL_FUNCTION);
-        let immo_write = match service {
-            0x2E | 0x2F | 0x3B => lid,
-            0x30 => sirius && lid,
-            _ => false,
-        };
-        if reset || immo_routine || immo_write {
+        // A0/A2/AE/BD are `21` frame identifiers: only a write by local identifier addresses
+        // the same frame, and only on a Sirius do those numbers mean the immobilizer frames.
+        // Output control `30` and routines use other number spaces (security review M1).
+        let immo_write = matches!(service, 0x2E | 0x2F | 0x3B)
+            && p1.is_some_and(|b| SIRIUS_IMMOBILIZER_LIDS.contains(&b))
+            && is_sirius_ecu(guard, target);
+        if reset || immo_write {
             return Some(DenyReason::Immobilizer);
         }
     }

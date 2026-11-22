@@ -443,7 +443,7 @@ fn exec_expert_tier_shows_unknown_effect_and_a_10_char_code() {
 
 #[test]
 fn exec_refuses_forbidden_requests_even_interactively() {
-    for req in ["31A0A3", "3BA000", "30A00000", "38A0A3", "82"] {
+    for req in ["31A0A3", "3BA000", "2EAE00", "38A0A3", "82"] {
         let (r, j) = run_opts(
             sirius_ecu(),
             &["exec", "--xml", &xml("sirius_cli.xml"), req],
