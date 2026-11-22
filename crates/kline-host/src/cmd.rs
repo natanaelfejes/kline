@@ -522,8 +522,9 @@ pub fn open_session(
             return Err(CliError::io(e));
         }
         // Definition-driven: a refused 10 A0 is reported, never retried with another session
-        // (10 C0 seen in other Renault logs stays forbidden by policy; 10 81 is not tried
-        // either, so the ECU stays in the session it chose).
+        // (10 C0, seen in other Renault logs, is an Expert request that needs a human
+        // approval, never sent automatically; 10 81 is not tried either, so the ECU stays in
+        // the session it chose).
         let note = (!ok).then_some("not retried with another session");
         ctx.out.emit(
             json!({"event": "session_start", "request": hex(&p), "ok": ok, "reply": text,
