@@ -21,8 +21,15 @@ use crate::error::CliError;
 pub enum EcuName {
     /// Injection, Siemens Sirius 32 at 0x7A.
     Sirius,
-    /// Body / UCH (BMT) at 0x26.
+    /// Body / UCH (BMT) at 0x26: `BMT_X65_ph1_p.xml`, with `BMT_SAGEM.xml` as a second
+    /// candidate when present (definition choice unresolved until named).
     Bmt,
+    /// BMT with `BMT_X65_ph1_p.xml` only (the definition choice made by the owner).
+    #[value(name = "bmt-ph1p")]
+    BmtPh1p,
+    /// BMT with `BMT_SAGEM.xml` only.
+    #[value(name = "bmt-sagem")]
+    BmtSagem,
 }
 
 impl EcuName {
@@ -30,6 +37,8 @@ impl EcuName {
         match self {
             EcuName::Sirius => "sirius",
             EcuName::Bmt => "bmt",
+            EcuName::BmtPh1p => "bmt-ph1p",
+            EcuName::BmtSagem => "bmt-sagem",
         }
     }
 
@@ -39,6 +48,8 @@ impl EcuName {
         match self {
             EcuName::Sirius => &["SIRIUS32___EMS3132___Soft_RE1_maj.xml"],
             EcuName::Bmt => &["BMT_X65_ph1_p.xml", "BMT_SAGEM.xml"],
+            EcuName::BmtPh1p => &["BMT_X65_ph1_p.xml"],
+            EcuName::BmtSagem => &["BMT_SAGEM.xml"],
         }
     }
 }

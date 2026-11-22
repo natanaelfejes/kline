@@ -499,9 +499,15 @@ fn config_write_prereads(
     let chosen = match (choice.chosen, choice.ambiguous) {
         (Some(i), false) => i,
         (Some(_), true) => {
-            return Err(CliError::refused(
-                "config write refused: several definitions fit the identification; pass the right one with --xml",
-            ))
+            return Err(CliError::refused(format!(
+                "config write refused: several definitions fit the 21 80 identification ({}); choose the one that matches the car with --xml PATH (BMT: --ecu bmt-ph1p or --ecu bmt-sagem, docs/cli.md \"Choosing the BMT definition\"); nothing was written",
+                o.ecu
+                    .defs
+                    .iter()
+                    .map(|d| d.path.file_name().unwrap_or_default().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )))
         }
         (None, _) => {
             return Err(CliError::refused(

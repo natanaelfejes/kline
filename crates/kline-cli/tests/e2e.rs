@@ -1562,3 +1562,58 @@ fn setup_copies_the_definitions_and_then_ecu_works() {
     assert_eq!(r.code, 8, "{}", r.stderr);
     assert!(r.stderr.contains("no .xml files"), "{}", r.stderr);
 }
+
+/// A definitions directory with the BMT fixture under both real BMT file names.
+fn two_bmt_defs() -> String {
+    let d = temp_dir("bmt-defs");
+    for name in ["BMT_X65_ph1_p.xml", "BMT_SAGEM.xml"] {
+        std::fs::copy(fixture_path("bmt_cli.xml"), d.join(name)).unwrap();
+    }
+    path_str(&d)
+}
+
+#[test]
+fn bmt_definition_shortcuts_resolve_an_ambiguous_config_write() {
+    let defs = two_bmt_defs();
+    let exec = |ecu: &str| {
+        run_opts(
+            bmt_ecu(),
+            &["--defs", &defs, "exec", "--ecu", ecu, "3BD20501"],
+            Opts {
+                interactive: true,
+                human: Human::TypesShownCode,
+                ..Opts::default()
+            },
+        )
+    };
+    // Both definitions decode 21 80: refused before the approval, nothing written.
+    let (r, j) = exec("bmt");
+    assert_eq!(r.code, 7, "{}\n{}", r.stdout, r.stderr);
+    for needle in ["--ecu bmt-ph1p", "--ecu bmt-sagem", "--xml"] {
+        assert!(
+            r.stderr.contains(needle),
+            "missing {needle:?}: {}",
+            r.stderr
+        );
+    }
+    j.assert_no_writes();
+    // One definition named: the write goes out (the fixture sim answers 7F 3B 12, exit 6).
+    for ecu in ["bmt-ph1p", "bmt-sagem"] {
+        let (r, j) = exec(ecu);
+        assert_eq!(r.code, 6, "{ecu}: {}\n{}", r.stdout, r.stderr);
+        assert_eq!(j.writes().len(), 1, "{ecu}");
+    }
+    let (r, _) = run(
+        bmt_ecu(),
+        &["--json", "--defs", &defs, "connect", "--ecu", "bmt-sagem"],
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.event("connected")[0]["definition"]
+            .as_str()
+            .unwrap()
+            .ends_with("BMT_SAGEM.xml"),
+        "{}",
+        r.stdout
+    );
+}
