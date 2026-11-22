@@ -1715,3 +1715,78 @@ fn read_and_live_with_an_unresolved_bmt_choice_show_both_decodings_where_they_di
     assert_eq!(r.code, 0);
     assert!(!r.stdout.contains("unresolved"), "{}", r.stdout);
 }
+
+#[test]
+fn live_says_when_the_ecu_rejects_every_request() {
+    let ecu = sirius_ecu()
+        .with_fault(FaultRule::on(
+            &[0x21, 0xA9],
+            ReplyFault::Negative { nrc: 0x12 },
+        ))
+        .with_fault(FaultRule::on(
+            &[0x21, 0xAA],
+            ReplyFault::Negative { nrc: 0x12 },
+        ));
+    let (r, _) = run(
+        ecu,
+        &[
+            "live",
+            "--xml",
+            &xml("sirius_cli.xml"),
+            "--frames",
+            "21A9,21AA",
+            "--rate",
+            "10",
+        ],
+    );
+    assert_eq!(r.code, 5, "{}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stderr.contains(
+            "ECU rejected every request (7F 21 12 subFunctionNotSupported-invalidFormat) in 4 cycles"
+        ),
+        "{}",
+        r.stderr
+    );
+    assert!(!r.stderr.contains("no communication"), "{}", r.stderr);
+}
+
+#[test]
+fn ctrl_c_in_live_is_reported_with_the_stop() {
+    let r = run_line_port(
+        VirtualLine::with_ecu(sirius_ecu()),
+        "virtual",
+        &["live", "--xml", &xml("sirius_cli.xml"), "--frames", "21A9"],
+        Opts {
+            ctrl_c: true,
+            ..Opts::default()
+        },
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stdout.contains("stopped by Ctrl-C, Stop sent"),
+        "{}",
+        r.stdout
+    );
+    let r = run_line_port(
+        VirtualLine::with_ecu(sirius_ecu()),
+        "virtual",
+        &[
+            "--json",
+            "live",
+            "--xml",
+            &xml("sirius_cli.xml"),
+            "--frames",
+            "21A9",
+        ],
+        Opts {
+            ctrl_c: true,
+            ..Opts::default()
+        },
+    );
+    let s = &r.event("stopped")[0];
+    assert_eq!(
+        (s["ok"].as_bool(), s["ctrl_c"].as_bool()),
+        (Some(true), Some(true)),
+        "{s}"
+    );
+}

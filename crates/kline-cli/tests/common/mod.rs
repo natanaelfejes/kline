@@ -261,6 +261,10 @@ pub struct Opts {
     pub sys_root: Option<PathBuf>,
     /// Host clock sleeps wake up this late (us), for selftest's sleep-jitter check.
     pub clock_late_us: u64,
+    /// Ctrl-C already pressed when the command starts.
+    pub ctrl_c: bool,
+    /// What the port listing returns (default: nothing).
+    pub ports: Vec<kline_host::ports::PortInfo>,
 }
 
 impl Default for Opts {
@@ -270,6 +274,8 @@ impl Default for Opts {
             human: Human::TypesShownCode,
             sys_root: None,
             clock_late_us: 0,
+            ctrl_c: false,
+            ports: Vec::new(),
         }
     }
 }
@@ -332,6 +338,8 @@ fn run_line_inner(line: VirtualLine, port: &str, args: &[&str], o: Opts, blind: 
     let screen2 = screen.clone();
     let human = o.human;
     let clock_late_us = o.clock_late_us;
+    let ctrl_c = o.ctrl_c;
+    let ports = o.ports.clone();
     let sys_root = o
         .sys_root
         .clone()
@@ -349,8 +357,8 @@ fn run_line_inner(line: VirtualLine, port: &str, args: &[&str], o: Opts, blind: 
                     Ok(Box::new(Virtual(l)) as Box<dyn Transport>)
                 }
             }),
-            list_ports: Box::new(|| Ok(Vec::new())),
-            stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            list_ports: Box::new(move || Ok(ports.clone())),
+            stop: Arc::new(std::sync::atomic::AtomicBool::new(ctrl_c)),
             host_clock: Box::new(move || {
                 Box::new(LateClock {
                     now: 0,

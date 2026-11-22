@@ -332,11 +332,14 @@ pub fn with_session(
     let r = body(ctx, &mut open);
     let stop = open.link.stop(&mut open.session);
     let path = open.link.capture().map(|c| c.path().display().to_string());
+    let ctrl_c = ctx.stopped();
     ctx.out.emit(
-        json!({"event": "stopped", "ok": stop.is_ok(), "capture": path}),
-        match &stop {
-            Ok(()) => String::new(),
-            Err(e) => format!("stop: {}", e.to_cli().message),
+        json!({"event": "stopped", "ok": stop.is_ok(), "capture": path, "ctrl_c": ctrl_c}),
+        match (&stop, ctrl_c) {
+            (Ok(()), true) => "stopped by Ctrl-C, Stop sent".to_string(),
+            (Ok(()), false) => String::new(),
+            (Err(e), true) => format!("stopped by Ctrl-C; stop: {}", e.to_cli().message),
+            (Err(e), false) => format!("stop: {}", e.to_cli().message),
         },
     );
     r
@@ -1303,6 +1306,10 @@ pub fn live(ctx: &mut Ctx, a: &LiveArgs) -> Result<(), CliError> {
         // request failed counts; it is retried after 400 ms, at most 3 times, then "Fatal error,
         // No communication with ECU".
         let mut retries = 0u8;
+        // Over the current streak of failed cycles: did the ECU answer every request, only
+        // negatively? Then the line works and "no communication" would be wrong (item 8).
+        let mut streak_negative = true;
+        let mut streak_nrcs: Vec<(u8, u8)> = Vec::new();
         while a.count.is_none_or(|c| cycle < c) && !ctx.stopped() {
             let start = o.link.now_ms();
             let mut any_ok = false;
@@ -1331,6 +1338,14 @@ pub fn live(ctx: &mut Ctx, a: &LiveArgs) -> Result<(), CliError> {
                             );
                         }
                         Err(e) => {
+                            match &r {
+                                SessionOutcome::Reply(Reply::Negative { sid, nrc }) => {
+                                    if !streak_nrcs.contains(&(*sid, *nrc)) {
+                                        streak_nrcs.push((*sid, *nrc));
+                                    }
+                                }
+                                _ => streak_negative = false,
+                            }
                             ctx.out.emit(
                                 json!({"event": "live_error", "cycle": cycle, "request": hex(&f.payload), "message": e.message}),
                                 format!("#{cycle} {}: {}", hex_sp(&f.payload), e.message),
@@ -1338,6 +1353,7 @@ pub fn live(ctx: &mut Ctx, a: &LiveArgs) -> Result<(), CliError> {
                         }
                     },
                     Err(e) if e.is_link() => {
+                        streak_negative = false;
                         let m = e.to_cli().message;
                         ctx.out.emit(
                             json!({"event": "live_error", "cycle": cycle, "request": hex(&f.payload), "message": m}),
@@ -1350,14 +1366,25 @@ pub fn live(ctx: &mut Ctx, a: &LiveArgs) -> Result<(), CliError> {
             cycle += 1;
             if !any_ok {
                 if retries >= policy.cycle_retries {
-                    return Err(CliError::new(
-                        exit::COMM,
-                        "comm",
+                    let n = retries + 1;
+                    let message = if streak_negative && !streak_nrcs.is_empty() {
                         format!(
-                            "no communication with the ECU: every request failed in {} cycles in a row; stopping",
-                            retries + 1
-                        ),
-                    ));
+                            "ECU rejected every request ({}) in {n} cycles; stopping (the line works; the ECU does not offer these frames in this session)",
+                            streak_nrcs
+                                .iter()
+                                .map(|(sid, nrc)| format!(
+                                    "7F {sid:02X} {nrc:02X} {}",
+                                    link::nrc_name(*nrc)
+                                ))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    } else {
+                        format!(
+                            "no communication with the ECU: every request failed in {n} cycles in a row; stopping"
+                        )
+                    };
+                    return Err(CliError::new(exit::COMM, "comm", message));
                 }
                 retries += 1;
                 ctx.out.emit(
@@ -1371,6 +1398,8 @@ pub fn live(ctx: &mut Ctx, a: &LiveArgs) -> Result<(), CliError> {
                 continue;
             }
             retries = 0;
+            streak_negative = true;
+            streak_nrcs.clear();
             if a.count.is_none_or(|c| cycle < c) {
                 let next = start + period;
                 let now = o.link.now_ms();
