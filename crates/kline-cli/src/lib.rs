@@ -406,21 +406,35 @@ pub fn exec(
                 reply.map(drop)
             }
             // The request went out but its reply was lost: an actuator test may be running,
-            // so the stop is still offered (below); the message says so first.
-            Err(e) if e.code == exit::SENT_REPLY_LOST && stop.is_some() => {
+            // so the stop is still offered (below), and a learning window may be open, so the
+            // hold still runs (re-check R11); the message says so first.
+            Err(e)
+                if e.code == exit::SENT_REPLY_LOST && (stop.is_some() || a.hold.hold.is_some()) =>
+            {
                 ctx.out.emit(json!({}), &e.message);
                 Err(e)
             }
             Err(e) => return Err(e),
         };
-        // F01: hold the session after a positive reply only; never send the request again.
-        if let (Ok(()), Some(secs)) = (&main, a.hold.hold) {
-            hold(
+        // F01: hold the session after a positive reply, and after a reply that was lost once
+        // the request was written (R11: the ECU may have run it); never after a negative
+        // reply, and the request is never sent again.
+        let lost = matches!(&main, Err(e) if e.code == exit::SENT_REPLY_LOST);
+        if let (true, Some(secs)) = (main.is_ok() || lost, a.hold.hold) {
+            let held = hold(
                 ctx,
                 o,
                 secs.saturating_mul(1000),
                 watch.as_ref().map(|w| (w, a.hold.watch_interval)),
-            )?;
+            );
+            match held {
+                // Exit 13 stays the result: the hold error is only reported.
+                Err(h) if lost => ctx.out.emit(
+                    json!({"event": "hold_error", "message": h.message}),
+                    format!("hold ended: {}", h.message),
+                ),
+                r => r?,
+            }
         }
         let Some((s, srisk)) = &stop else {
             return main;

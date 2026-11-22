@@ -264,10 +264,6 @@ fn a_lost_reply_says_the_request_was_sent_and_is_never_repeated() {
                 "--xml",
                 &xml("bmt_cli.xml"),
                 "31C7000000",
-                "--hold",
-                "30",
-                "--watch",
-                "21A3",
             ],
             interactive(),
         );
@@ -285,7 +281,8 @@ fn a_lost_reply_says_the_request_was_sent_and_is_never_repeated() {
                 r.stderr
             );
         }
-        // Sent once, then only Stop: no re-send, no hold.
+        // Sent once, then only Stop: no re-send (no --hold given; with it see
+        // a_lost_reply_still_holds_and_watches_without_repeating_the_request).
         assert_eq!(after(&r.stderr, &C7), vec![vec![0x82]], "{fault:?}");
         assert_eq!(j.writes().len(), 1, "{fault:?}");
     }
@@ -388,4 +385,76 @@ fn risk_prints_the_exact_exec_command_with_hold_and_watch() {
         ],
     );
     assert_eq!(r.code, 7, "{}", r.stdout);
+}
+
+/// Re-check R11: after exit 13 (approved frame written, reply lost, damaged or late) with
+/// --hold/--watch the watch still runs for the hold time (only the Tier 0 read and
+/// TesterPresent), then Stop; the exit code stays 13 and the request goes out exactly once.
+#[test]
+fn a_lost_reply_still_holds_and_watches_without_repeating_the_request() {
+    for fault in [
+        ReplyFault::NoReply,
+        ReplyFault::BadChecksum,
+        ReplyFault::Slow { delay_ms: 1500 },
+    ] {
+        let ecu = bmt_ecu().with_fault(FaultRule::on(&C7, fault));
+        let (r, j) = run_opts(
+            ecu,
+            &[
+                "--trace",
+                "exec",
+                "--xml",
+                &xml("bmt_cli.xml"),
+                "31C7000000",
+                "--hold",
+                "5",
+                "--watch",
+                "21A3",
+            ],
+            interactive(),
+        );
+        assert_eq!(r.code, 13, "{fault:?}: {}\n{}", r.stdout, r.stderr);
+        assert!(r.stderr.contains("WAS SENT to the ECU"), "{fault:?}");
+        let rest = after(&r.stderr, &C7);
+        let (last, mid) = rest.split_last().unwrap();
+        assert_eq!(last, &vec![0x82], "{fault:?}: {rest:02X?}");
+        assert!(
+            mid.iter()
+                .all(|p| p == &vec![0x21, 0xA3] || p.first() == Some(&0x3E)),
+            "{fault:?}: only the watch read and TesterPresent: {rest:02X?}"
+        );
+        let reads = mid.iter().filter(|p| *p == &vec![0x21, 0xA3]).count();
+        assert!(reads >= 6, "{fault:?}: watched for the hold: {rest:02X?}");
+        assert!(
+            r.stdout.contains("holding the session for 5 s"),
+            "{fault:?}"
+        );
+        let w = j.writes();
+        assert_eq!(w.len(), 1, "{fault:?}: approved request once: {w:?}");
+        assert_eq!(w[0].payload, C7.to_vec());
+    }
+    // --hold without --watch: TesterPresent only, still exit 13.
+    let ecu = bmt_ecu().with_fault(FaultRule::on(&C7, ReplyFault::NoReply));
+    let (r, j) = run_opts(
+        ecu,
+        &[
+            "--trace",
+            "exec",
+            "--xml",
+            &xml("bmt_cli.xml"),
+            "31C7000000",
+            "--hold",
+            "10",
+        ],
+        interactive(),
+    );
+    assert_eq!(r.code, 13, "{}\n{}", r.stdout, r.stderr);
+    let rest = after(&r.stderr, &C7);
+    let (last, mid) = rest.split_last().unwrap();
+    assert_eq!(last, &vec![0x82]);
+    assert!(
+        !mid.is_empty() && mid.iter().all(|p| p.first() == Some(&0x3E)),
+        "{rest:02X?}"
+    );
+    assert_eq!(j.writes().len(), 1);
 }

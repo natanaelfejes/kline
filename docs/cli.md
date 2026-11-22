@@ -194,7 +194,9 @@ changed, e.g. `+2000 ms 21 A3  TIR RF RECU 0 -> 1  (1 = a remote frame was recei
 `watch` with `changed`). A failed watch read is printed and the hold goes on. Ctrl-C or SIGTERM
 ends the hold early: Stop is sent and K released (`stopped by Ctrl-C, Stop sent`; a second
 Ctrl-C releases K at once). The approved request is sent exactly once: never again while
-holding, and after a negative or lost reply there is no hold at all. `--hold` cannot be
+holding. After a negative reply there is no hold. After a lost, damaged or late reply (exit 13
+below) the hold still runs for SECONDS with only the watch read and TesterPresent, because the
+ECU may have run the request and opened its window (re-check R11); the exit code stays 13. `--hold` cannot be
 combined with `--stop`. `kline risk ... --hold 30 --watch 21A3` prints the exact command.
 
 When the approved request **was written** to the line but its reply is lost, damaged or timed
@@ -203,7 +205,7 @@ out (final critique F06), kline says so instead of a plain `no reply from ECU`:
 from ECU); do NOT repeat it blindly: first read the state (e.g. kline read --ecu bmt 21A3)`,
 exit 13 (JSON event `approved_reply_lost` with `request_sent: true`; in the capture's
 `.out.txt`). The ECU may have run it: read the state first. With `--stop` the stop is still
-offered. A request that never reached the line (wrong code, port error before the write) is
+offered; with `--hold` the hold (and `--watch`) still runs, then Stop. A request that never reached the line (wrong code, port error before the write) is
 not reported as sent.
 
 The code is an anti-accident gate: an automated agent that drives a pseudo-terminal can read and
