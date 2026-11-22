@@ -111,6 +111,7 @@ can target 0x7A as a fallback for the car test.
 |---|---|---|
 | Baud | **10400** 8N1, even when the XML says 10417 (Safir). Configurable (`KTiming::baud`) | RE: IOTBD32V3 Setup; the XML baud is never applied before the worker starts. Multipoint forces 10400 (RE: KWP2000Diag4 KWP2000Ecu) |
 | DTR | high while idle, low during the 5-baud bits | RE: IOTBD32V3 5-baud routine |
+| RTS | DDT2000: not driven (DCB RTS control disabled); kline: left as the OS opens the port. NOT VERIFIED whether the KKL cable uses it | RE: IOTBD32V3 Setup 0x10001e9a |
 | Tester address | 0xF1 | RE: KWP2000Diag4 KWP2000Ecu default ToolAddress |
 
 ## Timing values (`KTiming`)
@@ -301,7 +302,8 @@ Payloads returned to callers start at the response SID.
    A read that stops short: **incomplete reply**.
 6. Decode and classify: `7F SID NRC` is a negative reply; **`7F SID 78` (responsePending)
    restarts step 5 without a new request**, with a 5000 ms first-byte timeout, at most 10
-   times (ours: DDT2000 treats 0x78 as a plain error).
+   times (ours: DDT2000 treats 0x78 as a plain error: RE: KWP2000Diag4 NRC jump table 0x2305f8a4
+   sends it to the default error 0x7F8, and nothing reads on).
 
 ## Session: TesterPresent and Stop
 
