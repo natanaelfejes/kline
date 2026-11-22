@@ -242,7 +242,20 @@ pub fn run_opts(ecu: SpecEcu, args: &[&str], o: Opts) -> (Run, Journal) {
     (run_line_with(VirtualLine::with_ecu(ecu), args, o), j)
 }
 
+/// Like [`run`] with an explicit `--port`.
+pub fn run_with_port(ecu: SpecEcu, port: &str, args: &[&str]) -> (Run, Journal) {
+    let j = ecu.journal();
+    (
+        run_line_port(VirtualLine::with_ecu(ecu), port, args, Opts::default()),
+        j,
+    )
+}
+
 pub fn run_line_with(line: VirtualLine, args: &[&str], o: Opts) -> Run {
+    run_line_port(line, "virtual", args, o)
+}
+
+pub fn run_line_port(line: VirtualLine, port: &str, args: &[&str], o: Opts) -> Run {
     let capture_dir = temp_dir("cap");
     let (out, out_buf) = Sink::buffer();
     let (err, err_buf) = Sink::buffer();
@@ -275,7 +288,7 @@ pub fn run_line_with(line: VirtualLine, args: &[&str], o: Opts) -> Run {
     let mut full: Vec<String> = vec![
         "clio".into(),
         "--port".into(),
-        "virtual".into(),
+        port.into(),
         "--capture-dir".into(),
         capture_dir.display().to_string(),
     ];

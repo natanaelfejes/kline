@@ -27,7 +27,7 @@ clio-agent prints a warning on stderr when this happened (`safety::APPROVALS_COM
 |---|---|
 | `--json` | one JSON object per line on stdout (errors too: `{"event":"error","code":N,"kind":..,"message":..}`). Notes go to stderr. `clio-agent` always uses JSON |
 | `--trace` | every action with a time stamp on stderr: DTR, break edges, sleeps, break loopback, flushes (with the bytes discarded), every TX frame and every RX read (`RX got/wanted in N ms`). Also saved as `<capture>.trace.txt` |
-| `--port PATH` | serial port. Default: the single `/dev/cu.usbserial-*` (macOS AppleUSBFTDI); none or several is exit 3 |
+| `--port PATH` | serial port. Default: the single `/dev/cu.usbserial-*` (macOS AppleUSBFTDI); none or several is exit 3. A macOS callin device `/dev/tty.*` is refused (exit 3; it blocks on carrier detect): use its `/dev/cu.*` twin |
 | `--sim-control SOCKET` | `--port` is then clio-sim's pty, break/DTR go over this control socket (docs/sim.md) |
 | `--capture-dir DIR` | default `$CLIO_CAPTURE_DIR`, else `~/Documents/Clio/captures` |
 | `--defs DIR` | definitions for `--ecu`. Default `$CLIO_DDT_XML`, else `~/Documents/Clio/ddt-extract/ecus` |
@@ -41,8 +41,11 @@ ECU selection (every command that talks to an ECU, and `risk`/`prepare`/`replay`
 | `--xml PATH` | any DDT2000 ECU definition; repeat for `ident` candidates (the first one sets up the link) |
 | `--address 0xNN` | overrides the definition's `<Function Address>` (also the safety target) |
 | `--vehicle PATH` | vehicle addressing file (e.g. `vehicles/x65_addressing.xml`): function name, protocols, tool address |
-| `--variant auto\|single\|multi\|fast` | init variant (docs/protocol.md "Init variants"). `auto` tries SingleEcu, MultiEcu, FastInit in that order, skips variants that would run the identical init, and logs each attempt (`init_attempt` events) |
-| `--session auto\|none\|a0\|81` | after the init: `auto` sends `10 A0` if the definition has it, else `10 81` if it has that (KWP only). A negative answer is reported and the command continues |
+| `--variant auto\|single\|multi\|fast` | init variant (docs/protocol.md "Init variants"). `auto` tries FastInit, SingleEcu (DDT2000's detection order), then MultiEcu, skips variants that would run the identical init, and logs each attempt (`init_attempt` events with `round`) |
+| `--init-attempts N` | rounds over the variants, 500 ms apart (default 3, DDT2000) |
+| `--nrc-tries N` | `ident`: tries of a request answered `7F xx 21`/`23` (default 10; 200/500 ms) |
+| `--periodic-tester-present` | `3E` every 2000 ms with a required reply (DDT2000 screen option) instead of after 3000 ms idle |
+| `--session auto\|none\|a0\|81` | after the init: `auto` sends `10 A0` if the definition has it, else `10 81` if it has that (KWP only). A negative answer is reported (`note: not retried with another session`) and the command continues; no other session is tried (e.g. `10 C0`, seen in other Renault 0x7A logs, stays forbidden by policy) |
 
 Protocol and timing come from the definition's `<K>` section through clio-core (`spec::k_timing`):
 ISO8 5-baud, KWP 5-baud (with ~KW2 handshake), KWP fast init. A definition with only `<CAN>`
@@ -53,6 +56,7 @@ is refused: "CAN not supported by a KKL cable yet" (exit 8).
 | Command | Does | Notes |
 |---|---|---|
 | `ports` | lists ports, marks candidates `*`, says which cable would be used | |
+| `selftest` | without the car: opens the port at 10400, shows the USB id and the baud the driver reports, toggles break 20 times (10 ms half-period, nothing written) and reports the edge jitter against the 5-baud (+-10 ms) and fast-init (+-1 ms) tolerances | `clio` only; unplug the cable from the car |
 | `connect` | init (variants), session start, Stop | reports sync, KW1 KW2, ~address, key-byte match |
 | `ident` | `21 80` (KWP; else Tier 0 requests named like "ident"; NRC 21/23 retried like DDT2000), chooses the definition | DDT2000 AutoIdent ladder (exact, unique, soft, diag, soft+diag; DiagVersion numeric, Supplier/Soft/Version whitespace-normalized, case-sensitive) when the candidates have `<AutoIdents>`; else the first candidate whose key bytes match and whose identification requests decode. A reply shorter than MinBytes is decoded anyway and flagged; `ddt2000_diagfailures_accepts` says whether DiagFailures (exactly 26 bytes) would take it |
 | `read REQ` | one request (definition name or hex), decoded | Tier 0 only; a non-read is refused before the port is opened (exit 7) and again by clio-core |
@@ -133,6 +137,8 @@ Nothing here has been run on the car yet. Do the steps in order and keep every c
 Before: definitions in `~/Documents/Clio/ddt-extract/ecus` (or pass `--defs`); cable in the OBD
 socket and the Mac; ignition ON, engine off; nothing else (DDT2000, another tester) on the line.
 
+0. At home, cable in the Mac only: `clio selftest`. Expect `5-baud bits (+-10 ms): OK`; if the
+   fast-init line says `TOO IMPRECISE`, fast init may fail (the auto order tries it first).
 1. `clio ports`
    - OK: a line `* /dev/cu.usbserial-XXXX  usb 0403:6001 ...` and `cable: /dev/cu.usbserial-XXXX`.
    - Fail: `no KKL cable found` (exit 3): replug, check `ls /dev/cu.*`; several cables: pass `--port`.
@@ -167,6 +173,23 @@ socket and the Mac; ignition ON, engine off; nothing else (DDT2000, another test
 9. `clio dtc --ecu sirius`.
 10. Offline: `clio replay ~/Documents/Clio/captures/<file>.jsonl --ecu sirius` should show the same
     values. Send the captures and traces for the docs/protocol.md "Not verified" list.
+
+## NOT VERIFIED (host / cable)
+
+- macOS speed setting: `serialport` 4.10.1 sets 10400 with Apple's `IOSSIOSPEED` ioctl
+  (read in its source: `posix/termios.rs` macOS `set_termios`, `posix/tty.rs` macOS
+  `set_baud_rate`), so no extra code path was added. Whether AppleUSBFTDI then really runs at
+  10400 (and not the nearest standard rate) is not measured: `selftest` only shows what the
+  driver reports.
+- FTDI latency timer: DDT2000/Renolink users set it to 1 ms on Windows; macOS AppleUSBFTDI is
+  said to default to about 16 ms (web hint, not checked). With 16 ms, RX bytes can arrive up to
+  16 ms late: harmless against the 300 ms reply timeout, but it eats into the 5-baud W4 window
+  (we send ~KW2 25 ms after reading KW2; ISO 9141 allows 25..50 ms). Not measured; `selftest`
+  cannot see it without K-line power.
+- A public ELM327 log shows 5-baud init to 0x7A failing where fast init worked (web hint):
+  consistent with the fast-init-first `auto` order, not verified on this car.
+- Some Renault 0x7A logs use `10 C0`; our Sirius definition says `10 A0`. Definition-driven, a
+  refusal is reported, `10 C0` stays forbidden.
 
 ## clio-agent
 

@@ -42,6 +42,8 @@ pub struct Cli {
 pub enum Command {
     /// List serial ports and the detected KKL cable.
     Ports,
+    /// Cable check without the car: open at 10400, driver baud, break-toggle jitter (writes nothing).
+    Selftest,
     /// Init the ECU (trying init variants), open the session, Stop. Shows which variant worked.
     Connect(LinkArgs),
     /// Read 21 80 and choose the definition that fits the identification.
@@ -186,6 +188,7 @@ pub fn run(cli: Cli, env: &mut CliEnv) -> u8 {
     let mut ctx = Ctx::new(&cli.g, host, "clio");
     let r = match &cli.cmd {
         Command::Ports => cmd::ports(&mut ctx),
+        Command::Selftest => cmd::selftest(&mut ctx),
         Command::Connect(a) => cmd::connect(&mut ctx, a),
         Command::Ident(a) => cmd::ident(&mut ctx, a),
         Command::Read(a) => cmd::read(&mut ctx, a),

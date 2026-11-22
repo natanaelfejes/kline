@@ -22,6 +22,7 @@ pub mod error;
 pub mod link;
 pub mod out;
 pub mod ports;
+pub mod selftest;
 pub mod trace;
 pub mod transport;
 

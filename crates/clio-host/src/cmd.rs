@@ -247,7 +247,7 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    fn port_spec(&self) -> Result<PortSpec, CliError> {
+    pub fn port_spec(&self) -> Result<PortSpec, CliError> {
         if let Some(control) = &self.g.sim_control {
             let tty = self
                 .g
@@ -260,6 +260,7 @@ impl<'a> Ctx<'a> {
             });
         }
         if let Some(p) = &self.g.port {
+            ports::check_explicit_port(p).map_err(CliError::port)?;
             return Ok(PortSpec::Serial(p.clone()));
         }
         let list = (self.env.list_ports)()
@@ -421,12 +422,22 @@ pub fn open_session(
         if let Err(link::ExchangeError::Io(e)) = r {
             return Err(CliError::io(e));
         }
+        // Definition-driven: a refused 10 A0 is reported, never retried with another session
+        // (10 C0 seen in other Renault logs stays forbidden by policy; 10 81 is not tried
+        // either, so the ECU stays in the session it chose).
+        let note = (!ok).then_some("not retried with another session");
         ctx.out.emit(
-            json!({"event": "session_start", "request": hex(&p), "ok": ok, "reply": text}),
+            json!({"event": "session_start", "request": hex(&p), "ok": ok, "reply": text,
+                   "note": note}),
             format!(
-                "session {}: {}{text}",
+                "session {}: {}{text}{}",
                 hex_sp(&p),
-                if ok { "ok " } else { "FAILED, continuing: " }
+                if ok { "ok " } else { "FAILED, continuing: " },
+                if ok {
+                    ""
+                } else {
+                    " (not retried with another session)"
+                }
             ),
         );
     }
@@ -504,6 +515,52 @@ pub fn ports(ctx: &mut Ctx) -> Result<(), CliError> {
             Ok(p) => format!("cable: {p}"),
             Err(e) => e.clone(),
         },
+    );
+    Ok(())
+}
+
+/// `selftest`: port at 10400, what the driver reports, break-toggle jitter. No car needed and
+/// none wanted: nothing is written, only 10 ms break pulses (crate::selftest).
+pub fn selftest(ctx: &mut Ctx) -> Result<(), CliError> {
+    let spec = ctx.port_spec()?;
+    let path = match &spec {
+        PortSpec::Serial(p) => p.clone(),
+        PortSpec::Sim { tty, .. } => format!("{tty} (simulator)"),
+    };
+    let usb = (ctx.env.list_ports)()
+        .ok()
+        .and_then(|l| l.into_iter().find(|p| p.path == path));
+    let baud = clio_core::timing::consts::DEFAULT_BAUD;
+    let mut t = (ctx.env.opener)(&spec, baud, Tracer::off())
+        .map_err(|e| CliError::port(format!("cannot open {path} at {baud} baud: {e}")))?;
+    let reported = t.baud_rate();
+    let j = crate::selftest::measure_break_jitter(
+        t.as_mut(),
+        crate::selftest::TOGGLES,
+        crate::selftest::TOGGLE_HALF_MS,
+    )
+    .map_err(CliError::io)?;
+    let note = "FTDI latency timer not measured: macOS AppleUSBFTDI is said to default to ~16 ms (DDT2000/Renolink users set 1 ms on Windows); bytes may then reach us up to that late. RequestToReply (300 ms) absorbs it; the ~KW2 answer of a 5-baud init (sent 25 ms after KW2, W4 25..50 ms) is the tight spot. NOT VERIFIED on the car.";
+    ctx.out.emit(
+        json!({"event": "selftest", "port": path,
+               "usb": usb.as_ref().map(|u| u.to_json()),
+               "baud_requested": baud, "baud_reported": reported,
+               "break_jitter": j, "note": note}),
+        format!(
+            "port: {path}{}\nbaud: requested {baud}, driver reports {}\nbreak toggles: {} edges, {} ms half-period: max deviation {:.2} ms, mean {:.2} ms, slowest set_break {:.2} ms; loopback {}\n5-baud bits (+-10 ms): {}; fast-init TiniL (+-1 ms): {}\n{note}",
+            usb.as_ref()
+                .and_then(|u| u.usb.map(|v| format!(" (usb {:04x}:{:04x} {})", v.0, v.1, u.product.clone().unwrap_or_default())))
+                .unwrap_or_default(),
+            reported.map(|b| b.to_string()).unwrap_or_else(|| "nothing".into()),
+            j.edges,
+            j.half_ms,
+            j.max_dev_us as f64 / 1000.0,
+            j.mean_dev_us as f64 / 1000.0,
+            j.max_call_us as f64 / 1000.0,
+            if j.loopback_seen { "seen" } else { "not seen (normal without K-line power)" },
+            if j.five_baud_ok { "OK" } else { "TOO IMPRECISE" },
+            if j.fast_init_ok { "OK" } else { "TOO IMPRECISE" },
+        ),
     );
     Ok(())
 }

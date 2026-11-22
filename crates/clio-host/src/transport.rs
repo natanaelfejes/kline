@@ -32,6 +32,10 @@ pub trait Transport {
     fn write(&mut self, bytes: &[u8], inter_byte_ms: u32) -> io::Result<()>;
     /// Up to `count` bytes within `timeout_ms` in total; fewer means the timeout expired.
     fn read(&mut self, count: usize, timeout_ms: u32) -> io::Result<Vec<u8>>;
+    /// The line speed the driver reports, if it can (`clio selftest`).
+    fn baud_rate(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// Wall clock for a [`KklLine`]; mocked in unit tests.
@@ -84,6 +88,10 @@ pub trait SerialIo {
     /// Write all bytes and wait until they are transmitted (tcdrain).
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()>;
     fn clear_input(&mut self) -> io::Result<()>;
+    /// The line speed the driver reports, if any.
+    fn baud_rate(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// Window within which consecutive break/DTR sleeps are paced from the previous sleep's
@@ -142,6 +150,10 @@ impl<P: SerialIo, C: Clock> KklLine<P, C> {
 }
 
 impl<P: SerialIo, C: Clock> Transport for KklLine<P, C> {
+    fn baud_rate(&self) -> Option<u32> {
+        self.port.baud_rate()
+    }
+
     fn now_ms(&self) -> u64 {
         self.clock.now_us() / 1000
     }
@@ -307,6 +319,12 @@ impl SerialIo for SerialportIo {
         self.port
             .clear(serialport::ClearBuffer::Input)
             .map_err(io::Error::from)
+    }
+
+    /// On macOS `serialport` 4.10 sets any speed with Apple's `IOSSIOSPEED` ioctl (after
+    /// `tcsetattr`) and reports the value it set; elsewhere the termios speed.
+    fn baud_rate(&self) -> Option<u32> {
+        self.port.baud_rate().ok()
     }
 }
 

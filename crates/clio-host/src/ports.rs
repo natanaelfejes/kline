@@ -61,6 +61,17 @@ pub fn is_candidate(p: &PortInfo) -> bool {
         || (p.path.starts_with("/dev/ttyUSB") && p.usb.is_some_and(|u| u.0 == FTDI_VID))
 }
 
+/// An explicit `--port` must not be a macOS callin device `/dev/tty.*`: opening it waits for
+/// carrier detect (DCD), which a KKL cable never raises. Use the callout `/dev/cu.*` twin.
+pub fn check_explicit_port(path: &str) -> Result<(), String> {
+    match path.strip_prefix("/dev/tty.") {
+        Some(rest) => Err(format!(
+            "{path} is a macOS callin device (blocks until carrier detect); use /dev/cu.{rest}"
+        )),
+        None => Ok(()),
+    }
+}
+
 /// The one candidate, or why there is none.
 pub fn auto_detect(ports: &[PortInfo]) -> Result<String, String> {
     let c: Vec<&PortInfo> = ports.iter().filter(|p| is_candidate(p)).collect();
@@ -79,6 +90,16 @@ pub fn auto_detect(ports: &[PortInfo]) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tty_callin_devices_are_refused() {
+        assert_eq!(
+            super::check_explicit_port("/dev/tty.usbserial-A5"),
+            Err("/dev/tty.usbserial-A5 is a macOS callin device (blocks until carrier detect); use /dev/cu.usbserial-A5".into())
+        );
+        assert!(super::check_explicit_port("/dev/cu.usbserial-A5").is_ok());
+        assert!(super::check_explicit_port("/dev/ttyUSB0").is_ok());
+    }
+
     use super::*;
 
     fn p(path: &str, vid: Option<u16>) -> PortInfo {

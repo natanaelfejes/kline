@@ -956,3 +956,51 @@ fn ident_uses_the_ddt2000_autoident_ladder() {
     assert_eq!(r.code, 0, "{}", r.stdout);
     assert_eq!(r.event("ident")[0]["autoident"]["match"], "unique");
 }
+
+#[test]
+fn selftest_toggles_break_only_and_reports_timing() {
+    let (r, j) = run(sirius_ecu(), &["--json", "selftest"]);
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    let s = &r.event("selftest")[0];
+    assert_eq!(s["baud_requested"], 10400);
+    assert_eq!(s["break_jitter"]["edges"], 40);
+    assert_eq!(s["break_jitter"]["five_baud_ok"], true, "{s}");
+    assert!(s["note"].as_str().unwrap().contains("latency"));
+    // No ECU was woken and nothing was written.
+    j.assert_no_writes();
+    assert!(r.event("connected").is_empty());
+    // A macOS callin device is refused before opening.
+    let (r, _) = run_with_port(sirius_ecu(), "/dev/tty.usbserial-X", &["selftest"]);
+    assert_eq!(r.code, 3, "{}", r.stderr);
+    assert!(r.stderr.contains("/dev/cu.usbserial-X"), "{}", r.stderr);
+    assert!(!r.opened);
+}
+
+#[test]
+fn refused_session_is_reported_and_no_other_session_is_tried() {
+    let ecu = sirius_ecu().with_fault(FaultRule::on(
+        &[0x10, 0xA0],
+        ReplyFault::Negative { nrc: 0x12 },
+    ));
+    let (r, j) = run(
+        ecu,
+        &[
+            "--json",
+            "--trace",
+            "connect",
+            "--xml",
+            &xml("sirius_cli.xml"),
+        ],
+    );
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    let s = &r.event("session_start")[0];
+    assert_eq!(s["ok"], false);
+    assert!(s["reply"].as_str().unwrap().contains("7F 10 12"), "{s}");
+    assert_eq!(s["note"], "not retried with another session");
+    // The only StartDiagnosticSession on the wire is 10 A0.
+    assert_eq!(r.event("session_start").len(), 1);
+    assert!(r.stderr.contains("TX 82 7A F1 10 A0"), "{}", r.stderr);
+    assert!(!r.stderr.contains("TX 82 7A F1 10 81"), "{}", r.stderr);
+    assert!(!r.stderr.contains("TX 82 7A F1 10 C0"), "{}", r.stderr);
+    j.assert_no_writes();
+}
