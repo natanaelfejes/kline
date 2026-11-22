@@ -978,7 +978,10 @@ fn read_one(
                 json!({"event": "read_retry", "request": hex(payload), "message": m, "wait_ms": wait}),
                 format!("{}: {m}; retrying once in {wait} ms", hex_sp(payload)),
             );
-            idle(ctx, o, u64::from(wait))?;
+            // Ctrl-C during the wait: the retry is not sent (code review L3).
+            if !idle(ctx, o, u64::from(wait))? {
+                return Err(e.to_cli());
+            }
             t_ms = o.link.now_ms();
             o.link.request(&mut o.session, payload)
         }

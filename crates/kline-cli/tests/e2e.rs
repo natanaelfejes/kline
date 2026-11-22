@@ -2032,6 +2032,24 @@ fn dtc_counts_present_and_memorized_and_shows_the_clear_plan_only_on_request() {
     assert!(s["clear_plan"].is_object(), "{s}");
 }
 
+/// Code review L3: Ctrl-C during the retry wait stops the read; the retry is not sent.
+#[test]
+fn read_retry_is_not_sent_after_ctrl_c() {
+    let sx = xml("sirius_cli.xml");
+    let ecu = sirius_ecu().with_fault(FaultRule::on(&[0x21, 0xA9], ReplyFault::BadChecksum).once());
+    let (r, _) = run_opts(
+        ecu,
+        &["--json", "read", "--xml", &sx, "21A9"],
+        Opts {
+            ctrl_c: true,
+            ..Opts::default()
+        },
+    );
+    assert_eq!(r.event("read_retry").len(), 1, "{}", r.stdout);
+    assert!(r.event("read").is_empty(), "retry was sent: {}", r.stdout);
+    assert_ne!(r.code, 0, "{}", r.stdout);
+}
+
 #[test]
 fn read_retries_once_after_a_bad_checksum_or_a_short_frame() {
     let sx = xml("sirius_cli.xml");
