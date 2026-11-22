@@ -81,6 +81,23 @@ impl InitOutcome {
         self.sync
     }
 
+    /// 5-baud init: whether the sync byte was 0x55 (None for fast init). `Some(false)` is a
+    /// warning only, the init went on like DDT2000's (which does not check it).
+    pub fn sync_ok(&self) -> Option<bool> {
+        self.sync.map(|b| b == consts::SYNC_BYTE)
+    }
+
+    /// The warning text when the sync byte was not 0x55 (baud or line problem?).
+    pub fn sync_warning(&self) -> Option<alloc::string::String> {
+        match self.sync {
+            Some(b) if b != consts::SYNC_BYTE => Some(alloc::format!(
+                "sync byte {b:02X}, expected {:02X} (baud or line problem?)",
+                consts::SYNC_BYTE
+            )),
+            _ => None,
+        }
+    }
+
     pub fn keywords(&self) -> (u8, u8) {
         (self.kw1, self.kw2)
     }
@@ -254,10 +271,7 @@ impl FiveBaudInit {
         if self.seq.has_queued() {
             return self.next();
         }
-        let window = self
-            .cfg
-            .kw_window_ms
-            .unwrap_or_else(|| self.t.kw2_read_window_ms());
+        let window = self.cfg.effective_kw_window_ms();
         let state = core::mem::replace(&mut self.state, FbState::Finished);
         match (state, ev) {
             (FbState::StartBit, Event::BreakLoopbackSeen(false))

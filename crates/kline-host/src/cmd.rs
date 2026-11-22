@@ -51,6 +51,12 @@ pub struct GlobalArgs {
     /// like DDT2000 (DTR high first). Whether the KKL cable uses RTS is NOT VERIFIED.
     #[arg(long, global = true, value_enum, default_value_t = RtsArg::Leave)]
     pub rts: RtsArg,
+    /// Read window in ms for the `55 KW1 KW2` and ~address reads of a 5-baud init (100..=2000;
+    /// default: the definition's KW2Timeout + 100, DDT2000). Reading starts in the middle of
+    /// the 100 ms stop-bit wait, so the budget after the stop bit is about this value minus
+    /// 100 ms. If connect fails with no keywords received, retry with `--kw-window 700`.
+    #[arg(long, global = true, value_name = "MS", value_parser = clap::value_parser!(u32).range(100..=2000))]
+    pub kw_window: Option<u32>,
 }
 
 /// `--rts` ([`kline_core::RtsMode`]).
@@ -96,6 +102,9 @@ impl GlobalArgs {
         }
         if self.rts == RtsArg::Low {
             v.extend(["--rts".into(), "low".into()]);
+        }
+        if let Some(ms) = self.kw_window {
+            v.extend(["--kw-window".into(), ms.to_string()]);
         }
         v
     }
@@ -473,6 +482,7 @@ pub fn open_session(
     }
     cfg.strict_break_loopback = args.strict_loopback;
     cfg.rts = ctx.g.rts.mode();
+    cfg.kw_window_ms = ctx.g.kw_window;
     let policy = args.retry_policy();
     let spec = ctx.port_spec()?;
     let tracer = if ctx.g.trace {
@@ -581,6 +591,12 @@ pub fn open_session(
             "warning: break loopback not seen on RX during the start bit; init went on (--strict-loopback aborts)",
         );
     }
+    if let Some(w) = connected.sync_warning.as_deref() {
+        ctx.out.emit(
+            json!({"event": "warning", "kind": "sync_byte", "message": w}),
+            format!("warning: {w}"),
+        );
+    }
     // SAFETY.md rule 3: the core applies the definition's class and immobilizer names to every
     // request of this session.
     session.set_definition_guard(ecu.guard());
@@ -597,6 +613,7 @@ pub fn open_session(
             "ecu_address": format!("{:02X}", t.ecu_address),
             "address_byte": connected.address_byte.map(|b| format!("{b:02X}")),
             "sync": connected.sync.map(|b| format!("{b:02X}")),
+            "sync_ok": connected.sync_ok,
             "kw1": format!("{:02X}", connected.keywords.0),
             "kw2": format!("{:02X}", connected.keywords.1),
             "address_complement": connected.address_complement.map(|b| format!("{b:02X}")),

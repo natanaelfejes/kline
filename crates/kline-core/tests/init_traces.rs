@@ -723,3 +723,37 @@ fn keyword_window_is_configurable() {
     assert!(matches!(run_five_baud(&cfg, &s), Step::Done(_)));
     assert_eq!(LinkConfig::new(0x7A, KTiming::default()).kw_window_ms, None);
 }
+
+#[test]
+fn sync_byte_is_checked_for_the_report_not_for_the_init() {
+    // DDT2000 does not check the sync byte (kept); the outcome says it was not 0x55.
+    let cfg = sirius32();
+    let mut s = up_to_keywords(0x7A, 400, ok(&[0x54, 0xD0, 0x8F]));
+    s.extend([
+        (sleep(25), done()),
+        (write(&[0x70], 0), done()),
+        (read(2, 400), ok(&[0x70, 0x85])),
+        (sleep(20), done()),
+    ]);
+    let Step::Done(o) = run_five_baud(&cfg, &s) else {
+        panic!("a wrong sync byte must not fail the init")
+    };
+    assert_eq!(o.sync(), Some(0x54));
+    assert_eq!(o.sync_ok(), Some(false));
+    assert_eq!(
+        o.sync_warning().as_deref(),
+        Some("sync byte 54, expected 55 (baud or line problem?)")
+    );
+    let Step::Done(o) = run_five_baud(&cfg, &kwp_five_baud(0x7A, 0x85)) else {
+        panic!()
+    };
+    assert_eq!((o.sync_ok(), o.sync_warning()), (Some(true), None));
+}
+
+#[test]
+fn effective_keyword_window_is_reported() {
+    let mut cfg = sirius32();
+    assert_eq!(cfg.effective_kw_window_ms(), 400);
+    cfg.kw_window_ms = Some(700);
+    assert_eq!(cfg.effective_kw_window_ms(), 700);
+}

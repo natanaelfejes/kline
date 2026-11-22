@@ -351,7 +351,11 @@ impl Link {
                 };
                 self.trace.line(
                     now,
-                    format!("INIT 5-baud address byte {:02X}", m.address_byte()),
+                    format!(
+                        "INIT 5-baud address byte {:02X}, keyword window {} ms",
+                        m.address_byte(),
+                        cfg.effective_kw_window_ms()
+                    ),
                 );
                 self.marker = Some((Kind::FiveBaud, vec![m.address_byte()]));
                 let first = m.start();
@@ -456,6 +460,9 @@ impl Attempt {
     }
 }
 
+/// The `--kw-window` value the NoKeywords hint suggests.
+const KW_WINDOW_HINT_MS: u32 = 700;
+
 /// What the successful init found.
 #[derive(Debug, Clone)]
 pub struct Connected {
@@ -463,6 +470,10 @@ pub struct Connected {
     pub attempts: Vec<Attempt>,
     pub address_byte: Option<u8>,
     pub sync: Option<u8>,
+    /// 5-baud: whether the sync byte was 0x55 (None: fast init). A false value only warns.
+    pub sync_ok: Option<bool>,
+    /// The warning text for a sync byte other than 0x55.
+    pub sync_warning: Option<String>,
     pub keywords: (u8, u8),
     pub address_complement: Option<u8>,
     pub keywords_match: Option<bool>,
@@ -518,7 +529,17 @@ pub fn connect(
             variant: v,
             round,
             address_byte,
-            error: r.as_ref().err().map(|e| e.to_string()),
+            error: r.as_ref().err().map(|e| {
+                let mut t = e.to_string();
+                // A widened window is the first thing to try when the ECU may only be slow
+                // (W1 near the ISO 9141 maximum of 300 ms plus USB latency).
+                if matches!(e, kline_core::LinkError::NoKeywords { .. })
+                    && cfg.effective_kw_window_ms() < KW_WINDOW_HINT_MS
+                {
+                    t.push_str(&format!(" (try --kw-window {KW_WINDOW_HINT_MS})"));
+                }
+                t
+            }),
         };
         if let Some(e) = &a.error {
             link.trace.line(
@@ -532,11 +553,17 @@ pub fn connect(
         on_attempt(&a);
         attempts.push(a);
         if let Ok(o) = r {
+            if let Some(w) = o.sync_warning() {
+                link.trace
+                    .line(link.t.now_us(), format!("INIT warning: {w}"));
+            }
             let c = Connected {
                 variant: v,
                 attempts,
                 address_byte: o.address_byte(),
                 sync: o.sync(),
+                sync_ok: o.sync_ok(),
+                sync_warning: o.sync_warning(),
                 keywords: o.keywords(),
                 address_complement: o.address_complement(),
                 keywords_match: o.keywords_match(),

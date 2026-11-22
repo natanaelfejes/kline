@@ -211,6 +211,15 @@ pub enum RtsMode {
 }
 
 impl LinkConfig {
+    /// The read window for `55 KW1 KW2` and `[echo, ~address]` actually used by a 5-baud init:
+    /// [`LinkConfig::kw_window_ms`] or, by default, KW2Timeout + 100 ms. Reading starts in the
+    /// middle of the 100 ms stop-bit wait, so the budget left after the stop bit is about this
+    /// value minus 100 ms (DDT2000 has the same window).
+    pub fn effective_kw_window_ms(&self) -> u32 {
+        self.kw_window_ms
+            .unwrap_or_else(|| self.effective_timing().kw2_read_window_ms())
+    }
+
     /// Config with defaults for the given address and declared timing.
     pub fn new(ecu_address: u8, timing: KTiming) -> Self {
         LinkConfig {

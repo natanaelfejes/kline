@@ -179,6 +179,9 @@ pub enum InitFault {
     WrongKeywords(u8, u8),
     /// KWP: never send ~address after ~KW2.
     NoAddressComplement,
+    /// Send this byte instead of the 0x55 sync byte (wrong baud or a line problem); the key
+    /// bytes follow as usual.
+    BadSync(u8),
 }
 
 /// Reply failure modes.
@@ -565,7 +568,11 @@ impl Responder for SpecEcu {
                     Some(InitFault::WrongKeywords(a, b)) => (a, b),
                     _ => self.profile.keywords,
                 };
-                let e55 = out.send(t_end + tm.w1_ms, &[SYNC], 0);
+                let sync = match self.init_fault {
+                    Some(InitFault::BadSync(b)) => b,
+                    _ => SYNC,
+                };
+                let e55 = out.send(t_end + tm.w1_ms, &[sync], 0);
                 let e1 = out.send(e55 + tm.w2_ms, &[k1], 0);
                 let e2 = out.send(e1 + tm.w3_ms, &[k2], 0);
                 self.sent(e2);

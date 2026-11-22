@@ -172,10 +172,15 @@ From RE: IOTBD32V3 5-baud routine:
 5. Break off, wait 100 ms (stop bit; reading starts in the middle of it).
 6. DTR high. **Flush RX** (break residue and the echo of the bits).
 7. Read 3 bytes `55 KW1 KW2` within `kw2_timeout_ms + 100` (`LinkConfig::kw_window_ms`
-   overrides this window for both 5-baud reads, ours, default off; NOT VERIFIED whether any
-   ECU's W1 needs it). Fewer: error **no keywords**.
+   overrides this window for both 5-baud reads, ours, default off, CLI `--kw-window MS`;
+   NOT VERIFIED whether any ECU's W1 needs it). Reading starts in the middle of the 100 ms
+   stop-bit wait of step 5, so the budget after the stop bit is about the window minus 100 ms
+   (300 ms by default): short for an ECU with W1 near the ISO 9141 maximum of 300 ms plus
+   W2/W3 and USB latency (macOS FTDI ~16 ms). If connect fails with no keywords received,
+   retry with `--kw-window 700`. Fewer than 3 bytes: error **no keywords**.
    The sync byte and the key bytes are reported, not checked (RE: IOTBD32V3 does not check
-   them). With `reject_keyword_mismatch` (ours, default off) a mismatch with the definition's
+   them); a sync byte other than 0x55 only adds a warning (`InitOutcome::sync_ok`, ours:
+   wrong baud or a line problem?). With `reject_keyword_mismatch` (ours, default off) a mismatch with the definition's
    key bytes fails the init.
 
 ### ISO8 or KWP: what happens after the key bytes

@@ -1591,7 +1591,7 @@ fn an_unanswered_fast_init_before_a_working_5_baud_reads_as_information() {
     assert_eq!(r.code, 0);
     assert!(
         r.stdout.contains(
-            "init single byte 7A: no keywords received (got nothing), trying 5-baud byte FA"
+            "init single byte 7A: no keywords received (got nothing) (try --kw-window 700), trying 5-baud byte FA"
         ),
         "{}",
         r.stdout
@@ -2303,4 +2303,83 @@ fn ports_marks_the_macos_callin_twin_as_not_used() {
     let p = r.event("port");
     assert_eq!(p[1]["use_instead"], "/dev/cu.usbserial-AM6KP9MU");
     assert!(p[0]["use_instead"].is_null() && p[2]["use_instead"].is_null());
+}
+
+fn late_w1_ecu() -> SpecEcu {
+    // W1 290 ms: inside ISO 9141 (max 300) but beyond the default keyword window.
+    let mut p = EcuProfile::sirius32();
+    p.timing.w1_ms = 290;
+    SpecEcu::new(p, fixture("sirius_cli.xml"), sirius_scenario()).unwrap()
+}
+
+#[test]
+fn kw_window_flag_reaches_the_core_read_timeout() {
+    let sx = xml("sirius_cli.xml");
+    let base = ["--trace", "connect", "--xml", &sx, "--variant", "single"];
+    // Default window (KW2Timeout + 100 = 400 ms): the ECU is lost, the error carries the hint
+    // and the trace says which window was used.
+    let (r, _) = run(late_w1_ecu(), &base);
+    assert_eq!(r.code, 4, "{}\n{}", r.stdout, r.stderr);
+    assert!(r.stderr.contains("try --kw-window 700"), "{}", r.stderr);
+    assert!(r.stderr.contains("keyword window 400 ms"), "{}", r.stderr);
+    // The flag widens the Read of the core: the same ECU is found, the window is traced.
+    let mut args = vec!["--kw-window", "700"];
+    args.extend(base);
+    let (r, _) = run(late_w1_ecu(), &args);
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    assert!(r.stderr.contains("keyword window 700 ms"), "{}", r.stderr);
+    assert!(!r.stderr.contains("try --kw-window"), "{}", r.stderr);
+}
+
+#[test]
+fn kw_window_range_is_100_to_2000_else_exit_2() {
+    let sx = xml("sirius_cli.xml");
+    for bad in ["99", "2001", "0", "-5", "abc", ""] {
+        let (r, _) = run(sirius_ecu(), &["--kw-window", bad, "connect", "--xml", &sx]);
+        assert_eq!(r.code, 2, "{bad:?}: {}", r.stderr);
+    }
+    for good in ["100", "2000"] {
+        let (r, _) = run(
+            sirius_ecu(),
+            &["--kw-window", good, "connect", "--xml", &sx],
+        );
+        // Accepted by the parser (100 ms is too short for the init to succeed: exit 4).
+        assert_ne!(r.code, 2, "{good}: {}\n{}", r.stdout, r.stderr);
+    }
+}
+
+#[test]
+fn wrong_sync_byte_warns_but_does_not_fail() {
+    let sx = xml("sirius_cli.xml");
+    let ecu = sirius_ecu().with_init_fault(kline_sim::ecu::InitFault::BadSync(0x54));
+    let (r, _) = run(ecu, &["--json", "--trace", "connect", "--xml", &sx]);
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    let c = connected(&r);
+    assert_eq!(c["sync"], "54");
+    assert_eq!(c["sync_ok"], json!(false));
+    let w = r.event("warning");
+    assert!(
+        w.iter().any(|w| w["kind"] == "sync_byte"
+            && w["message"] == "sync byte 54, expected 55 (baud or line problem?)"),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        r.stderr
+            .contains("sync byte 54, expected 55 (baud or line problem?)"),
+        "{}",
+        r.stderr
+    );
+    // Human output carries the warning too; a good sync byte has none.
+    let ecu = sirius_ecu().with_init_fault(kline_sim::ecu::InitFault::BadSync(0x54));
+    let (r, _) = run(ecu, &["connect", "--xml", &sx]);
+    assert!(
+        r.stdout
+            .contains("warning: sync byte 54, expected 55 (baud or line problem?)"),
+        "{}",
+        r.stdout
+    );
+    let (r, _) = run(sirius_ecu(), &["--json", "connect", "--xml", &sx]);
+    assert_eq!(connected(&r)["sync_ok"], json!(true));
+    assert!(r.event("warning").iter().all(|w| w["kind"] != "sync_byte"));
 }
