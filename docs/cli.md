@@ -285,7 +285,13 @@ Mac; ignition ON, engine off; nothing else (DDT2000, another tester) on the line
    - OK: a line `* /dev/cu.usbserial-XXXX  usb 0403:6001 ...` and `cable: /dev/cu.usbserial-XXXX`.
      The `/dev/tty.usbserial-XXXX` line says `(not used, ...)`: ignore it.
    - Fail: `no KKL cable found` (exit 3): replug, check `ls /dev/cu.*`; several cables: pass `--port`.
-2. `kline --trace connect --ecu sirius`
+2. First contact, init only: `kline --trace connect --ecu sirius --session none`. `connect`
+   normally opens a diagnostic session after the init (`--session auto`: `10 A0` with the Sirius
+   definition, then the Stop); with `--session none` the only frames after the init are the
+   init's own and the StopCommunication, so the very first contact changes nothing in the ECU
+   (final critique F13). Expect the same init lines as below, `connected: sirius at 7A ...`,
+   no `session 10 A0` line, then the Stop. Then run the normal connect:
+   `kline --trace connect --ecu sirius`
    - OK (exit 0): `init fast   fast init not answered (normal for many Renault K-line ECUs),
      trying 5-baud byte 7A` (information, not an error), `BREAK LOOPBACK seen`, about 2 s of
      `BREAK on/off` + `SLEEP 200 ms`, `RX 3/3 ...: 55 D0 8F`, `TX 70`, `RX 2/2 ...: 70 85`,
