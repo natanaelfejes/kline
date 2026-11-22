@@ -17,6 +17,7 @@
 //! ```
 
 mod addressing;
+mod autoident;
 mod codec;
 mod ddt2000;
 mod error;
@@ -27,6 +28,7 @@ mod report;
 mod xml;
 
 pub use addressing::{AddrFunction, AddrProtocol, Addressing, LocalizedName};
+pub use autoident::{best_match, normalize_space, Ident, MatchLevel};
 pub use codec::{DecodedItem, Raw, Value};
 pub use error::SpecError;
 pub use failures::{
