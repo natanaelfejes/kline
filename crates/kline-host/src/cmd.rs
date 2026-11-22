@@ -296,6 +296,14 @@ impl HoldArgs {
                 tier_name(risk.tier)
             )));
         }
+        // Re-check R13: Tier 0 also holds the session and keep-alive frames (10 81, 10 A0,
+        // 3E); repeating those into a learning window is not a read. Only reads may be watched.
+        if !is_watch_read(&r.payload) {
+            return Err(CliError::usage(format!(
+                "--watch {} is not a read: --watch takes only 21 xx or 1A xx (exactly 2 bytes), 17 or 18; nothing was sent",
+                hex_sp(&r.payload)
+            )));
+        }
         let p3 = u64::from(ecu.link_config()?.effective_timing().reply_to_request_ms);
         if self.watch_interval < p3 {
             return Err(CliError::usage(format!(
@@ -305,6 +313,13 @@ impl HoldArgs {
         }
         Ok(Some(r))
     }
+}
+
+/// The requests `--watch` may repeat (re-check R13): reads by identifier `21 xx` / `1A xx`
+/// (exactly 2 bytes) and the fault-memory reads `17` / `18`. Never `10 xx` or `3E`, which are
+/// Tier 0 but not reads. The safety tier is checked separately (kline-core).
+pub fn is_watch_read(payload: &[u8]) -> bool {
+    matches!(payload, [0x21 | 0x1A, _] | [0x17 | 0x18, ..])
 }
 
 #[derive(Debug, Clone, Args)]

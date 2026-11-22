@@ -458,3 +458,63 @@ fn a_lost_reply_still_holds_and_watches_without_repeating_the_request() {
     );
     assert_eq!(j.writes().len(), 1);
 }
+
+/// Re-check R13: --watch takes only reads (21 xx / 1A xx exactly 2 bytes, 17, 18); the Tier 0
+/// session and keep-alive frames 10 xx and 3E are refused with exit 2 before the port opens.
+#[test]
+fn watch_refuses_session_and_tester_present_frames() {
+    let x = xml("bmt_cli.xml");
+    for w in ["10A0", "1081", "3E", "3E01"] {
+        let (r, j) = run_opts(
+            bmt_ecu(),
+            &[
+                "exec",
+                "--xml",
+                &x,
+                "31C7000000",
+                "--hold",
+                "5",
+                "--watch",
+                w,
+            ],
+            interactive(),
+        );
+        assert_eq!(r.code, 2, "{w}: {}\n{}", r.stdout, r.stderr);
+        assert!(r.stderr.contains("--watch"), "{w}: {}", r.stderr);
+        assert!(!r.opened, "{w}: port opened");
+        assert!(r.screen.is_empty(), "{w}");
+        j.assert_no_writes();
+        // risk refuses it the same way.
+        let (r, _) = run(
+            bmt_ecu(),
+            &[
+                "risk",
+                "--xml",
+                &x,
+                "31C7000000",
+                "--hold",
+                "5",
+                "--watch",
+                w,
+            ],
+        );
+        assert_eq!(r.code, 2, "risk {w}: {}\n{}", r.stdout, r.stderr);
+    }
+    // The reads are accepted (risk opens nothing).
+    for w in ["21A3", "1A80", "17FF00", "18"] {
+        let (r, _) = run(
+            bmt_ecu(),
+            &[
+                "risk",
+                "--xml",
+                &x,
+                "31C7000000",
+                "--hold",
+                "5",
+                "--watch",
+                w,
+            ],
+        );
+        assert_ne!(r.code, 2, "risk {w}: {}\n{}", r.stdout, r.stderr);
+    }
+}

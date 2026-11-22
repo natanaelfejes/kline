@@ -186,8 +186,9 @@ StopCommunication a few ms after the reply, which would end a learning window th
 opened (BMT `31C7000000`/`31C8000000`: about 10 s). With it, after a **positive** reply kline
 keeps the session open for SECONDS, sending only TesterPresent when the line has been idle for
 the definition's TesterPresent delay (3000 ms on the BMT), then Stop. `--watch REQ` (a Tier 0
-read, name or hex, e.g. `21A3`; anything else is refused before the port is opened, exit 7,
-and kline-core checks it again on every send) makes that read the only request while holding,
+read, name or hex, e.g. `21A3`: only `21 xx` or `1A xx` of exactly 2 bytes, `17` or `18`;
+a non-read is refused before the port is opened, exit 7, and the Tier 0 frames that are not
+reads, `10 xx` and `3E`, exit 2 (re-check R13); kline-core checks it again on every send) makes that read the only request while holding,
 every `--watch-interval` ms (default 500, at least the definition's P3 gap, else exit 2). The
 first read prints every item with the known flag meanings, later reads only the items that
 changed, e.g. `+2000 ms 21 A3  TIR RF RECU 0 -> 1  (1 = a remote frame was received)` (JSON
