@@ -812,7 +812,26 @@ pub fn selftest(ctx: &mut Ctx, a: &SelftestArgs) -> Result<(), CliError> {
             }
         ),
     };
-    let fast_init_cause = crate::selftest::fast_init_cause(&j);
+    // Timing verdicts only mean something on the real cable: a pty or the simulator has no
+    // USB round trip to blame (rehearsal item 12).
+    let kkl = match &spec {
+        PortSpec::Sim { .. } => false,
+        PortSpec::Serial(_) => usb.as_ref().is_some_and(|u| {
+            ports::is_candidate(u) || u.usb.is_some_and(|v| v.0 == ports::FTDI_VID)
+        }),
+    };
+    let not_kkl_human = if kkl {
+        String::new()
+    } else {
+        format!(
+            "\nthis port is not a KKL cable ({}): timing verdicts below are not meaningful",
+            match &spec {
+                PortSpec::Sim { .. } => "simulator/pty",
+                PortSpec::Serial(_) => "no FTDI USB id: simulator, pty or another adapter",
+            }
+        )
+    };
+    let fast_init_cause = crate::selftest::fast_init_cause(&j).filter(|_| kkl);
     let fast_init_human = fast_init_cause
         .as_ref()
         .map(|c| format!(": {c}"))
@@ -820,13 +839,14 @@ pub fn selftest(ctx: &mut Ctx, a: &SelftestArgs) -> Result<(), CliError> {
     ctx.out.emit(
         json!({"event": "selftest", "port": path,
                "fast_init_cause": fast_init_cause,
+               "kkl_cable": kkl, "timing_meaningful": kkl,
                "usb": usb.as_ref().map(|u| u.to_json()),
                "baud_requested": baud, "baud_reported": reported,
                "baud_reported_source": baud_source,
                "break_jitter": j, "echo_rtt": echo, "latency_timer": latency_json,
                "note": note}),
         format!(
-            "port: {path}{}\nbaud: requested {baud}, driver reports {} ({baud_source})\nbreak toggles: {} edges, {} ms half-period: max deviation {:.2} ms, mean {:.2} ms, slowest set_break {:.2} ms; loopback {}\n5-baud bits (+-10 ms): {}; fast-init TiniL (+-1 ms): {}{fast_init_human}{echo_human}{latency_human}\n{note}",
+            "port: {path}{}{not_kkl_human}\nbaud: requested {baud}, driver reports {} ({baud_source})\nbreak toggles: {} edges, {} ms half-period: max deviation {:.2} ms, mean {:.2} ms, slowest set_break {:.2} ms; loopback {}\n5-baud bits (+-10 ms): {}; fast-init TiniL (+-1 ms): {}{fast_init_human}{echo_human}{latency_human}\n{note}",
             usb.as_ref()
                 .and_then(|u| u.usb.map(|v| format!(" (usb {:04x}:{:04x} {})", v.0, v.1, u.product.clone().unwrap_or_default())))
                 .unwrap_or_default(),

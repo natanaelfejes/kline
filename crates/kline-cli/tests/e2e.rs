@@ -982,7 +982,17 @@ fn ident_uses_the_ddt2000_autoident_ladder() {
 
 #[test]
 fn selftest_toggles_break_only_and_reports_timing() {
-    let (r, j) = run(sirius_ecu(), &["--json", "selftest"]);
+    let ecu = sirius_ecu();
+    let j = ecu.journal();
+    let r = run_line_port(
+        VirtualLine::with_ecu(ecu),
+        "virtual",
+        &["--json", "selftest"],
+        Opts {
+            ports: vec![ftdi_port("virtual")],
+            ..Opts::default()
+        },
+    );
     assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
     let s = &r.event("selftest")[0];
     assert_eq!(s["baud_requested"], 10400);
@@ -1850,4 +1860,46 @@ fn live_items_filter_and_compact_lines() {
     assert_eq!(r.code, 8, "{}", r.stderr);
     assert!(r.stderr.contains("Engine sped"), "{}", r.stderr);
     assert!(!r.opened);
+}
+
+fn ftdi_port(path: &str) -> kline_host::ports::PortInfo {
+    kline_host::ports::PortInfo {
+        path: path.into(),
+        usb: Some((kline_host::ports::FTDI_VID, 0x6001)),
+        manufacturer: Some("FTDI".into()),
+        product: Some("FT232R USB UART".into()),
+        serial: None,
+    }
+}
+
+#[test]
+fn selftest_on_a_port_that_is_not_a_kkl_cable_says_the_verdicts_mean_nothing() {
+    // "virtual" is not in the port list: not an FTDI cable.
+    let (r, _) = run(sirius_ecu(), &["selftest"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stdout.contains(
+            "this port is not a KKL cable (no FTDI USB id: simulator, pty or another adapter): timing verdicts below are not meaningful"
+        ),
+        "{}",
+        r.stdout
+    );
+    assert!(!r.stdout.contains("USB round trip"), "{}", r.stdout);
+    let (r, _) = run(sirius_ecu(), &["--json", "selftest"]);
+    let s = &r.event("selftest")[0];
+    assert_eq!(s["kkl_cable"], false, "{s}");
+    assert_eq!(s["timing_meaningful"], false, "{s}");
+    assert!(s["fast_init_cause"].is_null(), "{s}");
+    // The same port listed as an FTDI device: a cable, no such line.
+    let r = run_line_port(
+        VirtualLine::with_ecu(sirius_ecu()),
+        "virtual",
+        &["selftest"],
+        Opts {
+            ports: vec![ftdi_port("virtual")],
+            ..Opts::default()
+        },
+    );
+    assert_eq!(r.code, 0);
+    assert!(!r.stdout.contains("not a KKL cable"), "{}", r.stdout);
 }
