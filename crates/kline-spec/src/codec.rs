@@ -489,7 +489,7 @@ impl DataDef {
     }
 
     /// Value -> raw. Inverse of [`interpret`](Self::interpret) for every raw value:
-    /// `Number` for scaled data (rounded to the nearest raw step), `Text` for list labels
+    /// `Number` for scaled data (rounded to the nearest raw step, ties to even under DDT2000), `Text` for list labels
     /// and ASCII data, `Hex` for raw hex input.
     pub fn encode(&self, value: &Value) -> Result<Raw, SpecError> {
         match value {
@@ -547,7 +547,14 @@ impl DataDef {
                         if sc.step == 0.0 || sc.divide_by == 0.0 {
                             return Err(encode_err(self, "Step or DivideBy is 0"));
                         }
-                        ((x * sc.divide_by - sc.offset) / sc.step).round()
+                        let r = (x * sc.divide_by - sc.offset) / sc.step;
+                        // DDT2000: `__vbaFpI4` (round half to even), RE: DiagLibs2 ScaledValue
+                        // Let 0x1100ec40. ddt4all mode keeps rounding half away from zero.
+                        if self.semantics == Semantics::Ddt2000 {
+                            r.round_ties_even()
+                        } else {
+                            r.round()
+                        }
                     }
                     None => {
                         if x.trunc() != *x {

@@ -251,3 +251,23 @@ fn real_files_clear_plan_and_flag_frames() {
     );
     assert!(bmt.failure_flag_requests().is_empty()); // Failures Id 0
 }
+
+#[test]
+fn encode_rounds_half_to_even_like_vba_fpi4() {
+    // RE: DiagLibs2 ScaledValue Let 0x1100ec40: raw = __vbaFpI4((value * DivideBy - Offset) /
+    // Step) (IAT 0x110011a4 = __vbaFpI4, x87 fistp, default round half to even). Step 0.0625 is
+    // exact in binary, so 0.15625 is exactly 2.5 steps.
+    let e = ecu();
+    let volts = e.data("volts").unwrap();
+    let raw = |x: f64| match volts.encode(&Value::Number(x)).unwrap() {
+        Raw::Int(v) => v,
+        other => panic!("unexpected {other:?}"),
+    };
+    assert_eq!(raw(0.15625), 2); // 2.5 -> 2
+    assert_eq!(raw(0.21875), 4); // 3.5 -> 4
+    assert_eq!(raw(0.09375), 2); // 1.5 -> 2
+    assert_eq!(raw(0.2), 3); // 3.2 -> 3
+    let pad = e.data("pad").unwrap();
+    assert_eq!(pad.encode(&Value::Number(2.5)).unwrap(), Raw::Int(2));
+    assert_eq!(pad.encode(&Value::Number(3.5)).unwrap(), Raw::Int(4));
+}
