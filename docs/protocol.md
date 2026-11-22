@@ -1,6 +1,6 @@
-# K-line protocol as implemented in clio-core
+# K-line protocol as implemented in kline-core
 
-What `crates/clio-core` sends and expects on the K line, and why. This is a behaviour spec,
+What `crates/kline-core` sends and expects on the K line, and why. This is a behaviour spec,
 not a description of DDT2000's code.
 
 Source tags:
@@ -135,7 +135,7 @@ line): **FastInit, then SingleEcu** (DDT2000's own detection order for 0x7A and 
 "KWP2000 FastInit MonoPoint" then Code 2 "KWP2000 Init 5 Baud Type I", `MultiPoint="0"`), then
 our MultiEcu fallback; ISO8 (Safir) only SingleEcu. The whole list is tried up to 3 rounds,
 500 ms apart (DDT2000 "Init retry n/3"; `--init-attempts`). Constants:
-`clio_core::retry::{DDT2000_DETECTION_ORDER, RetryPolicy}`.
+`kline_core::retry::{DDT2000_DETECTION_ORDER, RetryPolicy}`.
 
 ## Fast init (KWP)
 
@@ -216,11 +216,11 @@ Payloads returned to callers start at the response SID.
 
 ## DDT2000 application behaviour (retries)
 
-Not in DDT2000's protocol layer; defaults of `clio_core::RetryPolicy`:
+Not in DDT2000's protocol layer; defaults of `kline_core::RetryPolicy`:
 
 | What | Rule | RE |
 |---|---|---|
-| NRC 0x21 / 0x23 | wait 200 / 500 ms and send again, at most 10 tries (`clio ident`; `--nrc-tries`) | DiagScanXml 0x5007c790 |
+| NRC 0x21 / 0x23 | wait 200 / 500 ms and send again, at most 10 tries (`kline ident`; `--nrc-tries`) | DiagScanXml 0x5007c790 |
 | init | whole variant list up to 3 rounds, 500 ms apart | DdtDiagScrXml 0x520484a0 (`[0x32] = 0x1F4`), DiagFailures 0x2404f410 |
 | refresh cycle (`live`) | only a cycle where every request failed counts; retry after 400 ms, at most 3 times, then exit 5 | DdtDiagScrXml 0x5204ce50 |
 
@@ -234,7 +234,7 @@ or `ReadTimeout(partial)` with fewer for `Read`. Any other event fails the machi
 
 ## Safety
 
-Enforced in `clio-core` (SAFETY.md rule 2 and 3; owner-approved policy v2 and owner decision
+Enforced in `kline-core` (SAFETY.md rule 2 and 3; owner-approved policy v2 and owner decision
 2026-11-22). The core writes only frames it built itself: `Action::Write` carries a
 crate-private `Frame` (bytes readable, no public constructor, not `Clone`), and every request
 frame comes from a crate-private `Permit`. Decisions use the exact payload bytes and the
@@ -280,11 +280,11 @@ Without it no approval type or challenge method exists, so a library user, an MC
 `safety::assess` / `safety::tier_of`: print the `RiskInfo` and the exact CLI command for a
 human, never execute.
 
-Only the interactive `clio` CLI may enable the feature. It must read the confirmation from
-`/dev/tty` (not stdin, so a pipe cannot answer) and never offer approvals with `--json`. `clio-agent`
-(the AI binary) depends on `clio-core` without it; `crates/clio-agent/tests/agent.rs` runs
-`cargo tree -p clio-agent -e features` and fails if the feature or `clio-cli` appears. Any future
-`clio-mcp` crate needs the same check (docs/cli.md).
+Only the interactive `kline` CLI may enable the feature. It must read the confirmation from
+`/dev/tty` (not stdin, so a pipe cannot answer) and never offer approvals with `--json`. `kline-agent`
+(the AI binary) depends on `kline-core` without it; `crates/kline-agent/tests/agent.rs` runs
+`cargo tree -p kline-agent -e features` and fails if the feature or `kline-cli` appears. Any future
+`kline-mcp` crate needs the same check (docs/cli.md).
 
 Flow: `Session::service_challenge(payload)` / `config_write_challenge(payload,
 identification)` / `expert_challenge(payload)` returns an `ApprovalChallenge` with the exact

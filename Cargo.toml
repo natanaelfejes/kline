@@ -1,14 +1,16 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/clio-spec",
-    "crates/clio-core",
-    "crates/clio-sim",
-    "crates/clio-host",
-    "crates/clio-cli",
-    "crates/clio-agent",
+    "crates/kline-spec",
+    "crates/kline-core",
+    "crates/kline-sim",
+    "crates/kline-host",
+    "crates/kline-cli",
+    "crates/kline-agent",
 ]
 
 [workspace.package]
 edition = "2021"
 publish = false
+license = "MIT OR Apache-2.0"
+authors = ["Natanael Feješ"]

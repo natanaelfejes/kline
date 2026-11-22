@@ -1,18 +1,18 @@
-# clio-spec: DDT2000 XML semantics (ddt4all mode)
+# kline-spec: DDT2000 XML semantics (ddt4all mode)
 
-> Since M3 clio-spec has two interpretations (`Semantics`). The **default is
+> Since M3 kline-spec has two interpretations (`Semantics`). The **default is
 > `Semantics::Ddt2000`**, DDT2000 itself as reverse engineered; it is described, with evidence, in
 > the author's DDT2000 behaviour notes. This document describes **`Semantics::Ddt4all`**,
 > which `crosscheck_ddt4all.py` uses (`dump --semantics ddt4all`). Validation of responses
 > (`decode_checked`) is the same in both modes.
 
-How `crates/clio-spec` reads a DDT2000 ECU definition and turns response bytes into values
+How `crates/kline-spec` reads a DDT2000 ECU definition and turns response bytes into values
 under `Semantics::Ddt4all`.
 The reference is the ddt4all Python decoder (GPL-3, `src/ddt4all/core/ecu/`, commit `e109cd2`).
 We match its **decoding** exactly. Where we deviate (mostly encoding and error handling), or where
 ddt4all and the XML disagree or are ambiguous, this document says so.
 
-Verification: `crates/clio-spec/tests/crosscheck_ddt4all.py` runs ddt4all and our `dump` example on
+Verification: the author's ddt4all crosscheck script runs ddt4all and our `dump` example on
 the same bytes (seeded random frames, full and truncated, for every request of all six ECU files
 plus our fixture). Per item it compares the display string, the raw bytes (ddt4all `getHexValue`
 against our `raw`) and, for scaled items, the unrounded number (ours against ddt4all's formula
@@ -85,10 +85,10 @@ either directly under `K` (Safir) or under `KWP` (BMT, SIRIUS); `KWP@Multipoint`
 FastInit before ISO8.
 
 - ddt4all reads only the key words, FastInit and the address. It ignores every timing value.
-- **Timings are raw `Option<u32>`, assumed to be milliseconds.** clio-spec stores the XML numbers
+- **Timings are raw `Option<u32>`, assumed to be milliseconds.** kline-spec stores the XML numbers
   unchanged (`InterByte@Delay`, `ReplyToRequest@Delay`, `RequestToReply@Timeout`,
   `TesterPresent@Delay`, `OnError@Delay`, `KW2@Timeout`, `FirstRequest@Delay`, `KW2_@Delay`)
-  and does **not** resolve them into a timing set: clio-core owns its timing struct and decides
+  and does **not** resolve them into a timing set: kline-core owns its timing struct and decides
   defaults and units. The ms assumption fits TesterPresent 3000 = ddt4all's hard-coded 3 s tester
   present, but is not verified against DDT2000.
 - **Where 5-baud (ISO8) data can live.** `K.iso8` (`<K><ISO8>`, Safir: plain ISO 9141) and

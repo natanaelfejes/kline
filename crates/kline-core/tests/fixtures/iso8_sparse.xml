@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Hand-written kline-core fixture (not derived from any Renault file): plain ISO8 with most
+     timings absent, to check the ISO8 class defaults. -->
+<Target Name="Fixture ISO8" xmlns="http://www-diag.renault.com/2002/ECU">
+<Function Name="Test" Address="122"/>
+<K BaudRate="10417">
+<ISO8><KW1 Value="1"/><KW2 Value="2"/></ISO8>
+<ReplyToRequest Delay="7"/>
+</K>
+<Requests Endian="Big"></Requests>
+</Target>

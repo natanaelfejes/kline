@@ -198,83 +198,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e0921b3876b3a1df8a1c9f912e7f94342458022c2e84288015893d83c4d62a79"
 
 [[package]]
-name = "clio-agent"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "clio-core",
- "clio-host",
- "clio-sim",
- "clio-spec",
- "ctrlc",
- "serde_json",
-]
-
-[[package]]
-name = "clio-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "clio-core",
- "clio-host",
- "clio-sim",
- "clio-spec",
- "ctrlc",
- "serde_json",
- "serialport",
-]
-
-[[package]]
-name = "clio-core"
-version = "0.1.0"
-dependencies = [
- "clio-spec",
- "getrandom",
- "proptest",
- "thiserror",
-]
-
-[[package]]
-name = "clio-host"
-version = "0.1.0"
-dependencies = [
- "clap",
- "clio-core",
- "clio-sim",
- "clio-spec",
- "serde",
- "serde_json",
- "serialport",
-]
-
-[[package]]
-name = "clio-sim"
-version = "0.1.0"
-dependencies = [
- "clio-core",
- "clio-spec",
- "nix 0.30.1",
- "serde",
- "serde_json",
- "serialport",
- "thiserror",
-]
-
-[[package]]
-name = "clio-spec"
-version = "0.1.0"
-dependencies = [
- "encoding_rs",
- "proptest",
- "roxmltree",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -431,6 +354,83 @@ name = "itoa"
 version = "1.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
+
+[[package]]
+name = "kline-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ctrlc",
+ "kline-core",
+ "kline-host",
+ "kline-sim",
+ "kline-spec",
+ "serde_json",
+]
+
+[[package]]
+name = "kline-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ctrlc",
+ "kline-core",
+ "kline-host",
+ "kline-sim",
+ "kline-spec",
+ "serde_json",
+ "serialport",
+]
+
+[[package]]
+name = "kline-core"
+version = "0.1.0"
+dependencies = [
+ "getrandom",
+ "kline-spec",
+ "proptest",
+ "thiserror",
+]
+
+[[package]]
+name = "kline-host"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "kline-core",
+ "kline-sim",
+ "kline-spec",
+ "serde",
+ "serde_json",
+ "serialport",
+]
+
+[[package]]
+name = "kline-sim"
+version = "0.1.0"
+dependencies = [
+ "kline-core",
+ "kline-spec",
+ "nix 0.30.1",
+ "serde",
+ "serde_json",
+ "serialport",
+ "thiserror",
+]
+
+[[package]]
+name = "kline-spec"
+version = "0.1.0"
+dependencies = [
+ "encoding_rs",
+ "proptest",
+ "roxmltree",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "libc"

@@ -1,6 +1,6 @@
-# clio-sim: ECU simulator
+# kline-sim: ECU simulator
 
-`crates/clio-sim` behaves like the car on the K line so that the core (and later the CLI) can be
+`crates/kline-sim` behaves like the car on the K line so that the core (and later the CLI) can be
 tested end to end without the car. Nothing in it is measured on the car.
 
 ## Pieces
@@ -8,13 +8,13 @@ tested end to end without the car. Nothing in it is measured on the car.
 | Module | What it does |
 |---|---|
 | `bus` | The K line of a dumb FTDI KKL cable: echo of every TX byte, break loopback, one 0x00 "break residue" on break release (optional), 5-baud and fast-init wake-up detection from the break edges, time-stamped delivery of the ECU's bytes. |
-| `ecu::SpecEcu` | An ECU answering from a clio-spec `EcuDef` and a `Scenario`. Profiles: Sirius 32 (0x7A, KWP 5-baud, `55 D0 8F`, ~KW2 handshake), BMT (0x26, same), Safir 2 (0x7A, ISO8, `55 C2 85`, no handshake), or `EcuProfile::from_def`. |
+| `ecu::SpecEcu` | An ECU answering from a kline-spec `EcuDef` and a `Scenario`. Profiles: Sirius 32 (0x7A, KWP 5-baud, `55 D0 8F`, ~KW2 handshake), BMT (0x26, same), Safir 2 (0x7A, ISO8, `55 C2 85`, no handshake), or `EcuProfile::from_def`. |
 | `scenario` | Values per `<Data>` name; the positive response builder. |
 | `classify`, `journal` | The simulator's own read/dangerous classification and the **ECU write log**, plus timing violations and notes. |
 | `replay::ReplayEcu` | Plays back a JSONL capture as the ECU. |
 | `line::VirtualLine` | In-process duplex with a virtual millisecond clock (a 5-baud init costs no real time). |
 | `pty::PtySim` | The bus behind a pseudo-terminal plus a control socket (Linux/macOS). |
-| `driver::Driver` | Runs clio-core's `FiveBaudInit` / `FastInit` / `Session` over any `Line`, optionally capturing the JSONL log. A test driver; the CLI will own the real one. |
+| `driver::Driver` | Runs kline-core's `FiveBaudInit` / `FastInit` / `Session` over any `Line`, optionally capturing the JSONL log. A test driver; the CLI will own the real one. |
 
 ## Wire behaviour
 
@@ -29,7 +29,7 @@ tested end to end without the car. Nothing in it is measured on the car.
   `accept_fast_init`.
 - **KWP handshake.** ~KW2 must come within W4 (strict 25..50 ms after KW2, lenient 0..1000);
   the ECU sends `~(received address byte)` W4 (30) later: 0x85 / 0xD9 plain, 0x05 / 0x59 XOR'ed.
-- **Requests.** Frames are parsed by the simulator's own codec (`frame`, not clio-core's).
+- **Requests.** Frames are parsed by the simulator's own codec (`frame`, not kline-core's).
   Bad checksum, length or a non-physical format byte: ignored (violation `BadFrame`). A KWP
   header whose target is not the ECU address is ignored. Strict mode ignores a request that
   starts less than P3min (`ReplyToRequest@Delay`, 5) after the ECU's last byte, or whose bytes
@@ -50,7 +50,7 @@ tested end to end without the car. Nothing in it is measured on the car.
   `DropBytes { count }`, `Slow { delay_ms }`, `NoReply`. Timing: `Tolerance::strict` /
   `lenient`; `EcuTiming` sets the ECU's own W1..W4, P1, P2.
 - **ECU write log.** Every request that is not a read (by the simulator's own list, written
-  from SAFETY.md rule 2 and 3) is recorded and printed to stderr as `clio-sim: ECU WRITE LOG:`,
+  from SAFETY.md rule 2 and 3) is recorded and printed to stderr as `kline-sim: ECU WRITE LOG:`,
   whether or not the definition knows it; this includes BMT `21 A4 ..` with extra bytes (the exact
   2-byte transponder *status* read is Tier 0 and not logged) and the
   approved BMT routines. `Journal::assert_no_writes()` panics with the whole log.
@@ -89,7 +89,7 @@ delays. A difference is a `ReplayMismatch` violation and the replay goes silent.
 
 **It proves**, for the paths it exercises:
 
-- clio-core's machines, driven over a byte-level line with echo and real waiting semantics,
+- kline-core's machines, driven over a byte-level line with echo and real waiting semantics,
   complete a Sirius / BMT / Safir session and produce frames that an independent parser
   accepts; the timing the core produces lies inside the ISO windows the strict ECU checks
   (5-baud bit grid, W5 idle, W4, P3min = 5, P4).
@@ -101,7 +101,7 @@ delays. A difference is a `ReplayMismatch` violation and the replay goes silent.
 - The InitVariant fallback can be tested against an ECU that accepts only the plain, only the
   XOR'ed address byte, or only fast init.
 - Nothing dangerous reached the ECU in a test: the write log is a second, independent safety
-  check behind clio-core's allowlist.
+  check behind kline-core's allowlist.
 - A serialport-based tester can drive the pty like a serial device.
 
 **It cannot prove anything about the real car.** It encodes the same assumptions as the core

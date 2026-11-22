@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Hand-written kline-sim fixture (not derived from any Renault file). Shaped like the body
+     ECU at 0x26 (KWP 5-baud Multipoint, KW D0 8F). Request bytes from docs/protocol.md and
+     docs/SAFETY.md; data names, positions and scaling are invented. -->
+<Target Name="Fixture BMT" xmlns="http://www-diag.renault.com/2002/ECU">
+<Function Name="Body" Address="38"/>
+<K BaudRate="10400">
+<KWP Multipoint="1">
+<ISO8><KW1 Value="208"/><KW2 Value="143" Timeout="300"/><FirstRequest Delay="20"/></ISO8>
+<KW2_ Delay="25"/>
+</KWP>
+<InterByte Delay="0"/>
+<ReplyToRequest Delay="5"/>
+<RequestToReply Timeout="300"/>
+<TesterPresent Delay="3000"/>
+<OnError Delay="300"/>
+</K>
+<Datas>
+<Data Name="Part number"><Bytes count="6" ascii="1"/></Data>
+<Data Name="Board type"><Bits><List><Item Value="3" Text="type C"/></List></Bits></Data>
+<Data Name="Remote frame received"><Bits count="1"><List><Item Value="0" Text="no"/><Item Value="1" Text="yes"/></List></Bits></Data>
+<Data Name="Remote frame valid"><Bits count="1"><List><Item Value="0" Text="no"/><Item Value="1" Text="yes"/></List></Bits></Data>
+<Data Name="Remote code accepted"><Bits count="1"><List><Item Value="0" Text="no"/><Item Value="1" Text="yes"/></List></Bits></Data>
+<Data Name="Remote count"><Bits count="4"><Scaled/></Bits></Data>
+<Data Name="Transponder state"><Bits><Scaled/></Bits></Data>
+</Datas>
+<Requests Endian="Big">
+<Request Name="Identification">
+<Sent><SentBytes>2180</SentBytes></Sent>
+<Received MinBytes="9"><DataItem Name="Part number" Ref="1" FirstByte="3"/></Received>
+</Request>
+<Request Name="Board">
+<Sent><SentBytes>2180</SentBytes></Sent>
+<Received MinBytes="9"><DataItem Name="Board type" Ref="1" FirstByte="9"/></Received>
+</Request>
+<Request Name="Remote status">
+<Sent><SentBytes>21A3</SentBytes></Sent>
+<Received MinBytes="4">
+<DataItem Name="Remote frame received" Ref="1" FirstByte="3" BitOffset="7"/>
+<DataItem Name="Remote frame valid" Ref="1" FirstByte="3" BitOffset="6"/>
+<DataItem Name="Remote code accepted" Ref="1" FirstByte="3" BitOffset="5"/>
+<DataItem Name="Remote count" Ref="1" FirstByte="4"/>
+</Received>
+</Request>
+<Request Name="Transponder">
+<Sent><SentBytes>21A4</SentBytes></Sent>
+<Received MinBytes="3"><DataItem Name="Transponder state" Ref="1" FirstByte="3"/></Received>
+</Request>
+<Request Name="Learn remote 1">
+<Sent><SentBytes>31C7000000</SentBytes></Sent>
+<Received MinBytes="1"></Received>
+</Request>
+<Request Name="Learn remote 2">
+<Sent><SentBytes>31C8000000</SentBytes></Sent>
+<Received MinBytes="1"></Received>
+</Request>
+<Request Name="Clear faults">
+<Sent><SentBytes>14FF00</SentBytes></Sent>
+<Received MinBytes="1"></Received>
+</Request>
+</Requests>
+</Target>

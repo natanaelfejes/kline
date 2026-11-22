@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Hand-written kline-cli fixture of a NON-Clio ECU (invented, not derived from any Renault
+     file): address 0x28, KWP fast init only, KW1 0xEA (even, not D0: the separate length byte
+     framing, docs/protocol.md "Framing"). Names, bytes and scaling are invented for tests. -->
+<Target Name="CLI fixture ABS" xmlns="http://www-diag.renault.com/2002/ECU">
+<Function Name="ABS" Address="40"/>
+<K BaudRate="10400">
+<KWP>
+<FastInit><KW1 Value="234"/><KW2 Value="143"/></FastInit>
+</KWP>
+<InterByte Delay="0"/>
+<ReplyToRequest Delay="5"/>
+<RequestToReply Timeout="300"/>
+<TesterPresent Delay="3000"/>
+<OnError Delay="300"/>
+</K>
+<Datas>
+<Data Name="Software"><Bytes count="4" ascii="1"/></Data>
+<Data Name="Front left speed"><Bits count="16"><Scaled Unit="km/h" Step="0.01"/></Bits></Data>
+<Data Name="Front right speed"><Bits count="16"><Scaled Unit="km/h" Step="0.01"/></Bits></Data>
+<Data Name="Pump motor fault"><Bits count="1"><List><Item Value="0" Text="absent"/><Item Value="1" Text="present"/></List></Bits></Data>
+<Data Name="Code antidemarrage"><Bytes count="2"/></Data>
+<Data Name="Pump"><Bits><Scaled/></Bits></Data>
+</Datas>
+<Requests Endian="Big">
+<Request Name="Identification">
+<Sent><SentBytes>2180</SentBytes></Sent>
+<Received MinBytes="6"><DataItem Name="Software" Ref="1" FirstByte="3"/></Received>
+</Request>
+<Request Name="Wheel speeds">
+<Sent><SentBytes>21B1</SentBytes></Sent>
+<Received MinBytes="6">
+<DataItem Name="Front left speed" Ref="1" FirstByte="3"/>
+<DataItem Name="Front right speed" Ref="1" FirstByte="5"/>
+</Received>
+</Request>
+<Request Name="Defauts ABS">
+<Sent><SentBytes>21C0</SentBytes></Sent>
+<Received MinBytes="3"><DataItem Name="Pump motor fault" Ref="1" FirstByte="3" BitOffset="7"/></Received>
+</Request>
+<Request Name="Ecriture code">
+<Sent><SentBytes>3B800000</SentBytes><DataItem Name="Code antidemarrage" FirstByte="3"/></Sent>
+<Received MinBytes="2"></Received>
+</Request>
+<Request Name="Pump test">
+<Sent><SentBytes>30A001</SentBytes><DataItem Name="Pump" FirstByte="3"/></Sent>
+<Received MinBytes="2"></Received>
+</Request>
+</Requests>
+</Target>

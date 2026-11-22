@@ -1,36 +1,36 @@
-# clio and clio-agent: command line
+# kline and kline-agent: command line
 
 Three crates:
 
 | Crate | What | Approvals |
 |---|---|---|
-| `crates/clio-host` | shared runtime: transports (FTDI KKL cable, simulator pty), link runner, JSONL capture, `--trace`, ECU definitions, the Tier 0 commands | none: depends on clio-core **without** `approved-routines` |
-| `crates/clio-cli` | binary `clio`: everything above plus `exec` | the only crate that enables clio-core's `approved-routines` |
-| `crates/clio-agent` | binary `clio-agent` for AI use: reads plus `prepare` | none (`tests/agent.rs` runs `cargo tree -p clio-agent -e features` and fails if `approved-routines` or `clio-cli` appears) |
+| `crates/kline-host` | shared runtime: transports (FTDI KKL cable, simulator pty), link runner, JSONL capture, `--trace`, ECU definitions, the Tier 0 commands | none: depends on kline-core **without** `approved-routines` |
+| `crates/kline-cli` | binary `kline`: everything above plus `exec` | the only crate that enables kline-core's `approved-routines` |
+| `crates/kline-agent` | binary `kline-agent` for AI use: reads plus `prepare` | none (`tests/agent.rs` runs `cargo tree -p kline-agent -e features` and fails if `approved-routines` or `kline-cli` appears) |
 
 Build each binary on its own when you deploy them:
 
 ```
-cargo build --release -p clio-cli      # target/release/clio
-cargo build --release -p clio-agent    # target/release/clio-agent
+cargo build --release -p kline-cli      # target/release/kline
+cargo build --release -p kline-agent    # target/release/kline-agent
 ```
 
-Cargo unifies features across the packages of one build. `cargo build -p clio-cli -p clio-agent`
-(or `--workspace`, or `--all-features`) compiles clio-core once, with `approved-routines`, and
-links that copy into clio-agent too. clio-agent still has no code path to an approval (it has no
-`exec`, and clio-host has none), but in such a build the approval types are present in the binary.
-clio-agent prints a warning on stderr when this happened (`safety::APPROVALS_COMPILED`).
+Cargo unifies features across the packages of one build. `cargo build -p kline-cli -p kline-agent`
+(or `--workspace`, or `--all-features`) compiles kline-core once, with `approved-routines`, and
+links that copy into kline-agent too. kline-agent still has no code path to an approval (it has no
+`exec`, and kline-host has none), but in such a build the approval types are present in the binary.
+kline-agent prints a warning on stderr when this happened (`safety::APPROVALS_COMPILED`).
 
 ## Common options
 
 | Option | Meaning |
 |---|---|
-| `--json` | one JSON object per line on stdout (errors too: `{"event":"error","code":N,"kind":..,"message":..}`). Notes go to stderr. `clio-agent` always uses JSON |
+| `--json` | one JSON object per line on stdout (errors too: `{"event":"error","code":N,"kind":..,"message":..}`). Notes go to stderr. `kline-agent` always uses JSON |
 | `--trace` | every action with a time stamp on stderr: DTR, break edges, sleeps, break loopback, flushes (with the bytes discarded), every TX frame and every RX read (`RX got/wanted in N ms`). Also saved as `<capture>.trace.txt` |
 | `--port PATH` | serial port. Default: the single `/dev/cu.usbserial-*` (macOS AppleUSBFTDI); none or several is exit 3. A macOS callin device `/dev/tty.*` is refused (exit 3; it blocks on carrier detect): use its `/dev/cu.*` twin |
-| `--sim-control SOCKET` | `--port` is then clio-sim's pty, break/DTR go over this control socket (docs/sim.md) |
-| `--capture-dir DIR` | default `$CLIO_CAPTURE_DIR`, else `~/Documents/Clio/captures` |
-| `--defs DIR` | definitions for `--ecu`. Default `$CLIO_DDT_XML`, else `~/Documents/Clio/ddt-extract/ecus` |
+| `--sim-control SOCKET` | `--port` is then kline-sim's pty, break/DTR go over this control socket (docs/sim.md) |
+| `--capture-dir DIR` (alias `--captures`) | default `$KLINE_CAPTURE_DIR`, else `~/.local/share/kline/captures` |
+| `--defs DIR` | definitions for `--ecu`. Default `$KLINE_DDT_XML` (deprecated fallback `$CLIO_DDT_XML`, read for one release), else `~/.local/share/kline/ecus` |
 
 ECU selection (every command that talks to an ECU, and `risk`/`prepare`/`replay`):
 
@@ -47,7 +47,7 @@ ECU selection (every command that talks to an ECU, and `risk`/`prepare`/`replay`
 | `--periodic-tester-present` | `3E` every 2000 ms with a required reply (DDT2000 screen option) instead of after 3000 ms idle |
 | `--session auto\|none\|a0\|81` | after the init: `auto` sends `10 A0` if the definition has it, else `10 81` if it has that (KWP only). A negative answer is reported (`note: not retried with another session`) and the command continues; no other session is tried (e.g. `10 C0`, seen in other Renault 0x7A logs, stays forbidden by policy) |
 
-Protocol and timing come from the definition's `<K>` section through clio-core (`spec::k_timing`):
+Protocol and timing come from the definition's `<K>` section through kline-core (`spec::k_timing`):
 ISO8 5-baud, KWP 5-baud (with ~KW2 handshake), KWP fast init. A definition with only `<CAN>`
 is refused: "CAN not supported by a KKL cable yet" (exit 8).
 
@@ -56,18 +56,18 @@ is refused: "CAN not supported by a KKL cable yet" (exit 8).
 | Command | Does | Notes |
 |---|---|---|
 | `ports` | lists ports, marks candidates `*`, says which cable would be used | |
-| `selftest` | without the car: opens the port at 10400, shows the USB id and the baud the driver reports, toggles break 20 times (10 ms half-period, nothing written) and reports the edge jitter against the 5-baud (+-10 ms) and fast-init (+-1 ms) tolerances | `clio` only; unplug the cable from the car |
+| `selftest` | without the car: opens the port at 10400, shows the USB id and the baud the driver reports, toggles break 20 times (10 ms half-period, nothing written) and reports the edge jitter against the 5-baud (+-10 ms) and fast-init (+-1 ms) tolerances | `kline` only; unplug the cable from the car |
 | `connect` | init (variants), session start, Stop | reports sync, KW1 KW2, ~address, key-byte match |
 | `ident` | `21 80` (KWP; else Tier 0 requests named like "ident"; NRC 21/23 retried like DDT2000), chooses the definition | DDT2000 AutoIdent ladder (exact, unique, soft, diag, soft+diag; DiagVersion numeric, Supplier/Soft/Version whitespace-normalized, case-sensitive) when the candidates have `<AutoIdents>`; else the first candidate whose key bytes match and whose identification requests decode. A reply shorter than MinBytes is decoded anyway and flagged; `ddt2000_diagfailures_accepts` says whether DiagFailures (exactly 26 bytes) would take it |
-| `read REQ` | one request (definition name or hex), decoded | Tier 0 only; a non-read is refused before the port is opened (exit 7) and again by clio-core |
+| `read REQ` | one request (definition name or hex), decoded | Tier 0 only; a non-read is refused before the port is opened (exit 7) and again by kline-core |
 | `live --frames A,B --rate HZ [--count N]` | all frames once per cycle, `HZ` cycles/s | TesterPresent when idle >= TesterPresent delay (or every 2000 ms with `--periodic-tester-present`); Ctrl-C stops cleanly; a cycle in which every request failed is retried after 400 ms, the 4th in a row is exit 5 (DDT2000 "Read Data : Retry n/3") |
 | `dtc` | `<Failures Id="1">` (Sirius 32): reads the Tier 0 frames that carry `FailureFlag="1"` items of `<Devices>` and lists the set flags with their device (DDT2000 DiagFailures); otherwise the frames whose name says `panne`/`defaut`/`fault`/`dtc`, non-zero items. Ends with the clear plan | never clears |
-| `clear-dtc [--ddt2000-clear]` | Tier 1 clear: prints the exact bytes (default: `ClearDiagnosticInformation.*` if the definition has one, else the definition's own `14 ..` request; Sirius `14 00 00`) and what DDT2000's global clear would send (`14 FF 00` for the Sirius), then the `exec` approval | `clio` only; `--ddt2000-clear` sends DDT2000's choice |
-| `scan --range 21:B0-C5 [--interval MS]` | clio-core `ScanPlan`: `21`/`1A` only, >= 200 ms apart, stops after 3 missing replies or a security NRC (exit 12) | `clio` only; not offered by clio-agent |
+| `clear-dtc [--ddt2000-clear]` | Tier 1 clear: prints the exact bytes (default: `ClearDiagnosticInformation.*` if the definition has one, else the definition's own `14 ..` request; Sirius `14 00 00`) and what DDT2000's global clear would send (`14 FF 00` for the Sirius), then the `exec` approval | `kline` only; `--ddt2000-clear` sends DDT2000's choice |
+| `scan --range 21:B0-C5 [--interval MS]` | kline-core `ScanPlan`: `21`/`1A` only, >= 200 ms apart, stops after 3 missing replies or a security NRC (exit 12) | `kline` only; not offered by kline-agent |
 | `risk REQ` | tier and `RiskInfo` of a request, nothing sent | exit 7 when forbidden or refused by the name guard |
-| `exec REQ` | ONE non-read request | `clio` only, see below |
+| `exec REQ` | ONE non-read request | `kline` only, see below |
 | `replay FILE [--ecu/--xml]` | decodes a capture offline: wake-ups, each request with its replies (echo stripped, 0x78 sequences split), decoded with the definition if given | |
-| `prepare REQ` | `clio-agent` only: `RiskInfo` plus the exact `clio ... exec ...` command for a human | never sends |
+| `prepare REQ` | `kline-agent` only: `RiskInfo` plus the exact `kline ... exec ...` command for a human | never sends |
 
 ### exec (approval)
 
@@ -75,14 +75,14 @@ is refused: "CAN not supported by a KKL cable yet" (exit 8).
 terminal (exit 7). Otherwise it shows the request, its definition names and its `RiskInfo`, opens
 the session, and for Tier 2 (config write) first reads `21 80` (the definition must be the one
 `ident` chooses, unambiguously) and the backup read (`21 A1` for BMT `3B D2`, else `21 lid`).
-It then makes the clio-core challenge, shows it on `/dev/tty` with a random code (6
+It then makes the kline-core challenge, shows it on `/dev/tty` with a random code (6
 characters, 10 for expert tier) and reads the answer from `/dev/tty` (not stdin), sending
 TesterPresent while it waits (default 120 s, `--confirm-timeout`). A wrong code, timeout or
 Ctrl-C is exit 9 and nothing is sent.
 
 Name guard (all ECUs, Tier 1-3): a request is refused (exit 7) when a definition request with
 those bytes, or one of its data items (name, description, mnemonic), contains an
-immobilizer/transponder/key keyword (`clio_core::safety::immobilizer_keyword`: anti-demarrage,
+immobilizer/transponder/key keyword (`kline_core::safety::immobilizer_keyword`: anti-demarrage,
 transpond, immo, verlog, verrou, apptrp, ap1cle, code cle, key code, wegfahr, and the words
 cle/cles/key/keys). The exact BMT remote-learning payloads `31C7000000`/`31C8000000` on 0x26
 are exempt (their names contain "CLE"). "verrou" also matches central locking; that is refused too.
@@ -108,7 +108,7 @@ are exempt (their names contain "CLE"). "verrou" also matches central locking; t
 ## Capture
 
 Every session writes `<UTC>-<ecu>-<command>-<pid>.jsonl` in the capture directory, one line per
-TX/RX, flushed as written, in the clio-sim replay format (docs/sim.md) plus `unix_ms`:
+TX/RX, flushed as written, in the kline-sim replay format (docs/sim.md) plus `unix_ms`:
 
 ```
 {"t_ms":300,"dir":"tx","kind":"five_baud","hex":"7A","unix_ms":1795342272000}
@@ -116,33 +116,33 @@ TX/RX, flushed as written, in the clio-sim replay format (docs/sim.md) plus `uni
 {"t_ms":2408,"dir":"tx","hex":"70","unix_ms":...}
 ```
 
-`t_ms` is ms since the port was opened. `clio replay` decodes it; clio-sim's `ReplayEcu` plays it
-back as the ECU (`crates/clio-cli/tests/replay.rs` replays a CLI capture and gets the same
+`t_ms` is ms since the port was opened. `kline replay` decodes it; kline-sim's `ReplayEcu` plays it
+back as the ECU (`crates/kline-cli/tests/replay.rs` replays a CLI capture and gets the same
 decoded values).
 
 ## Simulator
 
 ```
-clio --port /dev/pts/N --sim-control /tmp/sim.ctl connect --xml crates/clio-cli/tests/fixtures/sirius_cli.xml
+kline --port /dev/pts/N --sim-control /tmp/sim.ctl connect --xml crates/kline-cli/tests/fixtures/sirius_cli.xml
 ```
 
-The tests start `clio_sim::pty::PtySim` themselves; there is no standalone simulator binary yet.
+The tests start `kline_sim::pty::PtySim` themselves; there is no standalone simulator binary yet.
 
 ## HIL quickstart (first visit at the car)
 
 Nothing here has been run on the car yet. Do the steps in order and keep every capture
-(`~/Documents/Clio/captures`, with `.trace.txt` when `--trace` is on). Do **not** run `exec` or
+(`~/.local/share/kline/captures`, with `.trace.txt` when `--trace` is on). Do **not** run `exec` or
 `scan` on the first visit.
 
-Before: definitions in `~/Documents/Clio/ddt-extract/ecus` (or pass `--defs`); cable in the OBD
+Before: definitions in `~/.local/share/kline/ecus` (or pass `--defs`); cable in the OBD
 socket and the Mac; ignition ON, engine off; nothing else (DDT2000, another tester) on the line.
 
-0. At home, cable in the Mac only: `clio selftest`. Expect `5-baud bits (+-10 ms): OK`; if the
+0. At home, cable in the Mac only: `kline selftest`. Expect `5-baud bits (+-10 ms): OK`; if the
    fast-init line says `TOO IMPRECISE`, fast init may fail (the auto order tries it first).
-1. `clio ports`
+1. `kline ports`
    - OK: a line `* /dev/cu.usbserial-XXXX  usb 0403:6001 ...` and `cable: /dev/cu.usbserial-XXXX`.
    - Fail: `no KKL cable found` (exit 3): replug, check `ls /dev/cu.*`; several cables: pass `--port`.
-2. `clio --trace connect --ecu bmt --variant single`
+2. `kline --trace connect --ecu bmt --variant single`
    - OK (exit 0): `BREAK LOOPBACK seen`, about 2 s of `BREAK on/off` + `SLEEP 200 ms`,
      `RX 3/3 ...: 55 D0 8F`, `TX 70`, `RX 2/2 ...: 70 D9`, then
      `connected: bmt at 26 (kwp, kwp 5-baud) with variant single; sync 55 KW D0 8F, ~address D9`
@@ -152,26 +152,26 @@ socket and the Mac; ignition ON, engine off; nothing else (DDT2000, another test
      NOT VERIFIED: send the trace.
    - `RX 0/3` (`no keywords`): the ECU did not wake on 0x26. Go to step 3.
    - `RX 1/3` or `2/3`, or key bytes other than `D0 8F`: keep the capture, stop, report it.
-3. Only if step 2 got no keywords: `clio --trace connect --ecu bmt --variant multi`
+3. Only if step 2 got no keywords: `kline --trace connect --ecu bmt --variant multi`
    (expects `TX A6` as the 5-baud byte and `~address 59`), then `--variant fast`
-   (`TX 81 26 F1 81 19`, expects `C1 ..`). Then `clio --trace connect --ecu bmt` (auto) should
+   (`TX 81 26 F1 81 19`, expects `C1 ..`). Then `kline --trace connect --ecu bmt` (auto) should
    log the failed attempts and connect with the variant that worked.
-4. `clio ident --ecu bmt`
+4. `kline ident --ecu bmt`
    - OK: `21 80 -> 61 80 ...`, `definition: .../BMT_X65_ph1_p.xml` (or BMT_SAGEM). `AMBIGUOUS` means
      both definitions decode the reply: fine for reads, decides nothing for config writes.
    - `7F 21 xx` (exit 6) or `NONE fits` (exit 10): keep the capture, report it.
-5. `clio live --ecu bmt --frames 21A3 --rate 2` and press the remote a few times: the remote
+5. `kline live --ecu bmt --frames 21A3 --rate 2` and press the remote a few times: the remote
    status items should change. Ctrl-C to stop.
-6. `clio dtc --ecu bmt`: lists the fault flags that are set (exit 0 even when some are set).
-7. `clio --trace connect --ecu sirius --variant single`
+6. `kline dtc --ecu bmt`: lists the fault flags that are set (exit 0 even when some are set).
+7. `kline --trace connect --ecu sirius --variant single`
    - OK: `RX 3/3 ...: 55 D0 8F`, `TX 70`, `RX 2/2 ...: 70 85`, then `session 10 A0: ok 50A0`.
    - Failures as in step 2; then step 3 with `--ecu sirius` (`FA` / `~address 05`; fast init
      `81 7A F1 81 6D`).
-8. `clio ident --ecu sirius`, then
-   `clio live --ecu sirius --frames 21A9,21AA --rate 2` (engine off: rpm 0, coolant and battery
+8. `kline ident --ecu sirius`, then
+   `kline live --ecu sirius --frames 21A9,21AA --rate 2` (engine off: rpm 0, coolant and battery
    voltage plausible), then start the engine and watch rpm.
-9. `clio dtc --ecu sirius`.
-10. Offline: `clio replay ~/Documents/Clio/captures/<file>.jsonl --ecu sirius` should show the same
+9. `kline dtc --ecu sirius`.
+10. Offline: `kline replay ~/.local/share/kline/captures/<file>.jsonl --ecu sirius` should show the same
     values. Send the captures and traces for the docs/protocol.md "Not verified" list.
 
 ## NOT VERIFIED (host / cable)
@@ -191,16 +191,16 @@ socket and the Mac; ignition ON, engine off; nothing else (DDT2000, another test
 - Some Renault 0x7A logs use `10 C0`; our Sirius definition says `10 A0`. Definition-driven, a
   refusal is reported, `10 C0` stays forbidden.
 
-## clio-agent
+## kline-agent
 
 Same options and commands as above except `scan` and `exec`, always JSON. For a non-read it
 offers only `prepare`:
 
 ```
-$ clio-agent prepare --ecu sirius 11FF
+$ kline-agent prepare --ecu sirius 11FF
 {"event":"prepare","request":"11FF","risk":{"tier":"service (tier 1)",...},
- "command":"clio exec --ecu sirius 11FF","note":"only a human can run this, ..."}
+ "command":"kline exec --ecu sirius 11FF","note":"only a human can run this, ..."}
 ```
 
-`read` of a non-read is exit 7 and nothing reaches the ECU (`crates/clio-agent/tests/agent.rs`
+`read` of a non-read is exit 7 and nothing reaches the ECU (`crates/kline-agent/tests/agent.rs`
 checks the simulator's write log).

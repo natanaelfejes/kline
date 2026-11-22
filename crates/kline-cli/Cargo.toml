@@ -1,0 +1,26 @@
+[package]
+name = "kline-cli"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "`kline`: interactive K-line diagnostic CLI for Renault K-line ECUs (FTDI KKL cable). The only crate that enables approvals."
+
+[[bin]]
+name = "kline"
+path = "src/main.rs"
+
+[dependencies]
+kline-host = { path = "../kline-host" }
+# SAFETY.md rule 2: the interactive `kline` CLI is the only binary that may enable approvals.
+kline-core = { path = "../kline-core", features = ["spec", "approved-routines"] }
+kline-spec = { path = "../kline-spec" }
+anyhow = "1.0.100"
+clap = { version = "4.6.9", features = ["derive"] }
+ctrlc = "3.5.3"
+serde_json = "1.0.154"
+
+[dev-dependencies]
+kline-sim = { path = "../kline-sim" }
+serialport = { version = "4.10.1", default-features = false }

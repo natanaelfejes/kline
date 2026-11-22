@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Hand-written test fixture for kline-spec (not derived from any Renault file).
+     Exercises bit offsets, little endian, signed, lists, ASCII, fractional Bytes count,
+     DivideBy 0, CAN, request building. Expected values: tests/fixture.rs. -->
+<xml xmlns:ddt="http://www-diag.renault.com/2002/ECU">
+<ddt:Target Name="Fixture ECU" xmlns="http://www-diag.renault.com/2002/ECU">
+<Description><![CDATA[Hand-written fixture
+second line]]></Description>
+<Projects xmlns=""><x99/><y01/></Projects><Function Name="Test function" Address="122"/>
+<PowerSupply>
+<Ground/>
+<Vbat/>
+</PowerSupply>
+<K BaudRate="10400">
+<KWP Multipoint="0">
+<FastInit><KW1 Value="241"/>
+<KW2 Value="122"/></FastInit>
+</KWP>
+<InterByte Delay="1"/>
+<ReplyToRequest Delay="5"/>
+<RequestToReply Timeout="300"/>
+<TesterPresent Delay="2000"/>
+<OnError Delay="100"/>
+</K>
+<CAN BaudRate="500000"><SendId><CANId Value="2016"/></SendId><ReceiveId><CANId Value="2024"/></ReceiveId></CAN>
+<AutoIdents>
+<AutoIdent DiagVersion="4" Supplier="001" Soft="00E1" Version="7600"/><AutoIdent DiagVersion="8" Supplier="001" Soft="00E1" Version="8000"/></AutoIdents>
+<Datas>
+<Data Name="flag msb">
+<Description>1 bit, list</Description>
+<Bits count="1"><List><Item Value="0" Text="off"/><Item Value="1" Text="ON"/></List></Bits>
+</Data>
+<Data Name="nibble">
+<Comment><![CDATA[4 bits at BitOffset 2]]></Comment>
+<Mnemonic>NIB</Mnemonic>
+<Bits count="4"><Scaled/></Bits>
+</Data>
+<Data Name="half">
+<Bytes count="0,5"/>
+</Data>
+<Data Name="le bit">
+<Bits count="1"><Scaled/></Bits>
+</Data>
+<Data Name="word le">
+<Bits count="16"><Scaled Unit="rpm" Step=" .5" Offset="-10"/></Bits>
+</Data>
+<Data Name="word be">
+<Bits count="16"><Scaled Unit="rpm" Step=" .5" Offset="-10"/></Bits>
+</Data>
+<Data Name="temp signed">
+<Bits signed="1"><Scaled Unit="°C" Step=" .5" Format="#0.0"/></Bits>
+</Data>
+<Data Name="word signed le">
+<Bits count="16" signed="1"><Scaled/></Bits>
+</Data>
+<Data Name="mode">
+<Bits><List><Item Value="1" Text="one"/><Item Value="2" Text="two"/><Item Value="2" Text="deux"/></List></Bits>
+</Data>
+<Data Name="raw hex">
+<Bytes count="2"/>
+</Data>
+<Data Name="ident">
+<Bytes count="4" ascii="1"/>
+</Data>
+<Data Name="ratio">
+<Bits><Scaled DivideBy=" 100000"/></Bits>
+</Data>
+<Data Name="broken">
+<Bits><Scaled DivideBy="0"/></Bits>
+</Data>
+<Data Name="setpoint">
+<Bits count="16"><Scaled Unit="rpm" Step=" 2"/></Bits>
+</Data>
+</Datas>
+<Requests Endian="Big">
+<Request Name="Read Block">
+<ManuelSend/>
+<DenyAccess><Plant/><AfterSales/></DenyAccess>
+<Sent>
+<SentBytes>2101</SentBytes>
+</Sent>
+<Received MinBytes="18">
+<DataItem Name="flag msb" Ref="1" FirstByte="3"/>
+<DataItem Name="nibble" Ref="1" FirstByte="3" BitOffset="2"/>
+<DataItem Name="half" Ref="1" FirstByte="3" BitOffset="4"/>
+<DataItem Name="le bit" Ref="1" FirstByte="3" BitOffset="1" Endian="Little"/>
+<DataItem Name="word le" Ref="1" FirstByte="4" Endian="Little"/>
+<DataItem Name="word be" Ref="1" FirstByte="6"/>
+<DataItem Name="temp signed" Ref="1" FirstByte="8"/>
+<DataItem Name="word signed le" Ref="1" FirstByte="9" Endian="Little"/>
+<DataItem Name="mode" Ref="1" FirstByte="11"/>
+<DataItem Name="raw hex" Ref="1" FirstByte="12"/>
+<DataItem Name="ident" Ref="1" FirstByte="14"/>
+<DataItem Name="ratio" Ref="1" FirstByte="18"/>
+<DataItem Name="broken" Ref="1" FirstByte="18"/>
+</Received>
+</Request>
+<Request Name="Write Setpoint">
+<Sent>
+<SentBytes>3B010000</SentBytes>
+<DataItem Name="setpoint" Ref="1" FirstByte="3"/>
+</Sent>
+<Received MinBytes="2">
+</Received>
+</Request>
+<Request Name="Set Mode">
+<DossierMaintenabilite/>
+<Sent>
+<VariableLength/>
+<SentBytes>3B0200</SentBytes>
+<DataItem Name="mode" FirstByte="3"/>
+<DataItem Name="flag msb" FirstByte="2"/>
+</Sent>
+<Received MinBytes="2">
+<ReplyBytes>7B02</ReplyBytes>
+</Received>
+</Request>
+<Request Name="Same Bytes">
+<Sent>
+<SentBytes>2101</SentBytes>
+</Sent>
+<Received MinBytes="2">
+</Received>
+</Request>
+</Requests>
+</ddt:Target>
+</xml>
