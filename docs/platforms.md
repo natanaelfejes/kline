@@ -44,7 +44,10 @@ on Unix.
 
 Unix only: after opening, kline clears `IGNBRK`, `BRKINT` and `PARMRK` with termios (`nix`, a
 `cfg(unix)` dependency), so a looped-back break reads as one `00` byte; macOS's `cfmakeraw` sets
-`IGNBRK`. Windows has no such flag; whether the FTDI VCP driver delivers a looped-back break as a
+`IGNBRK`. On macOS the `tcsetattr` for this gets a placeholder 9600 and 10400 is set again with
+`IOSSIOSPEED` afterwards, as `serialport` does: `tcgetattr` reads back 10400 there and
+AppleUSBFTDI refuses it in `tcsetattr` with EINVAL (measured, FT232R, macOS 27; the bug in
+ab8de98/bff9da7). Windows has no such flag; whether the FTDI VCP driver delivers a looped-back break as a
 `00` byte is NOT VERIFIED (without it the 5-baud init warns, unless `--strict-loopback`).
 
 ## Permissions
@@ -78,7 +81,9 @@ line measures the real round trip on every OS.
   Advanced > Latency Timer (msec) = 1. The driver stores it as `LatencyTimer` (DWORD) under
   `HKLM\SYSTEM\CurrentControlSet\Enum\FTDIBUS\<VID_0403+PID_6001+serial>\0000\Device Parameters`.
   kline does not read or write the registry; `--set-latency` is Linux-only (exit 2 elsewhere).
-- macOS: AppleUSBFTDI has no user setting; measure with `--echo-rtt`.
+- macOS: AppleUSBFTDI has no user setting and publishes no latency value: `ioreg -l -w0 -r -n
+  AppleUSBFTDI` (FT232R, macOS 27) shows only USB ids, `IOTTYSuffix` and the callout/dialin
+  paths, no `LatencyTimer`. Measure with `--echo-rtt`.
 
 ## Timing
 

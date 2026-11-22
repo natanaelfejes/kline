@@ -289,6 +289,90 @@ impl<P: SerialIo, C: Clock> Transport for KklLine<P, C> {
 /// [`SerialIo`] for a `serialport` port: the FTDI KKL cable.
 pub struct SerialportIo {
     port: Box<dyn serialport::SerialPort>,
+    /// For reading the speed back on macOS ([`SerialIo::baud_rate`]).
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    fd: std::os::unix::io::RawFd,
+}
+
+/// The termios calls [`SerialportIo::open`] makes, behind a trait so their order can be tested
+/// without a cable (ours).
+#[cfg(unix)]
+pub(crate) trait LineSettings {
+    type Tio;
+    fn get(&mut self) -> io::Result<Self::Tio>;
+    fn set(&mut self, tio: &Self::Tio) -> io::Result<()>;
+    /// The baud the way `serialport` sets it (macOS: `IOSSIOSPEED` after `tcsetattr`; Linux:
+    /// termios2 `BOTHER`).
+    fn set_baud(&mut self, baud: u32) -> io::Result<()>;
+    fn input_flags(tio: &mut Self::Tio) -> &mut nix::sys::termios::InputFlags;
+    /// Put a standard speed (9600) in `tio` for `tcsetattr`.
+    fn placeholder_speed(tio: &mut Self::Tio) -> io::Result<()>;
+}
+
+/// Whether the line speed is set with an ioctl outside termios, so a `tcgetattr` result carries
+/// a speed `tcsetattr` refuses: macOS reads back 10400 after `IOSSIOSPEED` and AppleUSBFTDI then
+/// fails `tcsetattr` with EINVAL (measured, FT232R, macOS 27). `serialport` hands `tcsetattr`
+/// B9600 there for that reason (serialport 4.10.1 `posix/termios.rs` `get_termios`).
+#[cfg(unix)]
+pub const SPEED_SET_BY_IOCTL: bool = cfg!(any(target_os = "macos", target_os = "ios"));
+
+/// Clear IGNBRK/BRKINT/PARMRK ([`kline_input_flags`]) on an open port and keep it at `baud`
+/// (0: keep the speed). With `speed_by_ioctl` ([`SPEED_SET_BY_IOCTL`]) `tcsetattr` gets the
+/// placeholder speed and the baud is set again afterwards, as `serialport` does.
+#[cfg(unix)]
+pub(crate) fn apply_kline_settings<L: LineSettings>(
+    l: &mut L,
+    baud: u32,
+    speed_by_ioctl: bool,
+) -> io::Result<()> {
+    let mut tio = l.get()?;
+    let f = L::input_flags(&mut tio);
+    *f = kline_input_flags(*f);
+    if speed_by_ioctl && baud > 0 {
+        L::placeholder_speed(&mut tio)?;
+    }
+    l.set(&tio)?;
+    if baud > 0 {
+        // tcsetattr rewrote the speed (macOS: to the placeholder; Linux: from the termios1
+        // view of it): set it again.
+        l.set_baud(baud)?;
+    }
+    let mut check = l.get()?;
+    let f = *L::input_flags(&mut check);
+    if f != kline_input_flags(f) {
+        return Err(io::Error::other(
+            "the port kept IGNBRK/BRKINT/PARMRK set: a 5-baud break would be lost",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+struct NativeLine<'a>(&'a mut serialport::TTYPort);
+
+#[cfg(unix)]
+impl LineSettings for NativeLine<'_> {
+    type Tio = nix::sys::termios::Termios;
+    fn get(&mut self) -> io::Result<Self::Tio> {
+        use std::os::unix::io::AsRawFd;
+        nix::sys::termios::tcgetattr(self.0.as_raw_fd()).map_err(io::Error::from)
+    }
+    fn set(&mut self, tio: &Self::Tio) -> io::Result<()> {
+        use nix::sys::termios::{tcsetattr, SetArg};
+        use std::os::unix::io::AsRawFd;
+        tcsetattr(self.0.as_raw_fd(), SetArg::TCSANOW, tio).map_err(io::Error::from)
+    }
+    fn set_baud(&mut self, baud: u32) -> io::Result<()> {
+        use serialport::SerialPort as _;
+        self.0.set_baud_rate(baud).map_err(io::Error::from)
+    }
+    fn input_flags(tio: &mut Self::Tio) -> &mut nix::sys::termios::InputFlags {
+        &mut tio.input_flags
+    }
+    fn placeholder_speed(tio: &mut Self::Tio) -> io::Result<()> {
+        nix::sys::termios::cfsetspeed(tio, nix::sys::termios::BaudRate::B9600)
+            .map_err(io::Error::from)
+    }
 }
 
 /// Input flags for the K line: `flags` with IGNBRK, BRKINT and PARMRK cleared, so a break on RX
@@ -325,33 +409,23 @@ impl SerialportIo {
             .flow_control(serialport::FlowControl::None)
             .timeout(Duration::from_millis(10));
         #[cfg(unix)]
-        let mut port: Box<dyn serialport::SerialPort> = {
-            use nix::sys::termios::{tcgetattr, tcsetattr, SetArg};
-            use serialport::SerialPort as _;
+        #[allow(unused_variables)] // fd: macOS only
+        let (mut port, fd): (Box<dyn serialport::SerialPort>, _) = {
             use std::os::unix::io::AsRawFd;
             let mut native = builder.open_native().map_err(io::Error::from)?;
+            apply_kline_settings(&mut NativeLine(&mut native), baud, SPEED_SET_BY_IOCTL)?;
             let fd = native.as_raw_fd();
-            let mut tio = tcgetattr(fd).map_err(io::Error::from)?;
-            tio.input_flags = kline_input_flags(tio.input_flags);
-            tcsetattr(fd, SetArg::TCSANOW, &tio).map_err(io::Error::from)?;
-            if baud > 0 {
-                // tcsetattr may have rewritten the speed from libc's view of it (macOS sets
-                // 10400 with IOSSIOSPEED after tcsetattr; Linux with termios2): set it again.
-                native.set_baud_rate(baud).map_err(io::Error::from)?;
-            }
-            let check = tcgetattr(fd).map_err(io::Error::from)?;
-            if check.input_flags != kline_input_flags(check.input_flags) {
-                return Err(io::Error::other(
-                    "the port kept IGNBRK/BRKINT/PARMRK set: a 5-baud break would be lost",
-                ));
-            }
-            Box::new(native)
+            (Box::new(native), fd)
         };
         #[cfg(not(unix))]
         let mut port = builder.open().map_err(io::Error::from)?;
         // A pty refuses DTR (ENOTTY); a real cable must accept it.
         let _ = port.write_data_terminal_ready(true);
-        Ok(SerialportIo { port })
+        Ok(SerialportIo {
+            port,
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            fd,
+        })
     }
 }
 
@@ -399,12 +473,21 @@ impl SerialIo for SerialportIo {
             .map_err(io::Error::from)
     }
 
-    /// On macOS `serialport` 4.10 sets any speed with Apple's `IOSSIOSPEED` ioctl (after
-    /// `tcsetattr`) and returns the value it was *asked* for, cached, not read back from the
-    /// driver (serialport `TTYPort::baud_rate`); elsewhere the termios speed. So on macOS this
-    /// says nothing about the speed the FTDI chip runs at.
+    /// On macOS `serialport` 4.10 returns the value it was *asked* for, cached (serialport
+    /// `TTYPort::baud_rate`), so the termios output speed is read back with `tcgetattr` instead:
+    /// after `IOSSIOSPEED` it holds 10400 (measured, FT232R, macOS 27). That is the tty layer's
+    /// record of the speed, not the FTDI divisor. Elsewhere `serialport`'s termios speed.
     fn baud_rate(&self) -> Option<u32> {
-        self.port.baud_rate().ok()
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        {
+            nix::sys::termios::tcgetattr(self.fd)
+                .ok()
+                .map(|t| nix::sys::termios::cfgetospeed(&t))
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+        {
+            self.port.baud_rate().ok()
+        }
     }
 }
 
@@ -707,6 +790,97 @@ mod tests {
             !t.input_flags.intersects(F::IGNBRK | F::BRKINT | F::PARMRK),
             "{:?}",
             t.input_flags
+        );
+    }
+
+    /// A driver like AppleUSBFTDI (measured, FT232R, macOS 27): `tcgetattr` reads back the
+    /// `IOSSIOSPEED` speed (10400) and `tcsetattr` refuses any non-standard speed with EINVAL.
+    #[cfg(unix)]
+    struct MacLikeDriver {
+        flags: nix::sys::termios::InputFlags,
+        speed: u32,
+        calls: Vec<String>,
+    }
+
+    #[cfg(unix)]
+    impl LineSettings for MacLikeDriver {
+        type Tio = (nix::sys::termios::InputFlags, u32);
+        fn get(&mut self) -> io::Result<Self::Tio> {
+            self.calls.push("tcgetattr".into());
+            Ok((self.flags, self.speed))
+        }
+        fn set(&mut self, tio: &Self::Tio) -> io::Result<()> {
+            self.calls.push(format!("tcsetattr {}", tio.1));
+            const STANDARD: [u32; 8] = [1200, 2400, 4800, 9600, 19_200, 38_400, 57_600, 115_200];
+            if !STANDARD.contains(&tio.1) {
+                return Err(io::Error::from_raw_os_error(nix::libc::EINVAL));
+            }
+            self.flags = tio.0;
+            self.speed = tio.1;
+            Ok(())
+        }
+        fn set_baud(&mut self, baud: u32) -> io::Result<()> {
+            self.calls.push(format!("IOSSIOSPEED {baud}"));
+            self.speed = baud;
+            Ok(())
+        }
+        fn input_flags(tio: &mut Self::Tio) -> &mut nix::sys::termios::InputFlags {
+            &mut tio.0
+        }
+        fn placeholder_speed(tio: &mut Self::Tio) -> io::Result<()> {
+            tio.1 = 9600;
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    fn mac_like_after_serialport_open() -> MacLikeDriver {
+        use nix::sys::termios::InputFlags as F;
+        // What the cable showed right after serialport opened it at 10400 (macOS cfmakeraw).
+        MacLikeDriver {
+            flags: F::IGNBRK | F::IGNPAR,
+            speed: 10_400,
+            calls: Vec::new(),
+        }
+    }
+
+    /// Regression: `kline selftest` on macOS failed "cannot open ... at 10400 baud: Invalid
+    /// argument (os error 22)" because the read-back 10400 went straight into `tcsetattr`.
+    #[cfg(unix)]
+    #[test]
+    fn ioctl_speed_goes_through_tcsetattr_as_a_placeholder_then_ioctl() {
+        use nix::sys::termios::InputFlags as F;
+        let mut d = mac_like_after_serialport_open();
+        apply_kline_settings(&mut d, 10_400, true).unwrap();
+        assert_eq!(
+            d.calls,
+            [
+                "tcgetattr",
+                "tcsetattr 9600",
+                "IOSSIOSPEED 10400",
+                "tcgetattr"
+            ]
+        );
+        assert_eq!((d.flags, d.speed), (F::IGNPAR, 10_400));
+
+        // The order the bug had: the read-back speed straight into tcsetattr.
+        let mut d = mac_like_after_serialport_open();
+        let e = apply_kline_settings(&mut d, 10_400, false).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(nix::libc::EINVAL));
+
+        // Baud 0 (simulator pty on macOS): no speed touched at all.
+        let mut d = mac_like_after_serialport_open();
+        d.speed = 9600;
+        apply_kline_settings(&mut d, 0, true).unwrap();
+        assert_eq!(d.calls, ["tcgetattr", "tcsetattr 9600", "tcgetattr"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn speed_is_set_by_ioctl_only_on_apple() {
+        assert_eq!(
+            SPEED_SET_BY_IOCTL,
+            cfg!(any(target_os = "macos", target_os = "ios"))
         );
     }
 

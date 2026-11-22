@@ -710,7 +710,7 @@ pub fn selftest(ctx: &mut Ctx, a: &SelftestArgs) -> Result<(), CliError> {
         None
     };
     let baud_source = if cfg!(any(target_os = "macos", target_os = "ios")) {
-        "requested value echoed by serialport on macOS, not read back from the driver"
+        "termios output speed read back with tcgetattr after IOSSIOSPEED (the tty layer's record, not the FTDI divisor)"
     } else {
         "termios speed read back from the driver"
     };

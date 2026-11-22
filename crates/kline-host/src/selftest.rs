@@ -13,8 +13,9 @@
 //! looped-back K line: the cable on the car's OBD socket (powered K line, no init is sent) or
 //! TX wired to RX. NOT VERIFIED on the car.
 //!
-//! The driver's baud: on macOS `serialport` returns the value it was asked for, not one read
-//! back from the FTDI driver, so `baud_reported` there proves nothing about the line speed.
+//! The driver's baud: on macOS `serialport` returns the value it was asked for, so the termios
+//! output speed is read back with `tcgetattr` instead (`IOSSIOSPEED` leaves 10400 there). That
+//! is the tty layer's record, not the FTDI divisor: it proves the ioctl took, not the line speed.
 
 use std::io;
 
