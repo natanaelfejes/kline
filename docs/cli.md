@@ -45,6 +45,13 @@ so kline-agent **refuses to start** (exit 7, message on stderr) when `safety::AP
 is set. Always build it alone: `cargo build --release -p kline-agent`. In a joint `cargo test`
 the agent's session tests are skipped with a message; `cargo test -p kline-agent` runs them.
 
+Which build is it: `kline --version` and `kline-agent --version` print the git commit the binary
+was built from, e.g. `kline 0.1.0 (5e0d5ff)`, with `-dirty` when the work tree had uncommitted
+or untracked changes, or `(unknown)` when it was built without git (a build script,
+`crates/kline-host/build_git.rs`; `KLINE_GIT_COMMIT=...` in the build environment overrides it).
+Every capture header and the first trace line (`BUILD kline 0.1.0 commit 5e0d5ff`) record the
+same value. Build the car binary from a clean checkout so it does not say `-dirty`.
+
 ## Installing on the Mac (binary and definitions)
 
 kline needs two things on the machine: the binary in `PATH`, and the DDT2000 definition files in
@@ -263,10 +270,14 @@ third byte writes CALTERMI), so an unknown variant of a flagged read is not offe
 
 ## Capture files
 
-Every session writes `<UTC>-<ecu>-<command>-<pid>.jsonl` in the capture directory, one line per
-TX/RX, flushed as written, in the kline-sim replay format ([sim.md](sim.md#replay-log-jsonl)) plus `unix_ms`:
+Every session writes `<UTC>-<ecu>-<command>-<pid>.jsonl` in the capture directory: first a
+header line that names the build (tool, version, git commit: short hash, `-dirty` when the
+work tree had changes, `unknown` without git; re-check R10, final critique F11), then one line
+per TX/RX, flushed as written, in the kline-sim replay format
+([sim.md](sim.md#replay-log-jsonl)) plus `unix_ms`. `replay` and kline-sim skip the header:
 
 ```
+{"header":{"tool":"kline","version":"0.1.0","commit":"5e0d5ff","command":"read","label":"sirius","unix_ms":1795342272000}}
 {"t_ms":300,"dir":"tx","kind":"five_baud","hex":"7A","unix_ms":1795342272000}
 {"t_ms":2383,"dir":"rx","hex":"55D08F","unix_ms":...}
 {"t_ms":2408,"dir":"tx","hex":"70","unix_ms":...}

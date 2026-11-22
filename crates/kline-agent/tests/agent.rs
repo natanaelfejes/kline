@@ -220,3 +220,31 @@ mod pty_sessions {
 fn pty_sessions_are_skipped_on_this_os() {
     eprintln!("SKIPPED: kline-agent pty sessions need a Unix pty; see kline-cli tests/e2e.rs");
 }
+
+/// Re-check R10: `kline-agent --version` names the git commit of the build (short hash,
+/// `-dirty` or `unknown`) and keeps the licence line.
+#[test]
+fn version_names_the_git_commit() {
+    if unified() {
+        return;
+    }
+    let o = Command::new(env!("CARGO_BIN_EXE_kline-agent"))
+        .arg("--version")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert_eq!(o.status.code(), Some(0), "{out}");
+    let commit = env!("KLINE_GIT_COMMIT");
+    assert!(
+        out.contains(&format!("kline-agent 0.1.0 ({commit})")),
+        "{commit}: {out}"
+    );
+    assert!(out.contains("GPL-3.0-or-later"), "{out}");
+    let ok = commit == "unknown"
+        || commit
+            .trim_end_matches("-dirty")
+            .chars()
+            .all(|c| c.is_ascii_hexdigit());
+    assert!(ok && commit.len() >= 7, "{commit}");
+}

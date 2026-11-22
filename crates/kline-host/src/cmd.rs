@@ -505,11 +505,21 @@ pub fn open_session(
     } else {
         Tracer::off()
     };
-    let cap = Capture::create(&ctx.g.capture_dir(), &ecu.label, command)?;
+    let cap = Capture::create(&ctx.g.capture_dir(), &ecu.label, command, ctx.tool)?;
     let trace_path = cap.path().with_extension("trace.txt");
     tracer
         .add_file(&trace_path)
         .map_err(|e| CliError::new(exit::CAPTURE, "capture", format!("trace file: {e}")))?;
+    // Which build wrote this trace (re-check R10): the capture header has the same.
+    tracer.line(
+        0,
+        format!(
+            "BUILD {} {} commit {}",
+            ctx.tool,
+            crate::VERSION,
+            crate::GIT_COMMIT
+        ),
+    );
     let out_path = cap.path().with_extension("out.txt");
     ctx.out.record.attach(&out_path).map_err(|e| {
         CliError::new(

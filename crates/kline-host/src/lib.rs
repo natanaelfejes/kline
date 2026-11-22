@@ -34,6 +34,12 @@ use serde_json::{json, Value};
 
 pub use error::{exit, CliError};
 
+/// The git commit this crate was built from: short hash, `-dirty` when the work tree had
+/// changes, or `unknown` without git (build.rs, re-check R10). Recorded in every capture header.
+pub const GIT_COMMIT: &str = env!("KLINE_GIT_COMMIT");
+/// The package version, recorded next to [`GIT_COMMIT`].
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Uppercase hex without spaces (`21A9`).
 pub fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02X}")).collect()

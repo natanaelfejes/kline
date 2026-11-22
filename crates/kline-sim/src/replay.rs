@@ -3,6 +3,7 @@
 //! Log format (one JSON object per line, docs/sim.md):
 //!
 //! ```text
+//! {"header":{"tool":"kline","version":"0.1.0","commit":"5e0d5ff","command":"read","label":"sirius","unix_ms":1763800000000}}
 //! {"t_ms":300,"dir":"tx","kind":"five_baud","hex":"7A"}
 //! {"t_ms":2283,"dir":"rx","hex":"55D08F"}
 //! {"t_ms":2308,"dir":"tx","hex":"70"}
@@ -103,12 +104,19 @@ pub enum ReplayError {
     Io(#[from] std::io::Error),
 }
 
-/// Parse a JSONL log. Blank lines are skipped.
+/// Parse a JSONL log. Blank lines and a header line (an object with a `header` key, which
+/// kline writes first: tool, version, git commit) are skipped.
 pub fn read_jsonl(r: impl BufRead) -> Result<Vec<LogEntry>, ReplayError> {
     let mut out = Vec::new();
     for (i, line) in r.lines().enumerate() {
         let line = line?;
         if line.trim().is_empty() {
+            continue;
+        }
+        if serde_json::from_str::<serde_json::Value>(&line)
+            .ok()
+            .is_some_and(|v| v.get("header").is_some())
+        {
             continue;
         }
         out.push(serde_json::from_str(&line).map_err(|e| ReplayError::Json {

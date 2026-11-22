@@ -29,9 +29,12 @@ use serde_json::json;
 #[derive(Debug, Parser)]
 #[command(
     name = "kline",
-    version,
+    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("KLINE_GIT_COMMIT"), ")"),
     long_version = concat!(
         env!("CARGO_PKG_VERSION"),
+        " (",
+        env!("KLINE_GIT_COMMIT"),
+        ")",
         "\nCopyright (C) 2026 Natanael Feješ. GPL-3.0-or-later, see LICENSE and NOTICE.\nhttps://github.com/natanaelfejes/kline"
     ),
     about = "K-line diagnostics for Renault K-line ECUs (DDT2000 definitions; target vehicle: 1999 Clio II) over a dumb FTDI KKL cable",

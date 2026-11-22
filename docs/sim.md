@@ -114,7 +114,8 @@ One object per line: `{"t_ms":300,"dir":"tx","kind":"five_baud","hex":"7A"}`.
 `dir` is `tx` (tester wrote; `t_ms` = start of the write) or `rx` (tester read; `t_ms` = when the
 read returned; the echo of the preceding `tx` may be included and is stripped). `kind` marks a
 wake-up: `five_baud` (hex = address byte, `t_ms` = first break) or `fast_init`. `Driver::capturing`
-writes this format; the CLI's captures use the same format plus `unix_ms` ([cli.md](cli.md#capture-files)). On replay the ECU waits for
+writes this format; the CLI's captures use the same format plus `unix_ms`, after a first
+`{"header":{..}}` line (tool, version, git commit) that the reader skips ([cli.md](cli.md#capture-files)). On replay the ECU waits for
 each `tx` (same wake-up or same bytes), then sends the following `rx` bytes at the recorded
 delays. A difference is a `ReplayMismatch` violation and the replay goes silent.
 

@@ -74,6 +74,31 @@ pub fn utc_stamp(secs: u64) -> String {
     )
 }
 
+/// First line of every capture: which build wrote it (re-check R10, final critique F11).
+/// `{"header":{"tool":"kline","version":"0.1.0","commit":"5e0d5ff","command":"read",..}}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Header {
+    pub tool: String,
+    pub version: String,
+    /// [`crate::GIT_COMMIT`]: short hash, `-dirty`, or `unknown`.
+    pub commit: String,
+    pub command: String,
+    pub label: String,
+    pub unix_ms: u64,
+}
+
+#[derive(Serialize)]
+struct HeaderLine {
+    header: Header,
+}
+
+/// Whether a capture line is the header (an object with a `header` key), not an entry.
+pub fn is_header_line(line: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .is_some_and(|v| v.get("header").is_some())
+}
+
 /// The capture file of one session.
 pub struct Capture {
     path: PathBuf,
@@ -83,7 +108,9 @@ pub struct Capture {
 
 impl Capture {
     /// Create `<dir>/<UTC stamp>-<label>-<command>-<pid>.jsonl` (the directory is created).
-    pub fn create(dir: &Path, label: &str, command: &str) -> Result<Capture, CliError> {
+    /// Its first line is the [`Header`] (tool, version, git commit, command, label); readers
+    /// skip it.
+    pub fn create(dir: &Path, label: &str, command: &str, tool: &str) -> Result<Capture, CliError> {
         fs::create_dir_all(dir).map_err(|e| {
             CliError::new(
                 exit::CAPTURE,
@@ -108,11 +135,24 @@ impl Capture {
                 format!("cannot create capture {}: {e}", path.display()),
             )
         })?;
-        Ok(Capture {
+        let mut c = Capture {
             path,
             file,
             entries: 0,
-        })
+        };
+        let header = Header {
+            tool: tool.to_string(),
+            version: crate::VERSION.to_string(),
+            commit: crate::GIT_COMMIT.to_string(),
+            command: command.to_string(),
+            label: label.to_string(),
+            unix_ms: unix_ms(),
+        };
+        if let Ok(s) = serde_json::to_string(&HeaderLine { header }) {
+            let _ = writeln!(c.file, "{s}");
+            let _ = c.file.flush();
+        }
+        Ok(c)
     }
 
     pub fn path(&self) -> &Path {
@@ -140,7 +180,7 @@ pub fn read(path: &Path) -> Result<Vec<Entry>, CliError> {
     let mut out = Vec::new();
     for (i, line) in std::io::BufReader::new(f).lines().enumerate() {
         let line = line.map_err(|e| err(format!("{}: {e}", path.display())))?;
-        if line.trim().is_empty() {
+        if line.trim().is_empty() || is_header_line(&line) {
             continue;
         }
         let e: Entry = serde_json::from_str(&line)
