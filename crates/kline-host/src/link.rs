@@ -405,6 +405,8 @@ pub struct Connected {
     pub address_complement: Option<u8>,
     pub keywords_match: Option<bool>,
     pub kind: InitKind,
+    /// 5-baud: whether the start-bit break was seen on RX (None: fast init).
+    pub break_loopback: Option<bool>,
 }
 
 /// Try `variants` in order until one init succeeds, up to `policy.init_attempts` rounds with
@@ -451,6 +453,7 @@ pub fn connect(
                 address_complement: o.address_complement(),
                 keywords_match: o.keywords_match(),
                 kind: o.kind(),
+                break_loopback: o.break_loopback_seen(),
             };
             let s = link.session(o);
             return Ok((s, c));

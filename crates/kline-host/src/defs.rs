@@ -299,6 +299,82 @@ pub struct Resolved {
     pub names: Vec<String>,
 }
 
+/// One `--set ITEM=VALUE`: a number, `hex:ABCD` (raw bytes), or a list label / ASCII text.
+pub fn parse_set(s: &str) -> Result<(String, kline_spec::Value), CliError> {
+    let (name, v) = s
+        .split_once('=')
+        .ok_or_else(|| CliError::usage(format!("--set {s:?}: expected ITEM=VALUE")))?;
+    let (name, v) = (name.trim(), v.trim());
+    if name.is_empty() {
+        return Err(CliError::usage(format!("--set {s:?}: empty item name")));
+    }
+    let value = if let Some(h) = v.strip_prefix("hex:") {
+        kline_spec::Value::Hex(h.to_string())
+    } else if let Ok(x) = v.parse::<f64>() {
+        kline_spec::Value::Number(x)
+    } else {
+        kline_spec::Value::Text(v.to_string())
+    };
+    Ok((name.to_string(), value))
+}
+
+/// Like [`resolve_request`], with `sets` (`ITEM=VALUE`) encoded into the request's `<Sent>`
+/// data items by the definition (`Request::build`, DDT2000's request parameters). A number
+/// must lie on the item's scaling grid (`encode_exact`). With `sets`, `spec` must be a request
+/// name; items not set keep the bytes of `SentBytes`.
+pub fn resolve_request_with(
+    def: &EcuDef,
+    spec: &str,
+    sets: &[String],
+) -> Result<Resolved, CliError> {
+    if sets.is_empty() {
+        return resolve_request(def, spec);
+    }
+    let req = def.request(spec).ok_or_else(|| {
+        CliError::usage(format!(
+            "--set needs a request name of {}; {spec:?} is not one",
+            def.name
+        ))
+    })?;
+    let inputs: Vec<(String, kline_spec::Value)> = sets
+        .iter()
+        .map(|s| parse_set(s))
+        .collect::<Result<_, _>>()?;
+    let items: Vec<&str> = req.sent_items.iter().map(|i| i.name.as_str()).collect();
+    for (name, value) in &inputs {
+        if !items.contains(&name.as_str()) {
+            return Err(CliError::definition(format!(
+                "{:?} has no sent item {name:?} (it has: {})",
+                req.name,
+                if items.is_empty() {
+                    "none".to_string()
+                } else {
+                    items.join(", ")
+                }
+            )));
+        }
+        let data = def
+            .data(name)
+            .ok_or_else(|| CliError::definition(format!("no data definition {name:?}")))?;
+        data.encode_exact(value)
+            .map_err(|e| CliError::definition(format!("--set {name}: {e}")))?;
+    }
+    let refs: Vec<(&str, kline_spec::Value)> = inputs
+        .iter()
+        .map(|(n, v)| (n.as_str(), v.clone()))
+        .collect();
+    let payload = req
+        .build(def, &refs)
+        .map_err(|e| CliError::definition(format!("{}: {e}", req.name)))?;
+    let mut names = vec![req.name.clone()];
+    for r in requests_for(def, &payload) {
+        if !names.contains(&r.name) {
+            names.push(r.name.clone());
+        }
+    }
+    Ok(Resolved { payload, names })
+}
+
 /// `spec` is a request name of `def` (exact, then case-insensitive) or hex bytes.
 pub fn resolve_request(def: &EcuDef, spec: &str) -> Result<Resolved, CliError> {
     let payload = match def.request(spec) {
@@ -423,10 +499,27 @@ pub fn dtc_requests<'a>(def: &'a EcuDef, target: &Target) -> Vec<&'a Request> {
     def.requests
         .iter()
         .filter(|r| {
-            let n = fold(&r.name);
-            ["panne", "defaut", "fault", "dtc"]
-                .iter()
-                .any(|k| n.contains(k))
+            is_fault_name(&r.name) && safety::classify(target, &r.sent_bytes.0) == Ok(Tier::Read)
+        })
+        .collect()
+}
+
+/// Whether a request or item name says "fault" (French `panne`/`defaut`).
+pub fn is_fault_name(name: &str) -> bool {
+    let n = fold(name);
+    ["panne", "defaut", "fault", "dtc"]
+        .iter()
+        .any(|k| n.contains(k))
+}
+
+/// Tier 0 reads carrying at least one fault-named received item (ISO8 definitions such as
+/// Safir declare `Failures Id="0"` and no fault request, but their `33 51`/`33 52` frames hold
+/// "Panne presente ..." flags).
+pub fn fault_item_requests<'a>(def: &'a EcuDef, target: &Target) -> Vec<&'a Request> {
+    def.requests
+        .iter()
+        .filter(|r| {
+            r.received_items.iter().any(|i| is_fault_name(&i.name))
                 && safety::classify(target, &r.sent_bytes.0) == Ok(Tier::Read)
         })
         .collect()
@@ -440,7 +533,9 @@ fn fold(s: &str) -> String {
 
 /// The definition the identification reply fits: the first candidate (same address, matching
 /// key bytes when it declares them) whose identification requests all decode with the checked
-/// decoder. `ambiguous` when more than one fits. AutoIdent matching is not implemented.
+/// decoder. `ambiguous` when more than one fits. `ident` uses this only when DDT2000's AutoIdent
+/// ladder ([`kline_spec::best_match`]) does not apply (no `<AutoIdents>`, or a reply without
+/// the Renault `21 80` layout); Tier 2 writes use it to check the chosen definition.
 pub struct IdentChoice {
     pub chosen: Option<usize>,
     pub ambiguous: bool,

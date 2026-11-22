@@ -39,10 +39,10 @@ can target 0x7A as a fallback for the car test.
 | `kw2_delay_ms` (W4, before ~KW2) | 25 | 25 (not set by the class) | 25 | forced 25 | `KWP/KW2_@Delay` |
 | `first_request_ms` (after 5-baud init) | 20 | 200 | 20 | forced 20 | `ISO8/FirstRequest@Delay` |
 | `inter_byte_ms` (TX byte gap) | 0 | 2 | XML | **forced 7** | `InterByte@Delay` |
-| `reply_to_request_ms` (P3) | 5 | 100 | 5 | XML | `ReplyToRequest@Delay` |
+| `reply_to_request_ms` (P3) | 5 | 100 | 5 | forced 5 | `ReplyToRequest@Delay` |
 | `request_to_reply_timeout_ms` (each read) | 300 | 100 | 300 | forced 300 | `RequestToReply@Timeout` |
 | `tester_present_ms` (idle before TP) | 3000 | 3000 | 3000 | forced 3000 | `TesterPresent@Delay` |
-| `on_error_ms` (gap after an error) | 300 | 1000 | 300 | XML | `OnError@Delay` |
+| `on_error_ms` (gap after an error) | 300 | 1000 | 300 | forced 300 | `OnError@Delay` |
 | `kw2_timeout_ms` | 300 | 1000 | 300 | forced 300 | `ISO8/KW2@Timeout` |
 
 Sources: RE: IOTBD32V3 context defaults; RE: KWP2000Diag4 ISO8Ecu / KWP2000Ecu constructors and
@@ -74,8 +74,13 @@ Common part (RE: IOTBD32V3 5-baud routine):
 
 1. (ours) idle 300 ms.
 2. DTR low. Break on (K low) for 200 ms: the start bit.
-3. Check that RX saw the break (the KKL cable loops TX to RX). If not: break off, DTR high,
-   error **K line inactive**.
+3. Check that RX saw the break (the KKL cable loops TX to RX). DDT2000 waits for the
+   Windows `EV_BREAK` event and aborts with 0x3F0 without it (RE: IOTBD32V3 FUN_10001380).
+   We can only infer the break from a byte on RX (a POSIX tty has no portable break event;
+   the port is opened with `IGNBRK`, `BRKINT` and `PARMRK` cleared so a break reads as one
+   `00`), so by default a missing loopback is a logged warning and the init goes on (ours).
+   `--strict-loopback` (`LinkConfig::strict_break_loopback`): break off, DTR high, error
+   **K line inactive**, like DDT2000. NOT VERIFIED what the FTDI cable under macOS delivers.
 4. 8 data bits of the address byte, **LSB first, no parity bit**, 200 ms each: bit 0 = break
    on, bit 1 = break off.
 5. Break off, wait 100 ms (stop bit; reading starts in the middle of it).
@@ -144,8 +149,9 @@ then the StartCommunication exchange below with payload `81`. With KW1 still unk
 length goes in the format byte (RE: KWP2000Diag4 LenInFmt default): `81 7A F1 81 6D` for the
 Sirius. The reply must be positive `C1 KW1 KW2`; anything else is an error. Then wait
 `first_request_ms` (RE: IOTBD32V3 FUN_100015a0 sleeps FirstRequestDelay after
-StartCommunication), like the 5-baud init. DDT2000's reader
-only handles a length in the format byte; we also accept a separate length byte.
+StartCommunication), like the 5-baud init. DDT2000's fast-init reader (RE: IOTBD32V3
+FUN_10001290) only handles a length in the format byte; we also accept a separate length byte
+there, as DDT2000's normal request reader does.
 
 ## Framing
 
@@ -163,8 +169,9 @@ nor odd (RE: KWP2000Diag4 KWP2000Ecu init); D0 keeps the length in the format by
 `21 A3` to the BMT -> `82 26 F1 21 A3 5D`; `21 A0` to the Sirius -> `82 7A F1 21 A0 AE`;
 TesterPresent `3E` -> `81 26 F1 3E D6`; StopCommunication `82` -> `81 26 F1 82 1A`.
 Reply checks: format byte must be physical (`fmt & 0xC0 == 0x80`, ours: stricter than
-DDT2000), checksum, byte 2 = 0xF1, byte 3 = ECU address, length consistent with the format or
-length byte.
+DDT2000, whose parser KWP2000Diag4 0x2305d230 checks only the two address bytes; another
+address mode has a different header layout, and Renault ECUs answer physically), checksum,
+byte 2 = 0xF1, byte 3 = ECU address, length consistent with the format or length byte.
 
 Payloads returned to callers start at the response SID.
 
@@ -183,8 +190,9 @@ Payloads returned to callers start at the response SID.
 5. Read 1 byte. Nothing: **no reply** (for TesterPresent and Stop a missing reply is fine).
    - ISO8: read `N` more bytes.
    - KWP, `fmt & 0x3F != 0`: read `(fmt & 0x3F) + 3` more bytes (RE: IOTBD32V3).
-   - KWP, `fmt & 0x3F == 0`: read 3 (`tgt src len`), then `len + 1` (ours: DDT2000's reader
-     does not handle this).
+   - KWP, `fmt & 0x3F == 0`: read 3 (`tgt src len`), then `len + 1` (RE: IOTBD32V3
+     FUN_100015a0 cmd 0x404 and KWP2000Diag4 0x2305d230 do the same; only IOTBD32V3's
+     fast-init reader FUN_10001290 does not).
    A read that stops short: **incomplete reply**.
 6. Decode and classify: `7F SID NRC` is a negative reply; **`7F SID 78` (responsePending)
    restarts step 5 without a new request**, with a 5000 ms first-byte timeout, at most 10

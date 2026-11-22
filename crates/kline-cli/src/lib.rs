@@ -17,6 +17,7 @@ use clap::{Args, Parser, Subcommand};
 use kline_core::safety::{self, Approval, Tier};
 use kline_host::cmd::{
     self, Ctx, Env, GlobalArgs, LinkArgs, LiveArgs, ReadArgs, ReplayArgs, RiskArgs, ScanArgs,
+    SelftestArgs,
 };
 use kline_host::defs::{self, Ecu};
 use kline_host::error::{exit, CliError};
@@ -28,7 +29,7 @@ use serde_json::json;
 #[command(
     name = "kline",
     version,
-    about = "K-line diagnostics for Renault K-line ECUs (DDT2000 definitions; tested target: 1999 Clio II) over a dumb FTDI KKL cable",
+    about = "K-line diagnostics for Renault K-line ECUs (DDT2000 definitions; target vehicle: 1999 Clio II) over a dumb FTDI KKL cable",
     after_help = "Exit codes and the car quickstart: docs/cli.md"
 )]
 pub struct Cli {
@@ -42,8 +43,9 @@ pub struct Cli {
 pub enum Command {
     /// List serial ports and the detected KKL cable.
     Ports,
-    /// Cable check without the car: open at 10400, driver baud, break-toggle jitter (writes nothing).
-    Selftest,
+    /// Cable check: open at 10400, driver baud, break-toggle jitter (writes nothing); with
+    /// --echo-rtt also the TX->RX echo latency (needs a looped-back K line).
+    Selftest(SelftestArgs),
     /// Init the ECU (trying init variants), open the session, Stop. Shows which variant worked.
     Connect(LinkArgs),
     /// Read 21 80 and choose the definition that fits the identification.
@@ -85,6 +87,17 @@ pub struct ExecArgs {
     pub link: LinkArgs,
     /// Request name from the definition, or hex bytes.
     pub request: String,
+    /// Set a sent data item of the named request (repeatable): `ITEM=VALUE`, VALUE a number
+    /// (physical units), a list label, or `hex:..` raw bytes (definition-built request).
+    #[arg(long = "set", value_name = "ITEM=VALUE")]
+    pub set: Vec<String>,
+    /// After the request, offer this one (name or hex) to end an actuator test: it gets its
+    /// own RiskInfo and confirmation code, and typing that code sends it.
+    #[arg(long, value_name = "REQUEST")]
+    pub stop: Option<String>,
+    /// `--set` for the --stop request.
+    #[arg(long = "stop-set", value_name = "ITEM=VALUE", requires = "stop")]
+    pub stop_set: Vec<String>,
     /// Seconds to wait for the confirmation code (TesterPresent keeps the session open).
     #[arg(long, default_value_t = 120)]
     pub confirm_timeout: u64,
@@ -188,7 +201,7 @@ pub fn run(cli: Cli, env: &mut CliEnv) -> u8 {
     let mut ctx = Ctx::new(&cli.g, host, "kline");
     let r = match &cli.cmd {
         Command::Ports => cmd::ports(&mut ctx),
-        Command::Selftest => cmd::selftest(&mut ctx),
+        Command::Selftest(a) => cmd::selftest(&mut ctx, a),
         Command::Connect(a) => cmd::connect(&mut ctx, a),
         Command::Ident(a) => cmd::ident(&mut ctx, a),
         Command::Read(a) => cmd::read(&mut ctx, a),
@@ -230,12 +243,16 @@ pub fn clear_dtc(
     let e = ExecArgs {
         link: a.link.clone(),
         request: hex(&choice.payload),
+        set: Vec::new(),
+        stop: None,
+        stop_set: Vec::new(),
         confirm_timeout: a.confirm_timeout,
     };
     exec(ctx, &e, interactive, tty)
 }
 
-/// `kline exec`: one human-approved non-read request.
+/// `kline exec`: one human-approved non-read request, optionally followed by a separately
+/// approved stop request (`--stop`, e.g. the end of an actuator test).
 pub fn exec(
     ctx: &mut Ctx,
     a: &ExecArgs,
@@ -253,7 +270,7 @@ pub fn exec(
         ));
     }
     let ecu = Ecu::resolve(&a.link.ecu, &ctx.g.defs_dir())?;
-    let asx = cmd::assess(&ecu, &a.request)?;
+    let asx = cmd::assess(&ecu, &a.request, &a.set)?;
     let risk = asx.risk.clone()?;
     if risk.tier == Tier::Read {
         return Err(CliError::usage(format!(
@@ -261,10 +278,28 @@ pub fn exec(
             hex_sp(&asx.payload)
         )));
     }
+    // The stop request is checked before anything is sent: a refused stop refuses the test.
+    let stop = match &a.stop {
+        Some(req) => {
+            let s = cmd::assess(&ecu, req, &a.stop_set)?;
+            let r = s.risk.clone()?;
+            Some((s, r))
+        }
+        None => None,
+    };
     let mut prompt = (tty)().map_err(|e| {
         CliError::refused(format!("cannot open /dev/tty for the confirmation: {e}"))
     })?;
     ctx.out.emit(json!({}), cmd::assessment_human(&asx));
+    if let Some((s, _)) = &stop {
+        ctx.out.emit(
+            json!({}),
+            format!(
+                "then, to stop (own confirmation code after the request):\n{}",
+                cmd::assessment_human(s)
+            ),
+        );
+    }
     let payload = asx.payload.clone();
     let names = asx.names.clone();
     let timeout_ms = a.confirm_timeout.saturating_mul(1000);
@@ -274,73 +309,17 @@ pub fn exec(
         } else {
             None
         };
-        let challenge = match risk.tier {
-            Tier::Service => o.session.service_challenge(&payload),
-            Tier::ConfigWrite => o
-                .session
-                .config_write_challenge(&payload, identification.as_deref().unwrap_or(&[])),
-            Tier::Expert => o.session.expert_challenge(&payload),
-            Tier::Read => unreachable!("reads are refused above"),
-        }
-        .map_err(|e| CliError::session(&e))?;
-        let t = challenge.target();
-        let screen = format!(
-            "\n==== APPROVAL REQUIRED: {} ====\nrequest:  {}{}\nECU:      {:02X} ({})\n{}\n\nType the code {} and Enter to send exactly this request once; anything else aborts.",
-            tier_name(challenge.tier()),
-            hex_sp(challenge.payload()),
-            if names.is_empty() { String::new() } else { format!(" = {}", kline_host::sanitize_list(&names)) },
-            t.ecu_address,
-            cmd::proto_name(t.protocol),
-            risk_human(challenge.risk()),
-            challenge.code()
-        );
-        prompt
-            .show(&screen)
-            .map_err(|e| CliError::refused(format!("cannot write to /dev/tty: {e}")))?;
-        let rx = prompt.ask();
-        let start = o.link.now_ms();
-        let typed = loop {
-            match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(Ok(line)) => break line,
-                Ok(Err(e)) => {
-                    return Err(CliError::new(
-                        exit::NOT_APPROVED,
-                        "not_approved",
-                        format!("reading /dev/tty failed: {e}; nothing was sent"),
-                    ))
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    return Err(CliError::new(
-                        exit::NOT_APPROVED,
-                        "not_approved",
-                        "terminal closed; nothing was sent",
-                    ))
-                }
-                Err(RecvTimeoutError::Timeout) => {
-                    if ctx.stopped() || o.link.now_ms().saturating_sub(start) > timeout_ms {
-                        return Err(CliError::new(
-                            exit::NOT_APPROVED,
-                            "not_approved",
-                            "no confirmation in time; nothing was sent",
-                        ));
-                    }
-                    // The ECU sleeps after 5 s of silence (P3max): keep the session open.
-                    o.link.keepalive(&mut o.session).map_err(|e| e.to_cli())?;
-                }
-            }
-        };
-        let approval = Approval::confirm(challenge, &typed).map_err(|_| {
-            CliError::new(
-                exit::NOT_APPROVED,
-                "not_approved",
-                "confirmation code does not match; nothing was sent",
-            )
-        })?;
-        let first = o
-            .session
-            .request_approved(&payload, approval, o.link.now_ms())
-            .map_err(|e| CliError::session(&e))?;
-        let r = o.link.run(&mut o.session, first).map_err(|e| e.to_cli())?;
+        let r = approve_and_send(
+            ctx,
+            o,
+            prompt.as_mut(),
+            &payload,
+            &names,
+            risk.tier,
+            identification.as_deref(),
+            timeout_ms,
+            "send exactly this request once",
+        )?;
         let reply = link::positive(&r);
         ctx.out.emit(
             json!({}),
@@ -349,8 +328,130 @@ pub fn exec(
                 Err(e) => format!("sent {}: {}", hex_sp(&payload), e.message),
             },
         );
-        reply.map(drop)
+        let main = reply.map(drop);
+        let Some((s, srisk)) = &stop else {
+            return main;
+        };
+        // The request went out whatever its reply: offer the stop in every case.
+        let stopped = if srisk.tier == Tier::Read {
+            o.link
+                .request(&mut o.session, &s.payload)
+                .map_err(|e| e.to_cli())
+        } else {
+            approve_and_send(
+                ctx,
+                o,
+                prompt.as_mut(),
+                &s.payload,
+                &s.names,
+                srisk.tier,
+                None,
+                timeout_ms,
+                "send the stop request now",
+            )
+        };
+        match &stopped {
+            Ok(r) => ctx.out.emit(
+                json!({}),
+                match link::positive(r) {
+                    Ok(p) => format!("stop {}: positive reply {}", hex_sp(&s.payload), hex_sp(p)),
+                    Err(e) => format!("stop {}: {}", hex_sp(&s.payload), e.message),
+                },
+            ),
+            Err(e) => ctx.out.emit(
+                json!({}),
+                format!(
+                    "STOP REQUEST NOT SENT ({}); the session is closed next (StopCommunication)",
+                    e.message
+                ),
+            ),
+        }
+        main?;
+        stopped.and_then(|r| link::positive(&r).map(drop))
     })
+}
+
+/// Show the approval screen for `payload`, wait for the typed code (keeping the session open),
+/// and send it once. Nothing is sent without the exact code.
+#[allow(clippy::too_many_arguments)]
+fn approve_and_send(
+    ctx: &mut Ctx,
+    o: &mut cmd::Open,
+    prompt: &mut dyn Prompt,
+    payload: &[u8],
+    names: &[String],
+    tier: Tier,
+    identification: Option<&[u8]>,
+    timeout_ms: u64,
+    action: &str,
+) -> Result<kline_core::session::SessionOutcome, CliError> {
+    let challenge = match tier {
+        Tier::Service => o.session.service_challenge(payload),
+        Tier::ConfigWrite => o
+            .session
+            .config_write_challenge(payload, identification.unwrap_or(&[])),
+        Tier::Expert => o.session.expert_challenge(payload),
+        Tier::Read => unreachable!("reads need no approval"),
+    }
+    .map_err(|e| CliError::session(&e))?;
+    let t = challenge.target();
+    let screen = format!(
+        "\n==== APPROVAL REQUIRED: {} ====\nrequest:  {}{}\nECU:      {:02X} ({})\n{}\n\nType the code {} and Enter to {action}; anything else aborts.",
+        tier_name(challenge.tier()),
+        hex_sp(challenge.payload()),
+        if names.is_empty() { String::new() } else { format!(" = {}", kline_host::sanitize_list(names)) },
+        t.ecu_address,
+        cmd::proto_name(t.protocol),
+        risk_human(challenge.risk()),
+        challenge.code()
+    );
+    prompt
+        .show(&screen)
+        .map_err(|e| CliError::refused(format!("cannot write to /dev/tty: {e}")))?;
+    let rx = prompt.ask();
+    let start = o.link.now_ms();
+    let typed = loop {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Ok(line)) => break line,
+            Ok(Err(e)) => {
+                return Err(CliError::new(
+                    exit::NOT_APPROVED,
+                    "not_approved",
+                    format!("reading /dev/tty failed: {e}; nothing was sent"),
+                ))
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(CliError::new(
+                    exit::NOT_APPROVED,
+                    "not_approved",
+                    "terminal closed; nothing was sent",
+                ))
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                if ctx.stopped() || o.link.now_ms().saturating_sub(start) > timeout_ms {
+                    return Err(CliError::new(
+                        exit::NOT_APPROVED,
+                        "not_approved",
+                        "no confirmation in time; nothing was sent",
+                    ));
+                }
+                // The ECU sleeps after 5 s of silence (P3max): keep the session open.
+                o.link.keepalive(&mut o.session).map_err(|e| e.to_cli())?;
+            }
+        }
+    };
+    let approval = Approval::confirm(challenge, &typed).map_err(|_| {
+        CliError::new(
+            exit::NOT_APPROVED,
+            "not_approved",
+            "confirmation code does not match; nothing was sent",
+        )
+    })?;
+    let first = o
+        .session
+        .request_approved(payload, approval, o.link.now_ms())
+        .map_err(|e| CliError::session(&e))?;
+    o.link.run(&mut o.session, first).map_err(|e| e.to_cli())
 }
 
 /// Tier 2 preconditions in this session: `21 80` identification with an unambiguous

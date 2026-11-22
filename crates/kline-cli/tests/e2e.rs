@@ -977,6 +977,8 @@ fn selftest_toggles_break_only_and_reports_timing() {
     assert_eq!(s["break_jitter"]["edges"], 40);
     assert_eq!(s["break_jitter"]["five_baud_ok"], true, "{s}");
     assert!(s["note"].as_str().unwrap().contains("latency"));
+    assert!(s["baud_reported_source"].is_string(), "{s}");
+    assert!(s["echo_rtt"].is_null(), "no echo test unless asked: {s}");
     // No ECU was woken and nothing was written.
     j.assert_no_writes();
     assert!(r.event("connected").is_empty());
@@ -1063,5 +1065,182 @@ fn crafted_definition_names_are_sanitized_in_security_prompts() {
         r.screen
     );
     assert!(!r.screen.chars().any(|c| c == '\u{9b}' || c == '\u{1b}'));
+    j.assert_no_writes();
+}
+
+#[test]
+fn missing_break_loopback_warns_and_reads_unless_strict() {
+    // Hydrogen final review (macOS IGNBRK): no RX byte during the start bit must not abort
+    // the init by default; --strict-loopback keeps DDT2000's abort.
+    let (r, _) = run_blind_break(
+        sirius_ecu(),
+        &["--json", "read", "--xml", &xml("sirius_cli.xml"), "21A9"],
+    );
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    let w = r.event("warning");
+    assert_eq!(w.len(), 1, "{}", r.stdout);
+    assert_eq!(w[0]["kind"], "break_loopback_not_seen");
+    assert_eq!(r.event("read").len(), 1);
+
+    let (r, j) = run_blind_break(
+        sirius_ecu(),
+        &[
+            "--json",
+            "read",
+            "--xml",
+            &xml("sirius_cli.xml"),
+            "--strict-loopback",
+            "21A9",
+        ],
+    );
+    assert_eq!(r.code, kline_host::error::exit::INIT, "{}", r.stdout);
+    assert!(r.stdout.contains("inactive"), "{}", r.stdout);
+    j.assert_no_writes();
+}
+
+#[test]
+fn selftest_echo_rtt_times_the_loopback() {
+    let (r, _) = run(sirius_ecu(), &["--json", "selftest", "--echo-rtt"]);
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    let e = &r.event("selftest")[0]["echo_rtt"];
+    assert_eq!(e["sent"], 10, "{e}");
+    assert_eq!(e["echoed"], 10, "{e}");
+    assert!(e["max_us"].as_u64().unwrap() < 25_000, "{e}");
+    assert!(r.event("connected").is_empty());
+}
+
+#[test]
+fn set_builds_the_request_from_the_definition() {
+    // Hydrogen final review: actuator/config requests built from <Sent> data items, not hex.
+    let abs = xml("abs_fast.xml");
+    let (r, _) = run(
+        abs_ecu(),
+        &[
+            "--json",
+            "risk",
+            "--xml",
+            &abs,
+            "Pump test",
+            "--set",
+            "Pump=0",
+        ],
+    );
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    let e = &r.event("risk")[0];
+    assert_eq!(e["request"], "30A000");
+    assert_eq!(e["names"], json!(["Pump test"]));
+    assert_eq!(e["risk"]["tier_number"], 1);
+    // Unknown item, off-grid / out-of-range value, --set on hex: refused before any I/O.
+    for (args, code) in [
+        (vec!["Pump test", "--set", "Speed=1"], 8),
+        (vec!["Pump test", "--set", "Pump=1.5"], 8),
+        (vec!["Pump test", "--set", "Pump=999"], 8),
+        (vec!["30A001", "--set", "Pump=0"], 2),
+        (vec!["Pump test", "--set", "Pump"], 2),
+    ] {
+        let mut a = vec!["--json", "risk", "--xml", &abs];
+        a.extend(args.iter().copied());
+        let (r, _) = run(abs_ecu(), &a);
+        assert_eq!(r.code, code, "{args:?}: {}", r.stdout);
+        assert!(!r.opened);
+    }
+    // The name guard still sees a built request: "Code antidemarrage" stays refused.
+    let (r, _) = run(
+        abs_ecu(),
+        &[
+            "--json",
+            "risk",
+            "--xml",
+            &abs,
+            "Ecriture code",
+            "--set",
+            "Code antidemarrage=hex:1234",
+        ],
+    );
+    assert_eq!(r.code, 7, "{}", r.stdout);
+    assert_eq!(r.event("risk")[0]["request"], "3B801234");
+    assert!(r.event("risk")[0]["refused"]
+        .as_str()
+        .unwrap()
+        .contains("immobilizer"));
+}
+
+#[test]
+fn exec_stop_request_gets_its_own_approval_and_is_sent_after() {
+    let abs = xml("abs_fast.xml");
+    let (r, j) = run_opts(
+        abs_ecu(),
+        &[
+            "exec",
+            "--xml",
+            &abs,
+            "Pump test",
+            "--set",
+            "Pump=1",
+            "--stop",
+            "Pump test",
+            "--stop-set",
+            "Pump=0",
+        ],
+        Opts {
+            interactive: true,
+            human: Human::TypesShownCode,
+        },
+    );
+    assert_eq!(r.code, 0, "{}\n{}\n{}", r.stdout, r.stderr, r.screen);
+    assert_eq!(
+        r.screen.matches("APPROVAL REQUIRED").count(),
+        2,
+        "{}",
+        r.screen
+    );
+    assert!(r.screen.contains("to send the stop request now"));
+    let sent: Vec<Vec<u8>> = j.writes().into_iter().map(|w| w.payload).collect();
+    assert_eq!(sent, vec![vec![0x30, 0xA0, 0x01], vec![0x30, 0xA0, 0x00]]);
+    assert!(r.stdout.contains("stop 30 A0 00"), "{}", r.stdout);
+
+    // A refused stop request (immobilizer-named) refuses the whole test before any I/O.
+    let (r, _) = run_opts(
+        abs_ecu(),
+        &[
+            "exec",
+            "--xml",
+            &abs,
+            "Pump test",
+            "--stop",
+            "Ecriture code",
+        ],
+        Opts {
+            interactive: true,
+            human: Human::TypesShownCode,
+        },
+    );
+    assert_eq!(r.code, 7, "a refused stop refuses the test: {}", r.stdout);
+    assert!(r.screen.is_empty() && !r.opened);
+}
+
+#[test]
+fn dtc_on_iso8_without_fault_memory_reports_fault_named_items() {
+    // Hydrogen final review: Safir (ISO8, Failures Id=0) made `dtc` exit 8. It now says why
+    // and decodes the fault-named items of its Tier 0 reads.
+    let x = xml("iso8_nofaults.xml");
+    let (r, j) = run(iso8_nofaults_ecu(), &["--json", "dtc", "--xml", &x]);
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    let note = &r.event("dtc_note")[0];
+    assert!(
+        note["method"].as_str().unwrap().contains("Failures Id=0"),
+        "{note}"
+    );
+    let d = &r.event("dtc")[0];
+    assert_eq!(d["request"], "3351");
+    // Engine speed is non-zero but not a fault; sensor B is 0.
+    let names: Vec<&str> = d["active"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["Fault present sensor A"], "{d}");
+    assert_eq!(r.event("dtc_summary")[0]["active"], 1);
     j.assert_no_writes();
 }

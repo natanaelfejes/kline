@@ -94,6 +94,11 @@ pub struct LinkArgs {
     /// after 3000 ms of idle line.
     #[arg(long)]
     pub periodic_tester_present: bool,
+    /// Abort a 5-baud init when RX shows nothing during the start-bit break (DDT2000 aborts
+    /// on a missing EV_BREAK). Default: warn and go on, since a POSIX tty may not deliver a
+    /// byte for a break (docs/protocol.md "5-baud init").
+    #[arg(long)]
+    pub strict_loopback: bool,
 }
 
 impl Default for LinkArgs {
@@ -106,6 +111,7 @@ impl Default for LinkArgs {
             init_attempts: p.init_attempts,
             nrc_tries: p.nrc_tries,
             periodic_tester_present: false,
+            strict_loopback: false,
         }
     }
 }
@@ -125,6 +131,9 @@ impl LinkArgs {
         if self.variant != VariantArg::Auto {
             v.extend(["--variant".into(), self.variant.label().into()]);
         }
+        if self.strict_loopback {
+            v.push("--strict-loopback".into());
+        }
         v
     }
 }
@@ -135,6 +144,10 @@ pub struct ReadArgs {
     pub link: LinkArgs,
     /// Request name from the definition, or hex bytes (e.g. 21A9).
     pub request: String,
+    /// Set a sent data item of the named request (repeatable): `ITEM=VALUE`, VALUE a number
+    /// (physical units), a list label, or `hex:..` raw bytes.
+    #[arg(long = "set", value_name = "ITEM=VALUE")]
+    pub set: Vec<String>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -170,6 +183,9 @@ pub struct RiskArgs {
     pub ecu: EcuArgs,
     /// Request name from the definition, or hex bytes.
     pub request: String,
+    /// Set a sent data item of the named request (repeatable), see `read --set`.
+    #[arg(long = "set", value_name = "ITEM=VALUE")]
+    pub set: Vec<String>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -318,6 +334,7 @@ pub fn open_session(
     if args.periodic_tester_present {
         cfg.tester_present_mode = kline_core::TesterPresentMode::DDT2000_PERIODIC;
     }
+    cfg.strict_break_loopback = args.strict_loopback;
     let policy = args.retry_policy();
     let spec = ctx.port_spec()?;
     let tracer = if ctx.g.trace {
@@ -367,6 +384,13 @@ pub fn open_session(
             ),
         )
     })?;
+    if connected.break_loopback == Some(false) {
+        ctx.out.emit(
+            json!({"event": "warning", "kind": "break_loopback_not_seen",
+                   "message": "RX showed nothing during the 5-baud start bit; the init went on and the ECU answered (pass --strict-loopback to abort instead)"}),
+            "warning: break loopback not seen on RX during the start bit; init went on (--strict-loopback aborts)",
+        );
+    }
     // SAFETY.md rule 3: the core applies the definition's class and immobilizer names to every
     // request of this session.
     session.set_definition_guard(ecu.guard());
@@ -522,9 +546,19 @@ pub fn ports(ctx: &mut Ctx) -> Result<(), CliError> {
     Ok(())
 }
 
-/// `selftest`: port at 10400, what the driver reports, break-toggle jitter. No car needed and
-/// none wanted: nothing is written, only 10 ms break pulses (crate::selftest).
-pub fn selftest(ctx: &mut Ctx) -> Result<(), CliError> {
+#[derive(Debug, Clone, Default, Args)]
+pub struct SelftestArgs {
+    /// Also write a single FF byte 10 times and time its echo (USB latency vs the ~KW2
+    /// handshake). Needs a looped-back K line: the cable on the car's OBD socket (no init is
+    /// sent) or TX wired to RX.
+    #[arg(long)]
+    pub echo_rtt: bool,
+}
+
+/// `selftest`: port at 10400, what the driver reports, break-toggle jitter, optionally the echo
+/// round trip. Without `--echo-rtt` nothing is written, only 10 ms break pulses
+/// (crate::selftest).
+pub fn selftest(ctx: &mut Ctx, a: &SelftestArgs) -> Result<(), CliError> {
     let spec = ctx.port_spec()?;
     let path = match &spec {
         PortSpec::Serial(p) => p.clone(),
@@ -543,14 +577,50 @@ pub fn selftest(ctx: &mut Ctx) -> Result<(), CliError> {
         crate::selftest::TOGGLE_HALF_MS,
     )
     .map_err(CliError::io)?;
-    let note = "FTDI latency timer not measured: macOS AppleUSBFTDI is said to default to ~16 ms (DDT2000/Renolink users set 1 ms on Windows); bytes may then reach us up to that late. RequestToReply (300 ms) absorbs it; the ~KW2 answer of a 5-baud init (sent 25 ms after KW2, W4 25..50 ms) is the tight spot. NOT VERIFIED on the car.";
+    let echo = if a.echo_rtt {
+        Some(
+            crate::selftest::measure_echo_rtt(t.as_mut(), crate::selftest::ECHO_COUNT)
+                .map_err(CliError::io)?,
+        )
+    } else {
+        None
+    };
+    let baud_source = if cfg!(any(target_os = "macos", target_os = "ios")) {
+        "requested value echoed by serialport on macOS, not read back from the driver"
+    } else {
+        "termios speed read back from the driver"
+    };
+    let note = if echo.is_some() {
+        "echo RTT includes ~1 ms byte time and the TX and RX USB latency; the ~KW2 answer of a 5-baud init (sent 25 ms after KW2, W4 25..50 ms) needs KW2 to arrive well under 25 ms late. NOT VERIFIED on the car."
+    } else {
+        "FTDI latency timer not measured (pass --echo-rtt on a looped-back K line): macOS AppleUSBFTDI is said to default to ~16 ms (DDT2000/Renolink users set 1 ms on Windows); bytes may then reach us up to that late. RequestToReply (300 ms) absorbs it; the ~KW2 answer of a 5-baud init (sent 25 ms after KW2, W4 25..50 ms) is the tight spot. NOT VERIFIED on the car."
+    };
+    let echo_human = match &echo {
+        None => String::new(),
+        Some(e) => format!(
+            "\necho RTT: {}/{} bytes back{}; ~KW2 handshake timing: {}",
+            e.echoed,
+            e.sent,
+            match (e.min_us, e.mean_us, e.max_us) {
+                (Some(lo), Some(m), Some(hi)) => format!(
+                    ", min {:.2} ms, mean {:.2} ms, max {:.2} ms",
+                    lo as f64 / 1000.0,
+                    m as f64 / 1000.0,
+                    hi as f64 / 1000.0
+                ),
+                _ => " (no loopback: cable not on a powered K line?)".into(),
+            },
+            if e.kw2_handshake_ok { "OK" } else { "AT RISK" }
+        ),
+    };
     ctx.out.emit(
         json!({"event": "selftest", "port": path,
                "usb": usb.as_ref().map(|u| u.to_json()),
                "baud_requested": baud, "baud_reported": reported,
-               "break_jitter": j, "note": note}),
+               "baud_reported_source": baud_source,
+               "break_jitter": j, "echo_rtt": echo, "note": note}),
         format!(
-            "port: {path}{}\nbaud: requested {baud}, driver reports {}\nbreak toggles: {} edges, {} ms half-period: max deviation {:.2} ms, mean {:.2} ms, slowest set_break {:.2} ms; loopback {}\n5-baud bits (+-10 ms): {}; fast-init TiniL (+-1 ms): {}\n{note}",
+            "port: {path}{}\nbaud: requested {baud}, driver reports {} ({baud_source})\nbreak toggles: {} edges, {} ms half-period: max deviation {:.2} ms, mean {:.2} ms, slowest set_break {:.2} ms; loopback {}\n5-baud bits (+-10 ms): {}; fast-init TiniL (+-1 ms): {}{echo_human}\n{note}",
             usb.as_ref()
                 .and_then(|u| u.usb.map(|v| format!(" (usb {:04x}:{:04x} {})", v.0, v.1, u.product.clone().unwrap_or_default())))
                 .unwrap_or_default(),
@@ -629,7 +699,7 @@ fn precheck_read(ecu: &Ecu, payload: &[u8]) -> Result<(), CliError> {
 
 pub fn read(ctx: &mut Ctx, a: &ReadArgs) -> Result<(), CliError> {
     let ecu = Ecu::resolve(&a.link.ecu, &ctx.g.defs_dir())?;
-    let r = defs::resolve_request(ecu.def(), &a.request)?;
+    let r = defs::resolve_request_with(ecu.def(), &a.request, &a.set)?;
     precheck_read(&ecu, &r.payload)?;
     with_session(ctx, &a.link, "read", |ctx, o| {
         read_one(ctx, o, &r.payload, &r.names).map(drop)
@@ -890,24 +960,41 @@ pub fn dtc(ctx: &mut Ctx, a: &LinkArgs) -> Result<(), CliError> {
             .into_iter()
             .filter(|r| safety::classify(&t, &r.sent_bytes.0) == Ok(Tier::Read))
             .collect();
-        let method = if flag_reqs.is_empty() {
-            "requests named like faults; non-zero items"
+        let named = defs::dtc_requests(def, &t);
+        let (mode, chosen) = if !flag_reqs.is_empty() {
+            (DtcMode::Flags, flag_reqs)
+        } else if !named.is_empty() {
+            (DtcMode::NamedRequests, named)
         } else {
-            "Failures Id=1: frames with FailureFlag items; non-zero flags (DDT2000 DiagFailures)"
+            (DtcMode::FaultItems, defs::fault_item_requests(def, &t))
         };
-        let reqs: Vec<(String, Vec<u8>)> = if flag_reqs.is_empty() {
-            defs::dtc_requests(def, &t)
-        } else {
-            flag_reqs
-        }
-        .iter()
-        .map(|r| (r.name.clone(), r.sent_bytes.0.clone()))
-        .collect();
-        let by_flags = method.starts_with("Failures");
+        let failures = def
+            .failures
+            .as_ref()
+            .map(|f| format!("Failures Id={} {:?}", f.id, f.name))
+            .unwrap_or_else(|| "no <Failures>".into());
+        let method = match mode {
+            DtcMode::Flags => "Failures Id=1: frames with FailureFlag items; non-zero flags (DDT2000 DiagFailures)".to_string(),
+            DtcMode::NamedRequests => "requests named like faults; non-zero items".to_string(),
+            DtcMode::FaultItems => format!(
+                "{failures}: DDT2000 shows no fault list for this definition; non-zero fault-named items (panne/defaut/fault) of its Tier 0 reads instead"
+            ),
+        };
+        let reqs: Vec<(String, Vec<u8>)> = chosen
+            .iter()
+            .map(|r| (r.name.clone(), r.sent_bytes.0.clone()))
+            .collect();
+        let by_flags = mode == DtcMode::Flags;
         if reqs.is_empty() {
-            return Err(CliError::definition(
-                "the definition has no fault-flag read (no Failures/Devices flags, no Tier 0 request named panne/defaut/fault/dtc)",
-            ));
+            return Err(CliError::definition(format!(
+                "the definition has no fault-flag read ({failures}; no Devices flags, no Tier 0 request or item named panne/defaut/fault/dtc)"
+            )));
+        }
+        if mode == DtcMode::FaultItems {
+            ctx.out.emit(
+                json!({"event": "dtc_note", "failures": def.failures, "method": method}),
+                format!("note: {method}"),
+            );
         }
         let mut total = 0usize;
         let mut done: Vec<Vec<u8>> = Vec::new();
@@ -929,6 +1016,9 @@ pub fn dtc(ctx: &mut Ctx, a: &LinkArgs) -> Result<(), CliError> {
                     }
                 } else {
                     for i in items {
+                        if mode == DtcMode::FaultItems && !defs::is_fault_name(&i.name) {
+                            continue;
+                        }
                         if i.raw_int().is_some_and(|v| v != 0) {
                             active.push(
                                 json!({"name": i.name, "display": i.display, "raw": i.raw_int()}),
@@ -976,6 +1066,17 @@ pub fn dtc(ctx: &mut Ctx, a: &LinkArgs) -> Result<(), CliError> {
         );
         Ok(())
     })
+}
+
+/// Where `dtc` finds the faults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DtcMode {
+    /// `<Failures Id="1">`: FailureFlag items.
+    Flags,
+    /// Tier 0 requests named like faults: every non-zero item.
+    NamedRequests,
+    /// Neither (e.g. ISO8 `Failures Id="0"`): fault-named items of Tier 0 reads.
+    FaultItems,
 }
 
 /// JSON of a [`kline_spec::ClearPlan`].
@@ -1141,8 +1242,9 @@ pub struct Assessment {
     pub risk: Result<RiskInfo, CliError>,
 }
 
-pub fn assess(ecu: &Ecu, request: &str) -> Result<Assessment, CliError> {
-    let r = defs::resolve_request(ecu.def(), request)?;
+/// Resolve `request` (with `sets`, [`defs::resolve_request_with`]) and assess it.
+pub fn assess(ecu: &Ecu, request: &str, sets: &[String]) -> Result<Assessment, CliError> {
+    let r = defs::resolve_request_with(ecu.def(), request, sets)?;
     let target = ecu.target()?;
     // Same policy as the session (kline-core): byte rules plus the definition guard.
     let risk =
@@ -1187,7 +1289,7 @@ pub fn assessment_human(a: &Assessment) -> String {
 
 pub fn risk(ctx: &mut Ctx, a: &RiskArgs) -> Result<(), CliError> {
     let ecu = Ecu::resolve(&a.ecu, &ctx.g.defs_dir())?;
-    let asx = assess(&ecu, &a.request)?;
+    let asx = assess(&ecu, &a.request, &a.set)?;
     let mut j = assessment_json(&asx);
     j["event"] = json!("risk");
     ctx.out.emit(j, assessment_human(&asx));

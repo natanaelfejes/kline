@@ -163,6 +163,12 @@ impl<P: SerialIo, C: Clock> Transport for KklLine<P, C> {
     }
 
     fn set_dtr(&mut self, on: bool) -> io::Result<()> {
+        // Every init sequence starts with a DTR edge (5-baud: DTR low before the start bit; fast
+        // init: DTR high before the 1 ms + TiniL pattern), and only the idle sleep comes before
+        // it. Pacing starts here, so an oversleep of that idle wait is not taken out of the
+        // start bit or TiniL (Hydrogen final review). DTR goes high again only after the stop
+        // bit, outside the paced 5-baud bits.
+        self.pace_us = None;
         self.port.set_dtr(on)
     }
 
@@ -187,8 +193,9 @@ impl<P: SerialIo, C: Clock> Transport for KklLine<P, C> {
         if let Some(seen) = self.port.break_seen()? {
             return Ok(seen);
         }
-        // A KKL cable loops TX to RX; a break arrives as 0x00 with a framing error (raw
-        // termios: no IGNBRK/PARMRK). Any byte counts. NOT VERIFIED on the FTDI under macOS.
+        // A KKL cable loops TX to RX; a break arrives as one 0x00 ([`SerialportIo::open`]
+        // clears IGNBRK, BRKINT and PARMRK). Any byte counts. NOT VERIFIED on the FTDI under
+        // macOS; without a byte the init warns and goes on unless --strict-loopback.
         let b = self.drain()?;
         self.loopback_rx.extend_from_slice(&b);
         if !self.loopback_rx.is_empty() {
@@ -260,17 +267,64 @@ pub struct SerialportIo {
     port: Box<dyn serialport::SerialPort>,
 }
 
+/// Input flags for the K line: `flags` with IGNBRK, BRKINT and PARMRK cleared, so a break on RX
+/// is read as a single `00` byte (POSIX "General Terminal Interface", 11.2.2), which the 5-baud
+/// loopback check counts. `serialport` opens with `cfmakeraw`, which on macOS/BSD *sets*
+/// IGNBRK (the break is dropped; glibc's clears it). PARMRK stays off: with it a break reads
+/// as `FF 00 00` and every data byte `FF` doubles, which would corrupt KWP frames.
+#[cfg(unix)]
+pub fn kline_input_flags(flags: nix::sys::termios::InputFlags) -> nix::sys::termios::InputFlags {
+    use nix::sys::termios::InputFlags as F;
+    flags & !(F::IGNBRK | F::BRKINT | F::PARMRK)
+}
+
+/// Baud to open a simulator pty with: 0 on macOS, where `serialport` sets any speed above 0
+/// with the `IOSSIOSPEED` ioctl, which a pty refuses with ENOTTY (Hydrogen final review); the
+/// pty has no line speed anyway. Elsewhere the real value, as for the cable.
+pub fn pty_baud(baud: u32) -> u32 {
+    if cfg!(any(target_os = "macos", target_os = "ios")) {
+        0
+    } else {
+        baud
+    }
+}
+
 impl SerialportIo {
-    /// Open `path` at `baud` 8N1, no flow control, DTR high (idle, docs/protocol.md).
+    /// Open `path` at `baud` 8N1, no flow control, DTR high (idle, docs/protocol.md), with
+    /// breaks delivered as a `00` byte ([`kline_input_flags`]). `baud` 0 keeps the speed
+    /// (simulator pty on macOS, [`pty_baud`]).
     pub fn open(path: &str, baud: u32) -> io::Result<SerialportIo> {
-        let mut port = serialport::new(path, baud)
+        let builder = serialport::new(path, baud)
             .data_bits(serialport::DataBits::Eight)
             .parity(serialport::Parity::None)
             .stop_bits(serialport::StopBits::One)
             .flow_control(serialport::FlowControl::None)
-            .timeout(Duration::from_millis(10))
-            .open()
-            .map_err(io::Error::from)?;
+            .timeout(Duration::from_millis(10));
+        #[cfg(unix)]
+        let mut port: Box<dyn serialport::SerialPort> = {
+            use nix::sys::termios::{tcgetattr, tcsetattr, SetArg};
+            use serialport::SerialPort as _;
+            use std::os::unix::io::AsRawFd;
+            let mut native = builder.open_native().map_err(io::Error::from)?;
+            let fd = native.as_raw_fd();
+            let mut tio = tcgetattr(fd).map_err(io::Error::from)?;
+            tio.input_flags = kline_input_flags(tio.input_flags);
+            tcsetattr(fd, SetArg::TCSANOW, &tio).map_err(io::Error::from)?;
+            if baud > 0 {
+                // tcsetattr may have rewritten the speed from libc's view of it (macOS sets
+                // 10400 with IOSSIOSPEED after tcsetattr; Linux with termios2): set it again.
+                native.set_baud_rate(baud).map_err(io::Error::from)?;
+            }
+            let check = tcgetattr(fd).map_err(io::Error::from)?;
+            if check.input_flags != kline_input_flags(check.input_flags) {
+                return Err(io::Error::other(
+                    "the port kept IGNBRK/BRKINT/PARMRK set: a 5-baud break would be lost",
+                ));
+            }
+            Box::new(native)
+        };
+        #[cfg(not(unix))]
+        let mut port = builder.open().map_err(io::Error::from)?;
         // A pty refuses DTR (ENOTTY); a real cable must accept it.
         let _ = port.write_data_terminal_ready(true);
         Ok(SerialportIo { port })
@@ -322,7 +376,9 @@ impl SerialIo for SerialportIo {
     }
 
     /// On macOS `serialport` 4.10 sets any speed with Apple's `IOSSIOSPEED` ioctl (after
-    /// `tcsetattr`) and reports the value it set; elsewhere the termios speed.
+    /// `tcsetattr`) and returns the value it was *asked* for, cached, not read back from the
+    /// driver (serialport `TTYPort::baud_rate`); elsewhere the termios speed. So on macOS this
+    /// says nothing about the speed the FTDI chip runs at.
     fn baud_rate(&self) -> Option<u32> {
         self.port.baud_rate().ok()
     }
@@ -340,7 +396,7 @@ pub struct SimIo {
 impl SimIo {
     pub fn open(tty: &str, control: &std::path::Path, baud: u32) -> io::Result<SimIo> {
         Ok(SimIo {
-            port: SerialportIo::open(tty, baud)?,
+            port: SerialportIo::open(tty, pty_baud(baud))?,
             ctl: crate::control::ControlClient::connect(control)?,
         })
     }
@@ -429,6 +485,8 @@ mod tests {
         rx: VecDeque<(u64, u8)>,
         /// Cost of each break/DTR ioctl (us): simulated USB latency.
         ioctl_us: u64,
+        /// How late the next sleep wakes up (us), once: a host timer oversleeping.
+        oversleep_once_us: u64,
     }
 
     #[derive(Clone, Default)]
@@ -442,7 +500,8 @@ mod tests {
         }
         fn sleep_until_us(&mut self, t: u64) {
             let mut s = self.0 .0.borrow_mut();
-            s.now_us = s.now_us.max(t);
+            let late = std::mem::take(&mut s.oversleep_once_us);
+            s.now_us = s.now_us.max(t) + late;
         }
     }
 
@@ -549,6 +608,92 @@ mod tests {
                 "edge {i} at {t} us, ideal {ideal}"
             );
         }
+    }
+
+    fn break_times(m: &Mock) -> Vec<(bool, u64)> {
+        m.0.borrow()
+            .calls
+            .iter()
+            .filter_map(|c| match c {
+                Call::Break(on, t) => Some((*on, *t)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn idle_oversleep_does_not_shorten_tinil_or_the_start_bit() {
+        // Hydrogen final review: a 20 ms late wake-up from the 300 ms idle must not be taken out
+        // of the fast-init low pulse (25 +- 1 ms, ISO 14230-2) or the 5-baud start bit.
+        let (mut l, m) = line(500);
+        m.0.borrow_mut().oversleep_once_us = 20_000;
+        // FastInit::start: idle, DTR high, 1 ms, break 25 ms, release 25 ms.
+        l.sleep_ms(300);
+        l.set_dtr(true).unwrap();
+        l.sleep_ms(1);
+        l.set_break(true).unwrap();
+        l.sleep_ms(25);
+        l.set_break(false).unwrap();
+        l.sleep_ms(25);
+        let b = break_times(&m);
+        let tinil = b[1].1 - b[0].1;
+        assert!((24_000..=26_000).contains(&tinil), "TiniL {tinil} us");
+
+        let (mut l, m) = line(500);
+        m.0.borrow_mut().oversleep_once_us = 20_000;
+        // FiveBaudInit::start: idle, DTR low, start bit 200 ms, then the first data bit.
+        l.sleep_ms(300);
+        l.set_dtr(false).unwrap();
+        l.set_break(true).unwrap();
+        l.sleep_ms(200);
+        l.set_break(false).unwrap();
+        let b = break_times(&m);
+        let start = b[1].1 - b[0].1;
+        assert!((190_000..=210_000).contains(&start), "start bit {start} us");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn input_flags_deliver_a_break_as_a_byte() {
+        use nix::sys::termios::InputFlags as F;
+        // macOS cfmakeraw: IGNBRK set. Cleared, with BRKINT and PARMRK; the rest kept.
+        let f = kline_input_flags(F::IGNBRK | F::BRKINT | F::PARMRK | F::IGNPAR);
+        assert_eq!(f, F::IGNPAR);
+        assert_eq!(kline_input_flags(F::empty()), F::empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opened_pty_has_ignbrk_cleared() {
+        use nix::sys::termios::{tcgetattr, tcsetattr, InputFlags as F, SetArg};
+        let Ok(pty) = nix::pty::openpty(None, None) else {
+            eprintln!("SKIPPED: no pty");
+            return;
+        };
+        use std::os::unix::io::AsRawFd;
+        let slave = pty.slave.as_raw_fd();
+        // Start from what macOS cfmakeraw leaves behind.
+        let mut t = tcgetattr(slave).unwrap();
+        t.input_flags |= F::IGNBRK | F::PARMRK;
+        tcsetattr(slave, SetArg::TCSANOW, &t).unwrap();
+        let path = nix::unistd::ttyname(slave).unwrap();
+        let _port = SerialportIo::open(path.to_str().unwrap(), pty_baud(10_400)).unwrap();
+        let t = tcgetattr(slave).unwrap();
+        assert!(
+            !t.input_flags.intersects(F::IGNBRK | F::BRKINT | F::PARMRK),
+            "{:?}",
+            t.input_flags
+        );
+    }
+
+    #[test]
+    fn pty_baud_is_zero_only_on_macos() {
+        let want = if cfg!(any(target_os = "macos", target_os = "ios")) {
+            0
+        } else {
+            10_400
+        };
+        assert_eq!(pty_baud(10_400), want);
     }
 
     #[test]

@@ -84,6 +84,16 @@ pub fn abs_ecu() -> SpecEcu {
     SpecEcu::new(profile, def, abs_scenario()).unwrap()
 }
 
+pub fn iso8_nofaults_ecu() -> SpecEcu {
+    let def = fixture("iso8_nofaults.xml");
+    let profile = EcuProfile::from_def(&def).unwrap();
+    let sc = Scenario::new()
+        .number("Engine speed", 800.0)
+        .text("Fault present sensor A", "fault")
+        .text("Fault present sensor B", "no");
+    SpecEcu::new(profile, def, sc).unwrap()
+}
+
 /// kline-host Transport over kline-sim's in-process line.
 pub struct Virtual(pub VirtualLine);
 
@@ -114,6 +124,51 @@ impl Transport for Virtual {
     }
 }
 
+/// A [`Virtual`] line whose RX shows nothing for a break (macOS IGNBRK, Hydrogen final review).
+pub struct BlindBreak(pub Virtual);
+
+impl Transport for BlindBreak {
+    fn now_ms(&self) -> u64 {
+        self.0.now_ms()
+    }
+    fn set_dtr(&mut self, on: bool) -> io::Result<()> {
+        self.0.set_dtr(on)
+    }
+    fn set_break(&mut self, on: bool) -> io::Result<()> {
+        self.0.set_break(on)
+    }
+    fn break_loopback_seen(&mut self) -> io::Result<bool> {
+        Ok(false)
+    }
+    fn sleep_ms(&mut self, ms: u32) {
+        self.0.sleep_ms(ms)
+    }
+    fn flush_rx(&mut self) -> io::Result<()> {
+        self.0.flush_rx()
+    }
+    fn write(&mut self, bytes: &[u8], inter_byte_ms: u32) -> io::Result<()> {
+        self.0.write(bytes, inter_byte_ms)
+    }
+    fn read(&mut self, count: usize, timeout_ms: u32) -> io::Result<Vec<u8>> {
+        self.0.read(count, timeout_ms)
+    }
+}
+
+/// Like [`run`] on a line that never reports the break loopback.
+pub fn run_blind_break(ecu: SpecEcu, args: &[&str]) -> (Run, Journal) {
+    let j = ecu.journal();
+    (
+        run_line_inner(
+            VirtualLine::with_ecu(ecu),
+            "virtual",
+            args,
+            Opts::default(),
+            true,
+        ),
+        j,
+    )
+}
+
 /// What the human at the fake terminal does.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Human {
@@ -138,7 +193,8 @@ impl Prompt for FakeTty {
         let screen = self.screen.lock().unwrap().clone();
         let line = match self.human {
             Human::TypesShownCode => {
-                let after = screen.split("Type the code ").nth(1).unwrap();
+                // The latest challenge (an exec with --stop shows two).
+                let after = screen.rsplit("Type the code ").next().unwrap();
                 format!("{}\n", after.split_whitespace().next().unwrap())
             }
             Human::TypesWrongCode => "AAAAAA\n".to_string(),
@@ -256,6 +312,10 @@ pub fn run_line_with(line: VirtualLine, args: &[&str], o: Opts) -> Run {
 }
 
 pub fn run_line_port(line: VirtualLine, port: &str, args: &[&str], o: Opts) -> Run {
+    run_line_inner(line, port, args, o, false)
+}
+
+fn run_line_inner(line: VirtualLine, port: &str, args: &[&str], o: Opts, blind: bool) -> Run {
     let capture_dir = temp_dir("cap");
     let (out, out_buf) = Sink::buffer();
     let (err, err_buf) = Sink::buffer();
@@ -272,7 +332,11 @@ pub fn run_line_port(line: VirtualLine, port: &str, args: &[&str], o: Opts) -> R
             opener: Box::new(move |_spec, _baud, _trace| {
                 *opened2.lock().unwrap() = true;
                 let l = line.lock().unwrap().take().expect("port opened twice");
-                Ok(Box::new(Virtual(l)) as Box<dyn Transport>)
+                if blind {
+                    Ok(Box::new(BlindBreak(Virtual(l))) as Box<dyn Transport>)
+                } else {
+                    Ok(Box::new(Virtual(l)) as Box<dyn Transport>)
+                }
             }),
             list_ports: Box::new(|| Ok(Vec::new())),
             stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),

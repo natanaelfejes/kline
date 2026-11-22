@@ -106,7 +106,14 @@ fn pty_smoke_session() {
             return;
         }
     };
-    let port = serialport::new(sim.tty_path().to_string_lossy(), 10_400)
+    // macOS: serialport sets a speed above 0 with IOSSIOSPEED, which a pty refuses (ENOTTY);
+    // the pty has no line speed, so open it with 0 there (Hydrogen final review).
+    let baud = if cfg!(any(target_os = "macos", target_os = "ios")) {
+        0
+    } else {
+        10_400
+    };
+    let port = serialport::new(sim.tty_path().to_string_lossy(), baud)
         .timeout(Duration::from_millis(50))
         .open()
         .expect("open pty slave with serialport");

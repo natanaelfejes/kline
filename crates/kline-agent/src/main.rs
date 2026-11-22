@@ -54,6 +54,10 @@ struct PrepareArgs {
     link: LinkArgs,
     /// Request name from the definition, or hex bytes.
     request: String,
+    /// Set a sent data item of the named request (repeatable): `ITEM=VALUE`. The printed
+    /// `kline exec` command carries the resulting bytes.
+    #[arg(long = "set", value_name = "ITEM=VALUE")]
+    set: Vec<String>,
 }
 
 /// Quote one shell word if needed.
@@ -70,7 +74,7 @@ fn sh(w: &str) -> String {
 
 fn prepare(ctx: &mut Ctx, a: &PrepareArgs) -> Result<(), CliError> {
     let ecu = Ecu::resolve(&a.link.ecu, &ctx.g.defs_dir())?;
-    let asx = cmd::assess(&ecu, &a.request)?;
+    let asx = cmd::assess(&ecu, &a.request, &a.set)?;
     let mut j = cmd::assessment_json(&asx);
     j["event"] = json!("prepare");
     let mut words: Vec<String> = vec!["kline".into()];

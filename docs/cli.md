@@ -47,6 +47,7 @@ ECU selection (every command that talks to an ECU, and `risk`/`prepare`/`replay`
 | `--init-attempts N` | rounds over the variants, 500 ms apart (default 3, DDT2000) |
 | `--nrc-tries N` | `ident`: tries of a request answered `7F xx 21`/`23` (default 10; 200/500 ms) |
 | `--periodic-tester-present` | `3E` every 2000 ms with a required reply (DDT2000 screen option) instead of after 3000 ms idle |
+| `--strict-loopback` | 5-baud: abort with "K line inactive" when RX shows nothing during the start-bit break, like DDT2000 (which waits for the Windows `EV_BREAK` event). Default: a `warning` event (`break_loopback_not_seen`) and the init goes on, because a POSIX tty may deliver no byte for a break (docs/protocol.md "5-baud init") |
 | `--session auto\|none\|a0\|81` | after the init: `auto` sends `10 A0` if the definition has it, else `10 81` if it has that (KWP only). A negative answer is reported (`note: not retried with another session`) and the command continues; no other session is tried (e.g. `10 C0`, seen in other Renault 0x7A logs, is an Expert request only) |
 
 Protocol and timing come from the definition's `<K>` section through kline-core (`spec::k_timing`):
@@ -58,16 +59,16 @@ is refused: "CAN not supported by a KKL cable yet" (exit 8).
 | Command | Does | Notes |
 |---|---|---|
 | `ports` | lists ports, marks candidates `*`, says which cable would be used | |
-| `selftest` | without the car: opens the port at 10400, shows the USB id and the baud the driver reports, toggles break 20 times (10 ms half-period, nothing written) and reports the edge jitter against the 5-baud (+-10 ms) and fast-init (+-1 ms) tolerances | `kline` only; unplug the cable from the car |
+| `selftest [--echo-rtt]` | without the car: opens the port at 10400, shows the USB id and the baud the driver reports (`baud_reported_source`: on macOS `serialport` returns the *requested* value, not one read back from the driver), toggles break 20 times (10 ms half-period, nothing written) and reports the edge jitter against the 5-baud (+-10 ms) and fast-init (+-1 ms) tolerances. `--echo-rtt` also writes a single `FF` byte 10 times and times its echo (USB latency, `kw2_handshake_ok` when every byte is back in < 25 ms); it needs a looped-back K line (cable on the car's OBD socket, no init sent, or TX wired to RX) | `kline` only; without `--echo-rtt` unplug the cable from the car |
 | `connect` | init (variants), session start, Stop | reports sync, KW1 KW2, ~address, key-byte match |
 | `ident` | `21 80` (KWP; else Tier 0 requests named like "ident"; NRC 21/23 retried like DDT2000), chooses the definition | DDT2000 AutoIdent ladder (exact, unique, soft, diag, soft+diag; DiagVersion numeric, Supplier/Soft/Version whitespace-normalized, case-sensitive) when the candidates have `<AutoIdents>`; else the first candidate whose key bytes match and whose identification requests decode. A reply shorter than MinBytes is decoded anyway and flagged; `ddt2000_diagfailures_accepts` says whether DiagFailures (exactly 26 bytes) would take it |
-| `read REQ` | one request (definition name or hex), decoded | Tier 0 only; a non-read is refused before the port is opened (exit 7) and again by kline-core |
+| `read REQ [--set ITEM=VALUE ..]` | one request (definition name or hex), decoded | Tier 0 only; a non-read is refused before the port is opened (exit 7) and again by kline-core. `--set` (also on `risk`, `exec`, `prepare`): builds the named request from its `<Sent>` data items (`Request::build`); VALUE is a number in physical units (must lie on the item's scaling grid), a list label, or `hex:..`; unknown items and off-grid values are exit 8 before anything is opened |
 | `live --frames A,B --rate HZ [--count N]` | all frames once per cycle, `HZ` cycles/s | TesterPresent when idle >= TesterPresent delay (or every 2000 ms with `--periodic-tester-present`); Ctrl-C stops cleanly; a cycle in which every request failed is retried after 400 ms, the 4th in a row is exit 5 (DDT2000 "Read Data : Retry n/3") |
-| `dtc` | `<Failures Id="1">` (Sirius 32): reads the Tier 0 frames that carry `FailureFlag="1"` items of `<Devices>` and lists the set flags with their device (DDT2000 DiagFailures); otherwise the frames whose name says `panne`/`defaut`/`fault`/`dtc`, non-zero items. Ends with the clear plan | never clears |
+| `dtc` | `<Failures Id="1">` (Sirius 32): reads the Tier 0 frames that carry `FailureFlag="1"` items of `<Devices>` and lists the set flags with their device (DDT2000 DiagFailures); otherwise the frames whose name says `panne`/`defaut`/`fault`/`dtc`, non-zero items; otherwise (ISO8 Safir: `Failures Id="0"`, which DDT2000 shows as no fault list) a `dtc_note` saying so and the non-zero fault-named items of its Tier 0 reads (Safir `33 50`/`33 51`/`33 52` "Panne presente ..."). Ends with the clear plan | never clears |
 | `clear-dtc [--ddt2000-clear]` | Tier 1 clear: prints the exact bytes (default: `ClearDiagnosticInformation.*` if the definition has one, else the definition's own `14 ..` request; Sirius `14 00 00`) and what DDT2000's global clear would send (`14 FF 00` for the Sirius), then the `exec` approval | `kline` only; `--ddt2000-clear` sends DDT2000's choice |
 | `scan --range 21:B0-C5 [--interval MS]` | kline-core `ScanPlan`: `21`/`1A` only, >= 200 ms apart, stops after 3 missing replies or a security NRC (exit 12) | `kline` only; not offered by kline-agent |
 | `risk REQ` | tier and `RiskInfo` of a request, nothing sent | exit 7 when forbidden or refused by the name guard |
-| `exec REQ` | ONE non-read request | `kline` only, see below |
+| `exec REQ [--set ..] [--stop REQ [--stop-set ..]]` | ONE non-read request; `--stop` offers a second request afterwards (end of an actuator test) with its own `RiskInfo` and code | `kline` only, see below |
 | `replay FILE [--ecu/--xml]` | decodes a capture offline: wake-ups, each request with its replies (echo stripped, 0x78 sequences split), decoded with the definition if given | |
 | `prepare REQ` | `kline-agent` only: `RiskInfo` plus the exact `kline ... exec ...` command for a human | never sends |
 
@@ -82,6 +83,14 @@ characters, 10 for expert tier) and reads the answer from `/dev/tty` (not stdin)
 TesterPresent while it waits (default 120 s, `--confirm-timeout`). A wrong code, timeout or
 Ctrl-C is exit 9 and nothing is sent. Definition names on these screens are printed sanitized
 (control characters, escape sequences and bidi overrides shown as `\u{..}`).
+
+`--stop REQ` (e.g. an actuator test's stop payload): checked before anything is opened (a refused
+stop refuses the whole command); after the request was sent, whatever its reply, kline shows a
+second challenge for the stop request with its own code, keeps the session alive, and sends the
+stop when that code is typed. If it is not typed in time the stop is NOT sent (said on stdout);
+the session then ends with StopCommunication, which on most ECUs also ends an output test
+(NOT VERIFIED on this car). One challenge per session at a time (kline-core), so the stop cannot
+be approved before the request is sent.
 
 The code is an anti-accident gate: an AI agent that drives a pseudo-terminal can read and type
 it, and the owner permits that when he chooses. It is not a defence against such an agent.
@@ -187,12 +196,15 @@ socket and the Mac; ignition ON, engine off; nothing else (DDT2000, another test
   (read in its source: `posix/termios.rs` macOS `set_termios`, `posix/tty.rs` macOS
   `set_baud_rate`), so no extra code path was added. Whether AppleUSBFTDI then really runs at
   10400 (and not the nearest standard rate) is not measured: `selftest` only shows what the
-  driver reports.
+  driver reports, and on macOS `serialport` returns the requested value, not a read-back.
 - FTDI latency timer: DDT2000/Renolink users set it to 1 ms on Windows; macOS AppleUSBFTDI is
   said to default to about 16 ms (web hint, not checked). With 16 ms, RX bytes can arrive up to
   16 ms late: harmless against the 300 ms reply timeout, but it eats into the 5-baud W4 window
-  (we send ~KW2 25 ms after reading KW2; ISO 9141 allows 25..50 ms). Not measured; `selftest`
-  cannot see it without K-line power.
+  (we send ~KW2 25 ms after reading KW2; ISO 9141 allows 25..50 ms). `selftest --echo-rtt`
+  measures it on a looped-back K line; not yet run on the cable.
+- Break on RX: the port is opened with IGNBRK, BRKINT and PARMRK cleared (macOS `cfmakeraw` sets
+  IGNBRK), so a break should read as one `00`. Whether AppleUSBFTDI delivers it is not known;
+  without it the 5-baud init only warns (`--strict-loopback` aborts).
 - A public ELM327 log shows 5-baud init to 0x7A failing where fast init worked (web hint):
   consistent with the fast-init-first `auto` order, not verified on this car.
 - Some Renault 0x7A logs use `10 C0`; our Sirius definition says `10 A0`. Definition-driven, a

@@ -7,6 +7,14 @@
 //! What goes on the line: only break on/off with a 10 ms half-period, a pattern that is neither a
 //! 5-baud bit (200 ms) nor a fast-init wake-up (25 ms low + StartCommunication). Nothing is
 //! written. Run it with the cable plugged into the Mac only, not into the car.
+//!
+//! Optional (`--echo-rtt`): write [`ECHO_BYTE`] [`ECHO_COUNT`] times and time the echo, which
+//! measures the USB latency (FTDI latency timer) the ~KW2 handshake must fit in. It needs a
+//! looped-back K line: the cable on the car's OBD socket (powered K line, no init is sent) or
+//! TX wired to RX. NOT VERIFIED on the car.
+//!
+//! The driver's baud: on macOS `serialport` returns the value it was asked for, not one read
+//! back from the FTDI driver, so `baud_reported` there proves nothing about the line speed.
 
 use std::io;
 
@@ -93,9 +101,151 @@ pub fn measure_break_jitter(
     })
 }
 
+/// Byte written by the optional echo measurement. Not a frame and not a wake-up (an ECU wakes
+/// only on a 200 ms-per-bit address or a 25 ms low pulse); `FF` is low for its start bit only
+/// (~0.1 ms at 10400 baud). ours.
+pub const ECHO_BYTE: u8 = 0xFF;
+/// Echo wait per byte (ours: far above any USB latency timer).
+pub const ECHO_TIMEOUT_MS: u32 = 100;
+/// Bytes sent by the echo measurement.
+pub const ECHO_COUNT: u32 = 10;
+/// W4 minimum (ISO 14230-2: 25 ms): DDT2000 sends ~KW2 25 ms after KW2 arrives, so KW2 must
+/// reach us well within the ECU's W4 window of 25..50 ms; an RX latency at or above this is
+/// too late.
+pub const W4_MIN_US: u64 = 25_000;
+
+/// TX -> RX round trip of single bytes through the cable's K-line loopback.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EchoRtt {
+    pub sent: u32,
+    pub echoed: u32,
+    /// From before the write (which waits for transmission, tcdrain) to the echo in our buffer;
+    /// includes ~1 ms of byte time and the driver's TX and RX latency (FTDI latency timer).
+    pub min_us: Option<u64>,
+    pub max_us: Option<u64>,
+    pub mean_us: Option<u64>,
+    /// Every byte came back and the slowest in less than [`W4_MIN_US`].
+    pub kw2_handshake_ok: bool,
+}
+
+/// Write [`ECHO_BYTE`] `count` times and time each echo. Needs a looped-back K line (a KKL
+/// cable on a powered K line, or TX wired to RX); otherwise nothing comes back.
+pub fn measure_echo_rtt(t: &mut dyn Transport, count: u32) -> io::Result<EchoRtt> {
+    let mut rtts = Vec::new();
+    for _ in 0..count {
+        t.flush_rx()?;
+        let t0 = t.now_us();
+        t.write(&[ECHO_BYTE], 0)?;
+        let got = t.read(1, ECHO_TIMEOUT_MS)?;
+        if got.first() == Some(&ECHO_BYTE) {
+            rtts.push(t.now_us().saturating_sub(t0));
+        }
+    }
+    let max = rtts.iter().copied().max();
+    Ok(EchoRtt {
+        sent: count,
+        echoed: rtts.len() as u32,
+        min_us: rtts.iter().copied().min(),
+        max_us: max,
+        mean_us: (!rtts.is_empty()).then(|| rtts.iter().sum::<u64>() / rtts.len() as u64),
+        kw2_handshake_ok: rtts.len() as u32 == count && max.is_some_and(|m| m < W4_MIN_US),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Echoes each written byte after `latency_us`.
+    struct Loop {
+        now: u64,
+        latency_us: u64,
+        rx: Vec<(u64, u8)>,
+        writes: usize,
+    }
+
+    impl Transport for Loop {
+        fn now_ms(&self) -> u64 {
+            self.now / 1000
+        }
+        fn now_us(&self) -> u64 {
+            self.now
+        }
+        fn set_dtr(&mut self, _: bool) -> io::Result<()> {
+            Ok(())
+        }
+        fn set_break(&mut self, _: bool) -> io::Result<()> {
+            panic!("the echo test must not touch break")
+        }
+        fn break_loopback_seen(&mut self) -> io::Result<bool> {
+            Ok(false)
+        }
+        fn sleep_ms(&mut self, ms: u32) {
+            self.now += u64::from(ms) * 1000;
+        }
+        fn flush_rx(&mut self) -> io::Result<()> {
+            let now = self.now;
+            self.rx.retain(|(t, _)| *t > now);
+            Ok(())
+        }
+        fn write(&mut self, b: &[u8], _: u32) -> io::Result<()> {
+            self.writes += 1;
+            self.now += 1000; // one byte at 10400 baud, tcdrain
+            for &x in b {
+                self.rx.push((self.now + self.latency_us, x));
+            }
+            Ok(())
+        }
+        fn read(&mut self, n: usize, timeout_ms: u32) -> io::Result<Vec<u8>> {
+            let deadline = self.now + u64::from(timeout_ms) * 1000;
+            match self.rx.first().copied() {
+                Some((t, b)) if t <= deadline && n > 0 => {
+                    self.now = self.now.max(t);
+                    self.rx.remove(0);
+                    Ok(vec![b])
+                }
+                _ => {
+                    self.now = deadline;
+                    Ok(Vec::new())
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn echo_rtt_measures_latency_and_flags_the_kw2_window() {
+        let mut fast = Loop {
+            now: 0,
+            latency_us: 1_000,
+            rx: Vec::new(),
+            writes: 0,
+        };
+        let e = measure_echo_rtt(&mut fast, 5).unwrap();
+        assert_eq!((e.sent, e.echoed, fast.writes), (5, 5, 5));
+        assert_eq!((e.min_us, e.max_us), (Some(2_000), Some(2_000)));
+        assert!(e.kw2_handshake_ok, "{e:?}");
+
+        // macOS AppleUSBFTDI default latency timer, ~16 ms each way.
+        let mut slow = Loop {
+            now: 0,
+            latency_us: 30_000,
+            rx: Vec::new(),
+            writes: 0,
+        };
+        let e = measure_echo_rtt(&mut slow, 3).unwrap();
+        assert_eq!(e.max_us, Some(31_000));
+        assert!(!e.kw2_handshake_ok, "{e:?}");
+
+        // No loopback: nothing back, not OK.
+        let mut dead = Loop {
+            now: 0,
+            latency_us: 1_000_000,
+            rx: Vec::new(),
+            writes: 0,
+        };
+        let e = measure_echo_rtt(&mut dead, 2).unwrap();
+        assert_eq!((e.echoed, e.max_us, e.kw2_handshake_ok), (0, None, false));
+    }
 
     /// A line whose set_break costs `cost_us` and whose clock is virtual.
     struct Slow {

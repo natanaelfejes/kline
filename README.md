@@ -4,7 +4,7 @@ Open-source diagnostics for Renault K-line (ISO 9141 / KWP2000) ECUs over a dumb
 It replaces the parts of DDT2000 you need for reading data and, with explicit human approval,
 for a few service functions. Written in Rust.
 
-**Tested target:** 1999 Renault Clio II, Sirius 32 injection ECU + BMT body computer. The Clio is
+**Target vehicle:** 1999 Renault Clio II, Sirius 32 injection ECU + BMT body computer. The Clio is
 the worked example in the docs; nothing in the code is limited to it.
 
 ## Status: pre-HIL

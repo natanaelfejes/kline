@@ -61,3 +61,27 @@ fn ordinary_sirius_service_requests_are_not_flagged_by_name() {
     assert_eq!(risk(&d, "sirius", "3BA000").code, 7);
     assert_eq!(risk(&d, "bmt", "21A401").code, 7);
 }
+
+#[test]
+fn safir_dtc_reads_its_fault_named_frames() {
+    let Some(d) = defs_dir() else { return };
+    let path = std::path::Path::new(&d).join("Safir_1.xml");
+    if !path.exists() {
+        eprintln!("SKIPPED: no Safir_1.xml");
+        return;
+    }
+    let def = kline_spec::EcuDef::from_xml_bytes(&std::fs::read(&path).unwrap()).unwrap();
+    let profile = kline_sim::ecu::EcuProfile::from_def(&def).unwrap();
+    let ecu =
+        kline_sim::ecu::SpecEcu::new(profile, def, kline_sim::scenario::Scenario::new()).unwrap();
+    let p = path.display().to_string();
+    let (r, j) = run(ecu, &["--json", "dtc", "--xml", &p]);
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    let reqs: Vec<String> = r
+        .event("dtc")
+        .iter()
+        .map(|e| e["request"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(reqs, ["3350", "3352", "3351"], "{}", r.stdout);
+    j.assert_no_writes();
+}

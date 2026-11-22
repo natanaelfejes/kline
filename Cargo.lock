@@ -402,6 +402,7 @@ dependencies = [
  "kline-core",
  "kline-sim",
  "kline-spec",
+ "nix 0.26.4",
  "serde",
  "serde_json",
  "serialport",
