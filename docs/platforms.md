@@ -190,8 +190,12 @@ on some drivers) at the chain's DTR edge, before the 1 ms pre-sleep, not inside 
 edge (code review L9; a unit test checks that a 3 ms drain does not shorten TiniL).
 
 During an init (`Link::init`) a guard checks the sleeps whose lateness corrupts the wake-up:
-the 5-baud start and data bits (+-10 ms, ISO 9141-2) and the fast-init TiniL and TWuP (+-1 ms,
-ISO 14230-2). The idle before the init, the 1 ms before TiniL and the 5-baud stop-bit wait are
+the 5-baud start and data bits (+-10 ms, ISO 9141-2) and the fast-init TiniL and TWuP (2 ms
+late at most, `transport::FAST_INIT_GUARD_TOLERANCE_US`; final critique F12: ISO 14230-2 gives
+the tester +-1 ms, but the guard sees only our thread's wake-up, the break request itself sits
+on the 1 ms USB frame grid the guard cannot see, and the rehearsal on the Mac aborted a fast
+init on a 1.03 ms late wake with nothing else wrong; so a pulse that passes can be up to 2 ms
+off nominal, NOT VERIFIED that the car's ECUs accept that). The idle before the init, the 1 ms before TiniL and the 5-baud stop-bit wait are
 not guarded: a late idle only lengthens the idle line, a late stop-bit wait only delays the
 keyword read after a complete address. A late pre-sleep is harmless because a fast-init chain
 restarts its pacing at the real falling edge (the time the break-on call starts): TiniL and
@@ -212,7 +216,10 @@ late gave a 23.97 ms TiniL that no guard saw (final critique F03; a unit test no
 - in a fast init K is released at once and DTR raised; StartCommunication is not sent.
 
 The attempt fails with `init timing missed: a N ms wake-up sleep woke X us late (max Y us);
-attempt aborted, K line released`, and `connect` goes on with the next variant or round. The
+attempt aborted, K line released`, and `connect` goes on with the next variant or round; a fast
+init aborted this way is first tried once more right away (final critique F12: the cause was our
+host, not the ECU, and the ECU saw no StartCommunication), traced as `INIT fast init aborted by
+the timing guard: trying it once more before the next variant`. The
 guard measures only our own sleep; how long the break call itself takes (USB, VM passthrough)
 is not part of it, so the Windows VM's break-call spread above is not turned into aborts.
 `kline selftest` drives its break edges without the guard: it measures and reports, it does not

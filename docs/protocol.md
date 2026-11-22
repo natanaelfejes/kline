@@ -254,6 +254,10 @@ our MultiEcu fallback; ISO8 (Safir) only SingleEcu. The whole list is tried up t
 500 ms apart (DDT2000 "Init retry n/3"; `--init-attempts`). Constants:
 `kline_core::retry::{DDT2000_DETECTION_ORDER, RetryPolicy}`.
 
+Fast-init retry (final critique F12, ours): a fast init that the host's timing guard aborted
+(TiniL or TWuP woke more than 2 ms late, [platforms.md](platforms.md#wake-up-pacing-and-the-init-timing-guard))
+is tried once more right away before the next variant; no other failure is retried this way.
+
 Wait after an answered attempt (final critique F14, ours): when a failed attempt got anything
 from the ECU (key bytes, ~address, a StartCommunication reply or part of one, or a collision),
 the ECU may still be in a half-open session, so the next init starts only after

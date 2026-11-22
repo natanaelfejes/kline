@@ -662,6 +662,11 @@ pub fn open_session(
                         ),
                         None => String::new(),
                     };
+                    let then = if a.retry {
+                        "retrying fast init once (our host woke late, not the ECU)".to_string()
+                    } else {
+                        then
+                    };
                     let then = match a.answered_wait_ms {
                         Some(ms) => format!(
                             "{then} after waiting {ms} ms (P3max): the ECU answered and may still be in its session"

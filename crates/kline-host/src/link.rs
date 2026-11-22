@@ -495,6 +495,9 @@ pub struct Attempt {
     /// The wait before the next attempt because the ECU answered this failed one (P3max,
     /// final critique F14).
     pub answered_wait_ms: Option<u32>,
+    /// The same fast init is tried once more right away because the timing guard aborted
+    /// this one (final critique F12).
+    pub retry: bool,
 }
 
 impl Attempt {
@@ -592,12 +595,15 @@ pub fn connect(
     };
     let mut attempts = Vec::new();
     let rounds = policy.init_attempts.max(1);
-    let schedule: Vec<(u8, InitVariant)> = (1..=rounds)
-        .flat_map(|r| variants.iter().map(move |&v| (r, v)))
+    // (round, variant, is the one retry of a fast init after a timing-guard abort)
+    let mut schedule: Vec<(u8, InitVariant, bool)> = (1..=rounds)
+        .flat_map(|r| variants.iter().map(move |&v| (r, v, false)))
         .collect();
     let mut last_round = 1;
-    let attempts_total = schedule.len();
-    for (index, (round, v)) in schedule.into_iter().enumerate() {
+    let mut index = 0;
+    while index < schedule.len() {
+        let (round, v, is_retry) = schedule[index];
+        index += 1;
         if stopped() {
             return Err(interrupted());
         }
@@ -613,17 +619,27 @@ pub fn connect(
         let address_byte = (!matches!(cfg.init_kind(), InitKind::KwpFast { .. }))
             .then(|| cfg.five_baud_address_byte());
         let r = link.init(&cfg).map_err(CliError::io)?;
+        // F12: a fast init the timing guard aborted (our host woke late; the ECU saw no
+        // StartCommunication) is tried once more right away, before the next variant. Only
+        // for that cause, and only once per scheduled attempt.
+        let retry = !is_retry
+            && matches!(r, Err(LinkError::InitTiming { .. }))
+            && matches!(cfg.init_kind(), InitKind::KwpFast { .. });
+        if retry {
+            schedule.insert(index, (round, v, true));
+        }
         // F14: the ECU answered this failed attempt, so it may still hold a half-open
         // session; the next init waits P3max for it to time out. A failed attempt never has
         // an open Session here (one exists only after a complete init), so there is no Stop
         // to send instead.
         let answered_wait_ms = match &r {
-            Err(e) if ecu_answered(e) && index + 1 < attempts_total => {
+            Err(e) if ecu_answered(e) && index < schedule.len() => {
                 Some(policy.answered_init_wait_ms)
             }
             _ => None,
         };
         let a = Attempt {
+            retry,
             answered_wait_ms,
             variant: v,
             round,
@@ -647,6 +663,12 @@ pub fn connect(
                     "INIT attempt {} (round {round}) failed: {e}",
                     variant_label(v)
                 ),
+            );
+        }
+        if retry {
+            link.trace.line(
+                link.t.now_us(),
+                "INIT fast init aborted by the timing guard: trying it once more before the next variant",
             );
         }
         on_attempt(&a);

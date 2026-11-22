@@ -77,16 +77,32 @@ impl InitTimingError {
     }
 }
 
-/// Allowed lateness of a wake-up sleep of `ms` (ISO): 5-baud bits and the stop bit (100 ms and
-/// more) +-10 ms (ISO 9141-2, 5 baud +-5 %); the fast-init sleeps (1 and 25 ms) +-1 ms
-/// (ISO 14230-2 TiniL 25 +- 1, TWuP 50 +- 1).
+/// Allowed lateness of a wake-up sleep of `ms`: 5-baud bits (100 ms and more) +-10 ms (ISO
+/// 9141-2, 5 baud +-5 %); the fast-init TiniL and TWuP sleeps [`FAST_INIT_GUARD_TOLERANCE_US`].
 pub fn wake_sleep_tolerance_us(ms: u32) -> u64 {
     if ms >= 100 {
         crate::selftest::FIVE_BAUD_TOLERANCE_US
     } else {
-        crate::selftest::FAST_INIT_TOLERANCE_US
+        FAST_INIT_GUARD_TOLERANCE_US
     }
 }
+
+/// How late the TiniL or TWuP sleep of a fast init may wake before the init guard aborts the
+/// attempt: 2 ms (final critique F12; it was 1 ms).
+///
+/// Rationale: ISO 14230-2 gives the tester TiniL 25 +- 1 ms and TWuP 50 +- 1 ms. The guard
+/// measures only how late our own thread woke, not the line: the break request is a USB
+/// control transfer on the 1 ms USB frame grid, so the edge on K carries up to about 1 ms
+/// that no host check can see, and checking the sleep to 1.000 ms is stricter than the line
+/// itself. On the Mac the measured wake lateness is usually below 1 ms but not always: the
+/// rehearsal aborted a fast init on a 1.03 ms late wake with nothing else wrong
+/// (docs/platforms.md "Wake-up pacing and the init timing guard"). 2 ms is the ISO tester
+/// tolerance plus that one USB frame. A pulse that passes the guard can therefore be up to
+/// 2 ms off nominal, outside ISO's +-1 ms; NOT VERIFIED that the car's ECUs accept it (a
+/// wrong pulse is safe: the ECU stays silent and the next variant follows). The 5-baud bit
+/// tolerance (+-10 ms) is unchanged. `selftest` keeps judging host precision against ISO's
+/// +-1 ms ([`crate::selftest::FAST_INIT_TOLERANCE_US`]).
+pub const FAST_INIT_GUARD_TOLERANCE_US: u64 = 2_000;
 
 /// Wall clock for a [`KklLine`]; mocked in unit tests.
 pub trait Clock {
@@ -1476,10 +1492,10 @@ mod tests {
         l.set_break(false).unwrap();
         l.sleep_ms(25);
         l.write(&[0x81], 0).unwrap();
-        // TWuP stays guarded.
+        // TWuP stays guarded (2 ms, final critique F12).
         let (mut l, m) = line(500);
         l.set_init_guard(true);
-        m.0.borrow_mut().oversleep_nth = Some((2, 1_500));
+        m.0.borrow_mut().oversleep_nth = Some((2, 2_500));
         l.set_dtr(true).unwrap();
         l.sleep_ms(1);
         l.set_break(true).unwrap();
@@ -1568,13 +1584,13 @@ mod tests {
         let (mut l, m) = line(500);
         l.set_init_guard(true);
         // FastInit::start after the idle wait: DTR high, 1 ms, break 25 ms, release 25 ms.
-        m.0.borrow_mut().oversleep_nth = Some((1, 1_500));
+        m.0.borrow_mut().oversleep_nth = Some((1, 2_500));
         l.set_dtr(true).unwrap();
         l.sleep_ms(1);
         l.set_break(true).unwrap();
         l.sleep_ms(25);
         let e = l.set_break(false).unwrap_err();
-        assert_eq!(InitTimingError::find(&e).unwrap().max_late_us, 1_000);
+        assert_eq!(InitTimingError::find(&e).unwrap().max_late_us, 2_000);
         assert!(!m
             .0
             .borrow()
@@ -1702,6 +1718,110 @@ mod tests {
         // A receiver saw only the second attempt's complete address (no Multipoint in the
         // default timing, so 0x7A again), and no byte from the aborted one.
         assert_eq!(decoded_addresses(&m).0, vec![0x7A]);
+    }
+
+    #[test]
+    fn the_fast_init_guard_allows_2_ms_and_aborts_beyond() {
+        // Final critique F12: TiniL/TWuP guard tolerance 2 ms (ISO 14230-2 tester +-1 ms plus
+        // the measured macOS wake jitter, see FAST_INIT_GUARD_TOLERANCE_US).
+        for (late_us, aborts) in [(1_500u64, false), (1_990, false), (2_500, true)] {
+            for nth in [2u32, 3] {
+                // Sleeps: 0 the 1 ms pre-sleep, 1 TiniL, 2 TWuP (after the DTR edge).
+                let (mut l, m) = line(500);
+                l.set_init_guard(true);
+                m.0.borrow_mut().oversleep_nth = Some((nth - 1, late_us));
+                l.set_dtr(true).unwrap();
+                l.sleep_ms(1);
+                l.set_break(true).unwrap();
+                l.sleep_ms(25);
+                let off = l.set_break(false);
+                l.sleep_ms(25);
+                let r = off.and_then(|_| l.write(&[0x81], 0));
+                assert_eq!(r.is_err(), aborts, "{late_us} us late, sleep {nth}: {r:?}");
+                if let Err(e) = r {
+                    assert_eq!(InitTimingError::find(&e).unwrap().max_late_us, 2_000);
+                }
+            }
+        }
+        // The 5-baud bit tolerance is unchanged: +-10 ms.
+        assert_eq!(wake_sleep_tolerance_us(200), 10_000);
+    }
+
+    #[test]
+    fn connect_retries_fast_init_once_after_a_timing_abort() {
+        // Final critique F12: a fast init aborted by the timing guard is tried once more
+        // before the 5-baud variant; only for that cause.
+        let kwp = kline_core::KTiming {
+            init: kline_core::InitKind::KwpFiveBaud { multipoint: false },
+            ..kline_core::KTiming::default()
+        };
+        let cfg = kline_core::LinkConfig::new(0x7A, kwp);
+        let policy = kline_core::RetryPolicy {
+            init_attempts: 1,
+            ..kline_core::RetryPolicy::default()
+        };
+        let variants = [
+            kline_core::InitVariant::FastInit,
+            kline_core::InitVariant::SingleEcu,
+        ];
+        let run = |late: Option<(u32, u64)>| {
+            let (l, m) = line(500);
+            m.0.borrow_mut().oversleep_nth = late;
+            let mut link = crate::link::Link::new(Box::new(l), Tracer::off(), None);
+            let mut seen = Vec::new();
+            let r = crate::link::connect(
+                &mut link,
+                &cfg,
+                &variants,
+                &policy,
+                &std::sync::atomic::AtomicBool::new(false),
+                &mut |a| seen.push((a.variant, a.error.clone().unwrap_or_default(), a.retry)),
+            );
+            assert!(r.is_err(), "the mock has no ECU");
+            seen
+        };
+        // Sleeps of the first fast init: 0 idle, 1 the 1 ms, 2 TiniL. TiniL 3 ms late.
+        let seen = run(Some((2, 3_000)));
+        let v: Vec<_> = seen.iter().map(|s| s.0).collect();
+        assert_eq!(
+            v,
+            [
+                kline_core::InitVariant::FastInit,
+                kline_core::InitVariant::FastInit,
+                kline_core::InitVariant::SingleEcu
+            ],
+            "{seen:?}"
+        );
+        assert!(seen[0].1.contains("init timing missed"), "{seen:?}");
+        assert!(seen[0].2, "the first attempt announces the retry: {seen:?}");
+        assert!(!seen[1].1.contains("init timing"), "{seen:?}");
+        assert!(!seen[1].2, "only one retry: {seen:?}");
+        // No retry for an unanswered fast init.
+        let seen = run(None);
+        let v: Vec<_> = seen.iter().map(|s| s.0).collect();
+        assert_eq!(
+            v,
+            [
+                kline_core::InitVariant::FastInit,
+                kline_core::InitVariant::SingleEcu
+            ],
+            "{seen:?}"
+        );
+        // Nor for a 5-baud timing abort (sleep 0 idle, 1 start bit, 2 bit 0) in a 5-baud-only
+        // schedule.
+        let (l, m) = line(500);
+        m.0.borrow_mut().oversleep_nth = Some((2, 30_000));
+        let mut link = crate::link::Link::new(Box::new(l), Tracer::off(), None);
+        let mut seen = Vec::new();
+        let _ = crate::link::connect(
+            &mut link,
+            &cfg,
+            &[kline_core::InitVariant::SingleEcu],
+            &policy,
+            &std::sync::atomic::AtomicBool::new(false),
+            &mut |a| seen.push(a.variant),
+        );
+        assert_eq!(seen, [kline_core::InitVariant::SingleEcu]);
     }
 
     #[test]

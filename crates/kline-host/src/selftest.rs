@@ -29,7 +29,8 @@ pub const TOGGLE_HALF_MS: u32 = 10;
 pub const TOGGLES: u32 = 20;
 /// 5-baud bit tolerance: 5 % of 200 ms (ISO 9141-2).
 pub const FIVE_BAUD_TOLERANCE_US: u64 = 10_000;
-/// Fast-init TiniL tolerance: +-1 ms (ISO 14230-2).
+/// Fast-init TiniL tolerance: +-1 ms (ISO 14230-2), the selftest verdict. The init guard
+/// allows 2 ms ([`crate::transport::FAST_INIT_GUARD_TOLERANCE_US`], final critique F12).
 pub const FAST_INIT_TOLERANCE_US: u64 = 1_000;
 
 /// Timing of the break edges against their ideal grid.
