@@ -15,7 +15,7 @@ pub fn ddt_xml_dir() -> PathBuf {
 }
 
 /// Bytes of a Renault file, or `None` (with a SKIPPED message) when it is not available.
-/// Rule 1 of docs/SAFETY.md: these files never enter git, so tests skip instead of failing.
+/// Rule 1 of SAFETY.md: these files never enter git, so tests skip instead of failing.
 pub fn ddt_file(name: &str) -> Option<Vec<u8>> {
     let path = ddt_xml_dir().join(name);
     match std::fs::read(&path) {

@@ -12,5 +12,5 @@ members = [
 [workspace.package]
 edition = "2021"
 publish = false
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 authors = ["Natanael Feješ"]

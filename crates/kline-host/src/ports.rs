@@ -55,7 +55,7 @@ pub fn list() -> std::io::Result<Vec<PortInfo>> {
 }
 
 /// A port that looks like the KKL cable (docs/platforms.md): macOS `/dev/cu.usbserial-*`
-/// (AppleUSBFTDI, the design notes), a Linux `/dev/ttyUSB*` with the FTDI vendor id (ftdi_sio), or
+/// (AppleUSBFTDI), a Linux `/dev/ttyUSB*` with the FTDI vendor id (ftdi_sio), or
 /// a Windows `COMn` with the FTDI vendor id (FTDI VCP driver).
 pub fn is_candidate(p: &PortInfo) -> bool {
     let ftdi = p.usb.is_some_and(|u| u.0 == FTDI_VID);

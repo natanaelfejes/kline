@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Hand-written kline-sim fixture (not derived from any Renault file). Shaped like the body
      ECU at 0x26 (KWP 5-baud Multipoint, KW D0 8F). Request bytes from docs/protocol.md and
-     docs/SAFETY.md; data names, positions and scaling are invented. -->
+     SAFETY.md; data names, positions and scaling are invented. -->
 <Target Name="Fixture BMT" xmlns="http://www-diag.renault.com/2002/ECU">
 <Function Name="Body" Address="38"/>
 <K BaudRate="10400">

@@ -242,7 +242,7 @@ or `ReadTimeout(partial)` with fewer for `Read`. Any other event fails the machi
 
 ## Safety
 
-Enforced in `kline-core` (SAFETY.md rule 2 and 3; owner-approved policy v2 and owner decision
+Enforced in `kline-core` (SAFETY.md rules 2 and 3; owner-approved policy v2 and owner decision
 2026-11-22). The core writes only frames it built itself: `Action::Write` carries a
 crate-private `Frame` (bytes readable, no public constructor, not `Clone`), and every request
 frame comes from a crate-private `Permit`. Decisions use the exact payload bytes and the

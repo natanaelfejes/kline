@@ -22,9 +22,11 @@ in the gitignored `ddt-xml/` directory.
 
 ## Safety policy
 
+The rules are in [SAFETY.md](SAFETY.md).
+
 Changes to the tiers in `kline-core` need tests in `crates/kline-core/tests/`. `kline-agent` and
 any future MCP crate must never enable `approved-routines` (`crates/kline-agent/tests/agent.rs`).
 
 ## License
 
-Contributions are licensed MIT OR Apache-2.0, like the project.
+Contributions are licensed GPL-3.0-or-later with the NOTICE attribution term, like the project.

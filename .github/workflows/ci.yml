@@ -1,4 +1,4 @@
-# CI: the docs/SAFETY.md gates on Linux, macOS and Windows. No Renault data is available here, so
+# CI: the CONTRIBUTING.md gates on Linux, macOS and Windows. No Renault data is available here, so
 # the real-definition tests skip (they print SKIPPED); the pty simulator tests run on Linux and
 # macOS only (Unix pty), the in-process simulator e2e runs on all three.
 name: ci

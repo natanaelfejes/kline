@@ -1,0 +1,18 @@
+kline
+Copyright (C) 2026 Natanael Feješ
+https://github.com/natanaelfejes/kline
+
+This program is free software: you can redistribute it and/or modify it under the terms of the
+GNU General Public License as published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version. See LICENSE.
+
+Additional term under GNU GPL version 3 section 7(b):
+Any copy, modified version or work based on this program, in source or binary form, must keep this
+NOTICE file and must credit the original author in its documentation and, if it has one, in its
+"about", "--version" or credits output, in the form:
+
+    Based on kline by Natanael Feješ (https://github.com/natanaelfejes/kline)
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without
+even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. Using it on a
+vehicle is at your own risk.

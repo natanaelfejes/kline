@@ -1,4 +1,4 @@
-//! Default-deny, tiered request policy (SAFETY.md rule 2 and 3, owner-approved policy v2 and
+//! Default-deny, tiered request policy (SAFETY.md rules 2 and 3, owner-approved policy v2 and
 //! owner decision 2026-11-22). See docs/protocol.md "Safety".
 //!
 //! | Tier | What | Who can send it |

@@ -1,6 +1,6 @@
 //! The simulator's own read/dangerous classification of request payloads.
 //!
-//! Written from SAFETY.md rule 2 and 3, independently of `kline_core::safety`: if the core
+//! Written from SAFETY.md rules 2 and 3, independently of `kline_core::safety`: if the core
 //! ever lets a write through, the ECU write log catches it here.
 
 use crate::journal::WriteKind;

@@ -7,7 +7,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Why a request counts as dangerous. The simulator's own classification (it does not use
-/// kline-core's safety module, so a bug there is not mirrored here); based on SAFETY.md rule 2
+/// kline-core's safety module, so a bug there is not mirrored here); based on SAFETY.md rules 2
 /// and 3.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteKind {

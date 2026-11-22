@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Hand-written kline-sim fixture (not derived from any Renault file). Shaped like a plain
-     ISO8 injection ECU at 0x7A (KW C2 85 as listed in the design notes). Data names, positions
+     ISO8 injection ECU at 0x7A (KW C2 85). Data names, positions
      and scaling are invented. -->
 <Target Name="Fixture Safir" xmlns="http://www-diag.renault.com/2002/ECU">
 <Function Name="Injection" Address="122"/>

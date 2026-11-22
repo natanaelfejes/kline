@@ -99,7 +99,9 @@ See [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md).
 
 ## License
 
-Licensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at
-your option. Copyright 2026 Natanael Feješ.
+Copyright (C) 2026 Natanael Feješ. Licensed under the [GNU GPL v3.0 or later](LICENSE), with one
+additional term from GPL section 7(b) in [NOTICE](NOTICE): forks and derived works must keep the
+NOTICE and credit the original author ("Based on kline by Natanael Feješ"). If you distribute a
+modified version, you must publish its source under the same license.
 
 This is an independent project, not affiliated with or endorsed by Renault.
