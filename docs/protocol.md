@@ -144,7 +144,7 @@ XML values are assumed to be ms.
 | 5-baud read window | `kw2_timeout_ms` + 100 | RE: IOTBD32V3 |
 | Fast init | 1 ms, then 25 low, 25 high | RE: IOTBD32V3 |
 | Multipoint 5-baud address XOR | 0x80 | RE: KWP2000Diag4 KWP2000Ecu |
-| Idle before any init | 300 | ours (ISO 9141/14230 W5/Tidle; DDT2000 relies on its 300 ms worker exit tail, and its scan waits 350 ms after `StopDiag` before the next ECU: ddt2000-parity.md C3) |
+| Idle before any init | 300 | ours (ISO 9141/14230 W5/Tidle; DDT2000 relies on its 300 ms worker exit tail, and its scan waits 350 ms after `StopDiag` before the next ECU: DDT2000 behaviour note C3) |
 | Read timeout after a 0x78 reply | 5000 | ours (KWP2000 P2* extended timing) |
 | Maximum consecutive 0x78 replies | 10 | ours |
 
