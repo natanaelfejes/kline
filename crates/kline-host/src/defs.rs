@@ -546,11 +546,13 @@ pub fn decoded_json(decoded: &[(String, Result<Vec<DecodedItem>, SpecError>)]) -
 /// `trf-investigation.md` (TRF = remote type; 1 = RF, polarity inferred with high
 /// confidence). Shown in human output only; JSON is unchanged. Add rows here, not in code.
 pub const FLAG_MEANINGS: &[(&str, Option<u64>, &str)] = &[
-    ("TRF", Some(1), "RF remote"),
+    // The TRF polarity is an inference, not a fact (code review L5): say so until the car
+    // confirms it.
+    ("TRF", Some(1), "1 = RF remote (inferred, NOT VERIFIED)"),
     (
         "TRF",
         Some(0),
-        "infrared remote: the BMT ignores an RF remote",
+        "0 = infrared remote (inferred, NOT VERIFIED): an RF remote would be ignored",
     ),
     ("TIR RF RECU", None, "1 = a remote frame was received"),
     (
@@ -966,7 +968,11 @@ mod meaning_tests {
             ]),
         )];
         let h = decoded_human(&d);
-        assert!(h.contains("TRF          1   (RF remote)"), "{h}");
+        // Code review L5: the TRF polarity is inferred, so it is shown as such.
+        assert!(
+            h.contains("TRF          1   (1 = RF remote (inferred, NOT VERIFIED))"),
+            "{h}"
+        );
         assert!(h.contains("(1 = a remote frame was received)"), "{h}");
         assert!(
             h.contains("(1 = transponder authenticated, code accepted)"),
@@ -978,7 +984,9 @@ mod meaning_tests {
         );
         let d = vec![("R".to_string(), Ok(vec![item("TRF", 0)]))];
         assert!(
-            decoded_human(&d).contains("(infrared remote: the BMT ignores an RF remote)"),
+            decoded_human(&d).contains(
+                "(0 = infrared remote (inferred, NOT VERIFIED): an RF remote would be ignored)"
+            ),
             "{}",
             decoded_human(&d)
         );

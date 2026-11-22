@@ -146,7 +146,7 @@ fn real_bmt_reads_show_flag_meanings_and_the_open_definition_choice() {
     assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
     for needle in [
         "definition choice unresolved: BMT_X65_ph1_p, BMT_SAGEM; values below decoded with BMT_X65_ph1_p",
-        "(RF remote)",
+        "(1 = RF remote (inferred, NOT VERIFIED))",
         "decoded differently by the candidates:",
         "BMT_SAGEM: CONDROUL 1",
     ] {
