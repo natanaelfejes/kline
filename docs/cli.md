@@ -60,7 +60,9 @@ kline setup --defs-from ~/Documents/Clio/ddt-extract/ecus         # copies *.xml
 
 `kline setup --defs-from DIR` copies every `*.xml` file of `DIR` into the definitions
 directory (`--defs` if given, else `$KLINE_DDT_XML`, else the default), refuses a destination
-inside a git work tree (exit 8), opens no port, and lists which `--ecu` files are now present.
+inside a git work tree (exit 8; symlinks are resolved, and if the default directory itself is
+in a repository, e.g. one at your home folder, the message says to pick a folder outside it
+with `--defs` or `KLINE_DDT_XML`), opens no port, and lists which `--ecu` files are now present.
 Without it, a missing definition is exit 8 with the fix in the message
 (`kline setup --defs-from DIR`, `--defs DIR` or `KLINE_DDT_XML=DIR`, and the default path).
 If `~/.local/bin` is not in `PATH`: `export PATH="$HOME/.local/bin:$PATH"` (add it to `~/.zshrc`).

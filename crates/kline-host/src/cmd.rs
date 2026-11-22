@@ -886,6 +886,34 @@ pub struct SetupArgs {
     pub defs_from: PathBuf,
 }
 
+/// Why `setup` will not copy into `dest`, inside the git work tree `repo`, and where to copy
+/// instead. When `dest` is the default directory itself (e.g. a dotfiles repository at `~`),
+/// the default is not suggested (code review L7).
+fn setup_refusal(dest: &std::path::Path, repo: &std::path::Path) -> String {
+    let default = defs::data_dir().join("ecus");
+    let same = |a: &std::path::Path, b: &std::path::Path| {
+        a == b
+            || (std::fs::canonicalize(a).ok().is_some()
+                && std::fs::canonicalize(a).ok() == std::fs::canonicalize(b).ok())
+    };
+    let hint = if same(dest, &default) {
+        format!(
+            "the default definitions directory {} is itself in that repository (a repository at your home folder?); choose a folder outside any repository with --defs DIR or KLINE_DDT_XML=DIR",
+            default.display()
+        )
+    } else {
+        format!(
+            "use the default directory {} or another --defs outside any repository",
+            default.display()
+        )
+    };
+    format!(
+        "refusing to copy Renault definitions into {}: it is inside the git work tree {} (SAFETY.md rule 1); {hint}",
+        dest.display(),
+        repo.display()
+    )
+}
+
 /// `setup --defs-from DIR`: copy `DIR/*.xml` into the definitions directory `--ecu` reads,
 /// never into a git work tree (SAFETY.md rule 1: Renault data never enters git). Opens no port.
 pub fn setup(ctx: &mut Ctx, a: &SetupArgs) -> Result<(), CliError> {
@@ -907,12 +935,7 @@ pub fn setup(ctx: &mut Ctx, a: &SetupArgs) -> Result<(), CliError> {
         )));
     }
     if let Some(repo) = defs::git_work_tree(&dest) {
-        return Err(CliError::definition(format!(
-            "refusing to copy Renault definitions into {}: it is inside the git work tree {} (SAFETY.md rule 1); use the default directory {} or another --defs outside any repository",
-            dest.display(),
-            repo.display(),
-            defs::data_dir().join("ecus").display()
-        )));
+        return Err(CliError::definition(setup_refusal(&dest, &repo)));
     }
     std::fs::create_dir_all(&dest)
         .map_err(|e| CliError::definition(format!("cannot create {}: {e}", dest.display())))?;
@@ -2162,4 +2185,25 @@ fn emit_exchange(ctx: &Ctx, ecu: Option<&Ecu>, x: &Exchange) {
 /// Tier name for messages.
 pub fn tier_label(t: Tier) -> &'static str {
     tier_name(t)
+}
+
+#[cfg(test)]
+mod setup_tests {
+    use super::*;
+
+    /// Code review L7: when the default definitions directory itself is in a repository (a
+    /// dotfiles repo at `~`), the refusal must not suggest that same default.
+    #[test]
+    fn refusal_for_the_default_directory_does_not_suggest_it() {
+        let default = defs::data_dir().join("ecus");
+        let m = setup_refusal(&default, std::path::Path::new("/home/x"));
+        assert!(m.contains("default definitions directory"), "{m}");
+        assert!(m.contains("outside any repository"), "{m}");
+        assert!(!m.contains("use the default directory"), "{m}");
+        let m = setup_refusal(
+            std::path::Path::new("/repo/ecus"),
+            std::path::Path::new("/repo"),
+        );
+        assert!(m.contains("use the default directory"), "{m}");
+    }
 }

@@ -191,14 +191,22 @@ pub fn car_files() -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
-/// The git work tree `dir` (or its nearest existing ancestor) lies in, if any.
+/// The git work tree `dir` (or its nearest existing ancestor) lies in, if any. The nearest
+/// existing ancestor is resolved first (symlinks, `..`), so a path that reaches a repository
+/// through a symlink is found too (code review L7).
 pub fn git_work_tree(dir: &Path) -> Option<PathBuf> {
     let abs = if dir.is_absolute() {
         dir.to_path_buf()
     } else {
         std::env::current_dir().ok()?.join(dir)
     };
-    abs.ancestors()
+    let resolved = abs
+        .ancestors()
+        .find(|a| a.exists())
+        .and_then(|a| std::fs::canonicalize(a).ok())
+        .unwrap_or(abs);
+    resolved
+        .ancestors()
         .find(|a| a.join(".git").exists())
         .map(Path::to_path_buf)
 }
@@ -990,5 +998,38 @@ mod meaning_tests {
             "{}",
             decoded_human(&d)
         );
+    }
+}
+
+#[cfg(test)]
+mod git_tests {
+    use super::*;
+
+    fn temp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("kline-git-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Code review L7: a --defs that reaches a repository through a symlink is detected (the
+    /// nearest existing ancestor is resolved before walking up).
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_into_a_repository_is_detected() {
+        let base = temp("symlink");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join("data")).unwrap();
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(repo.join("data"), outside.join("link")).unwrap();
+        let got = git_work_tree(&outside.join("link").join("ecus")).expect("inside a repo");
+        assert_eq!(
+            std::fs::canonicalize(got).unwrap(),
+            std::fs::canonicalize(&repo).unwrap()
+        );
+        assert_eq!(git_work_tree(&outside.join("plain").join("ecus")), None);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
