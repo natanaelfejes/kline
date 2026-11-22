@@ -143,6 +143,25 @@ impl Link {
         self.t.now_ms()
     }
 
+    /// Set the modem lines right after the port is opened, before the first init. DTR is
+    /// already high from the open; with [`RtsMode::Low`] DTR is raised again and then RTS
+    /// dropped, in DDT2000's order (IOTBDSetup: DTR set, RTS control disabled). With
+    /// [`RtsMode::Leave`] (default) RTS is not touched. Traced as `PORT dtr=1 rts=..`.
+    pub fn prepare_port(&mut self, rts: kline_core::RtsMode) -> io::Result<()> {
+        match rts {
+            kline_core::RtsMode::Low => {
+                self.t.set_dtr(true)?;
+                self.t.set_rts(false)?;
+                self.trace.line(self.t.now_us(), "PORT dtr=1 rts=0");
+            }
+            kline_core::RtsMode::Leave => {
+                self.trace
+                    .line(self.t.now_us(), "PORT dtr=1 rts=left as opened");
+            }
+        }
+        Ok(())
+    }
+
     pub fn sleep_ms(&mut self, ms: u32) {
         self.trace.line(self.t.now_us(), format!("WAIT {ms} ms"));
         self.t.sleep_ms(ms);

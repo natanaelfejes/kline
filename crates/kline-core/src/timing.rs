@@ -191,6 +191,23 @@ pub struct LinkConfig {
     /// event, RE: IOTBD32V3 FUN_10001380; a POSIX tty can drop a break or deliver no byte for
     /// it). NOT VERIFIED what the FTDI cable under macOS delivers.
     pub strict_break_loopback: bool,
+    /// What the host does with RTS right after it opens the port, before the first init
+    /// ([`RtsMode`]). Default [`RtsMode::Leave`].
+    pub rts: RtsMode,
+}
+
+/// RTS line handling after the port is opened. DDT2000's IOTBDSetup opens the port with RTS
+/// control disabled and never drives RTS, so on Windows RTS is deasserted (RE: IOTBD32V3
+/// Setup 0x10001e9a / 0x10001f0e, step 7b row 1). Whether the KKL cable uses RTS (e.g. for
+/// power) is NOT VERIFIED, so the default leaves it as the OS opens the port (usually asserted
+/// on POSIX) until a bench check with a looped K line compares both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RtsMode {
+    /// Do not touch RTS (default).
+    #[default]
+    Leave,
+    /// DTR high, then RTS low, once after open (like DDT2000).
+    Low,
 }
 
 impl LinkConfig {
@@ -209,6 +226,7 @@ impl LinkConfig {
             kw_window_ms: None,
             tester_present_mode: crate::retry::TesterPresentMode::Idle,
             strict_break_loopback: false,
+            rts: RtsMode::Leave,
         }
     }
 

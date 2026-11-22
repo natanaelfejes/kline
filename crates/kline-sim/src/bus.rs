@@ -236,6 +236,13 @@ impl Bus {
             .note(t, format!("DTR {}", if on { "high" } else { "low" }));
     }
 
+    /// The tester changed RTS (logged only: the simulated cable does not use it).
+    pub fn tester_rts(&mut self, on: bool, t: u64) {
+        self.advance(t);
+        self.journal
+            .note(t, format!("RTS {}", if on { "high" } else { "low" }));
+    }
+
     /// A byte from the tester, complete on the line at `t`. Echoed to RX.
     pub fn tester_byte(&mut self, b: u8, t: u64) {
         self.advance(t);

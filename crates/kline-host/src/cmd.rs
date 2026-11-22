@@ -47,6 +47,27 @@ pub struct GlobalArgs {
     /// %APPDATA%\kline\ecus on Windows).
     #[arg(long, global = true, value_name = "DIR")]
     pub defs: Option<PathBuf>,
+    /// RTS after the port is opened: `leave` it as the OS set it (default) or drop it `low`
+    /// like DDT2000 (DTR high first). Whether the KKL cable uses RTS is NOT VERIFIED.
+    #[arg(long, global = true, value_enum, default_value_t = RtsArg::Leave)]
+    pub rts: RtsArg,
+}
+
+/// `--rts` ([`kline_core::RtsMode`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum RtsArg {
+    #[default]
+    Leave,
+    Low,
+}
+
+impl RtsArg {
+    pub fn mode(self) -> kline_core::RtsMode {
+        match self {
+            RtsArg::Leave => kline_core::RtsMode::Leave,
+            RtsArg::Low => kline_core::RtsMode::Low,
+        }
+    }
 }
 
 impl GlobalArgs {
@@ -72,6 +93,9 @@ impl GlobalArgs {
         }
         if let Some(d) = &self.defs {
             v.extend(["--defs".into(), d.display().to_string()]);
+        }
+        if self.rts == RtsArg::Low {
+            v.extend(["--rts".into(), "low".into()]);
         }
         v
     }
@@ -372,6 +396,7 @@ pub fn open_session(
         cfg.tester_present_mode = kline_core::TesterPresentMode::DDT2000_PERIODIC;
     }
     cfg.strict_break_loopback = args.strict_loopback;
+    cfg.rts = ctx.g.rts.mode();
     let policy = args.retry_policy();
     let spec = ctx.port_spec()?;
     let tracer = if ctx.g.trace {
@@ -406,6 +431,7 @@ pub fn open_session(
     let t = (ctx.env.opener)(&spec, cfg.timing.baud, tracer.clone())
         .map_err(|e| CliError::port(format!("cannot open {port_desc}: {e}")))?;
     let mut link = Link::new(t, tracer, Some(cap));
+    link.prepare_port(cfg.rts).map_err(CliError::io)?;
     let variants = link::variants(&cfg, args.variant);
     let out = ctx.out.clone();
     // The whole schedule, so a failed attempt can say what comes next.
@@ -771,6 +797,11 @@ pub fn selftest(ctx: &mut Ctx, a: &SelftestArgs) -> Result<(), CliError> {
     let baud = kline_core::timing::consts::DEFAULT_BAUD;
     let mut t = (ctx.env.opener)(&spec, baud, Tracer::off())
         .map_err(|e| CliError::port(format!("cannot open {path} at {baud} baud: {e}")))?;
+    // `--rts low`: the same line state as before an init (Link::prepare_port).
+    if ctx.g.rts == RtsArg::Low {
+        t.set_dtr(true).map_err(CliError::io)?;
+        t.set_rts(false).map_err(CliError::io)?;
+    }
     let reported = t.baud_rate();
     let j = crate::selftest::measure_break_jitter(
         t.as_mut(),

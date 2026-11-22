@@ -274,6 +274,9 @@ mod tests {
         fn set_dtr(&mut self, _: bool) -> io::Result<()> {
             Ok(())
         }
+        fn set_rts(&mut self, _: bool) -> io::Result<()> {
+            Ok(())
+        }
         fn set_break(&mut self, _: bool) -> io::Result<()> {
             panic!("the echo test must not touch break")
         }
@@ -419,6 +422,9 @@ mod tests {
             self.now
         }
         fn set_dtr(&mut self, _: bool) -> io::Result<()> {
+            Ok(())
+        }
+        fn set_rts(&mut self, _: bool) -> io::Result<()> {
             Ok(())
         }
         fn set_break(&mut self, on: bool) -> io::Result<()> {

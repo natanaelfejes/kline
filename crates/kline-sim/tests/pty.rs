@@ -65,6 +65,9 @@ impl Line for SerialLine {
         // TIOCMSET fails on a pty (ENOTTY); the control socket carries DTR.
         self.ctl.set_dtr(on)
     }
+    fn set_rts(&mut self, on: bool) -> io::Result<()> {
+        self.ctl.set_rts(on)
+    }
     fn set_break(&mut self, on: bool) -> io::Result<()> {
         // A no-op on a pty, kept so the call sequence is the real one.
         let _ = if on {

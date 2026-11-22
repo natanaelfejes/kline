@@ -83,6 +83,7 @@ command per line, each answered with one line:
 |---|---|
 | `BREAK 1` / `BREAK 0` | `OK` (edge applied at arrival time, before the reply) |
 | `DTR 1` / `DTR 0` | `OK` (logged) |
+| `RTS 1` / `RTS 0` | `OK` (logged; `--rts low`) |
 | `LOOPBACK?` | `1` / `0`: was the last break seen on RX |
 
 Data bytes go through the pty and are echoed back, like the KKL cable. A CLI transport for the

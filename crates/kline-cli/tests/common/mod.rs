@@ -104,6 +104,9 @@ impl Transport for Virtual {
     fn set_dtr(&mut self, on: bool) -> io::Result<()> {
         self.0.set_dtr(on)
     }
+    fn set_rts(&mut self, on: bool) -> io::Result<()> {
+        self.0.set_rts(on)
+    }
     fn set_break(&mut self, on: bool) -> io::Result<()> {
         self.0.set_break(on)
     }
@@ -133,6 +136,9 @@ impl Transport for BlindBreak {
     }
     fn set_dtr(&mut self, on: bool) -> io::Result<()> {
         self.0.set_dtr(on)
+    }
+    fn set_rts(&mut self, on: bool) -> io::Result<()> {
+        self.0.set_rts(on)
     }
     fn set_break(&mut self, on: bool) -> io::Result<()> {
         self.0.set_break(on)

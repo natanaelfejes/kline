@@ -1494,6 +1494,36 @@ fn human_output_is_saved_next_to_the_capture_and_ends_with_done() {
     }
 }
 
+/// Step 7b FIX-1: `--rts low` drops RTS after open (DTR high first), traced as
+/// `PORT dtr=1 rts=0`; the default leaves RTS as the OS opened the port.
+#[test]
+fn rts_option_drops_rts_after_open_only_when_asked() {
+    let sx = xml("sirius_cli.xml");
+    let (r, j) = run(
+        sirius_ecu(),
+        &["--rts", "low", "--trace", "connect", "--xml", &sx],
+    );
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    assert!(r.stderr.contains("PORT dtr=1 rts=0"), "{}", r.stderr);
+    let notes: Vec<String> = j.notes().into_iter().map(|(_, n)| n).collect();
+    assert_eq!(
+        notes.iter().filter(|n| n.starts_with("RTS")).count(),
+        1,
+        "{notes:?}"
+    );
+    assert!(notes.iter().any(|n| n == "RTS low"), "{notes:?}");
+    let (r, j) = run(sirius_ecu(), &["--trace", "connect", "--xml", &sx]);
+    assert_eq!(r.code, 0);
+    assert!(
+        r.stderr.contains("PORT dtr=1 rts=left as opened"),
+        "{}",
+        r.stderr
+    );
+    assert!(!j.notes().iter().any(|(_, n)| n.starts_with("RTS")));
+    let (r, _) = run(sirius_ecu(), &["--rts", "high", "connect", "--xml", &sx]);
+    assert_eq!(r.code, 2, "only leave|low: {}", r.stderr);
+}
+
 #[test]
 fn an_unanswered_fast_init_before_a_working_5_baud_reads_as_information() {
     let (r, _) = run(

@@ -13,6 +13,7 @@
 //! |---|---|---|
 //! | `BREAK 1` / `BREAK 0` | TX break on / off (K low / released) | `OK` |
 //! | `DTR 1` / `DTR 0` | DTR high / low (logged only) | `OK` |
+//! | `RTS 1` / `RTS 0` | RTS high / low (logged only) | `OK` |
 //! | `LOOPBACK?` | was the last break seen on RX? | `1` or `0` |
 //!
 //! The command is applied when it arrives (wall clock), and the reply is sent after, so a
@@ -186,6 +187,14 @@ fn serve(c: &mut Conn, bus: &mut Bus, t: u64) -> bool {
                 bus.tester_dtr(false, t);
                 "OK"
             }
+            "RTS 1" => {
+                bus.tester_rts(true, t);
+                "OK"
+            }
+            "RTS 0" => {
+                bus.tester_rts(false, t);
+                "OK"
+            }
             "LOOPBACK?" => {
                 if bus.break_loopback_seen() {
                     "1"
@@ -235,6 +244,10 @@ impl ControlClient {
 
     pub fn set_dtr(&mut self, on: bool) -> io::Result<()> {
         self.cmd(if on { "DTR 1" } else { "DTR 0" }).map(|_| ())
+    }
+
+    pub fn set_rts(&mut self, on: bool) -> io::Result<()> {
+        self.cmd(if on { "RTS 1" } else { "RTS 0" }).map(|_| ())
     }
 
     pub fn loopback_seen(&mut self) -> io::Result<bool> {

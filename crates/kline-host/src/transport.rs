@@ -23,6 +23,8 @@ pub trait Transport {
         self.now_ms() * 1000
     }
     fn set_dtr(&mut self, on: bool) -> io::Result<()>;
+    /// RTS (only with `--rts low`, once after open: [`crate::link::Link::prepare_port`]).
+    fn set_rts(&mut self, on: bool) -> io::Result<()>;
     fn set_break(&mut self, on: bool) -> io::Result<()>;
     /// Whether RX saw the break since the last `set_break(true)`.
     fn break_loopback_seen(&mut self) -> io::Result<bool>;
@@ -149,6 +151,7 @@ impl Clock for SystemClock {
 pub trait SerialIo {
     fn set_break(&mut self, on: bool) -> io::Result<()>;
     fn set_dtr(&mut self, on: bool) -> io::Result<()>;
+    fn set_rts(&mut self, on: bool) -> io::Result<()>;
     /// `Some(seen)` when the port reports break loopback itself (the simulator's control
     /// socket); `None`: infer it from bytes on RX.
     fn break_seen(&mut self) -> io::Result<Option<bool>> {
@@ -340,6 +343,11 @@ impl<P: SerialIo, C: Clock> Transport for KklLine<P, C> {
         self.edges = 0;
         self.frame_start_us = None;
         self.port.set_dtr(on)
+    }
+
+    fn set_rts(&mut self, on: bool) -> io::Result<()> {
+        self.check_fault()?;
+        self.port.set_rts(on)
     }
 
     fn set_init_guard(&mut self, on: bool) {
@@ -666,6 +674,10 @@ impl SerialIo for SerialportIo {
             .map_err(io::Error::from)
     }
 
+    fn set_rts(&mut self, on: bool) -> io::Result<()> {
+        self.port.write_request_to_send(on).map_err(io::Error::from)
+    }
+
     fn bytes_to_read(&mut self) -> io::Result<usize> {
         Ok(self.port.bytes_to_read().map_err(io::Error::from)? as usize)
     }
@@ -749,6 +761,10 @@ impl SerialIo for SimIo {
     fn set_dtr(&mut self, on: bool) -> io::Result<()> {
         self.ctl.set_dtr(on)
     }
+    fn set_rts(&mut self, on: bool) -> io::Result<()> {
+        // A pty refuses RTS like DTR; the simulator records it over the control socket.
+        self.ctl.set_rts(on)
+    }
     fn break_seen(&mut self) -> io::Result<Option<bool>> {
         self.ctl.loopback_seen().map(Some)
     }
@@ -810,6 +826,7 @@ mod tests {
     enum Call {
         Break(bool, u64),
         Dtr(bool, u64),
+        Rts(bool),
         Write(Vec<u8>, u64),
         Clear(u64),
     }
@@ -866,6 +883,10 @@ mod tests {
             s.now_us += s.ioctl_us;
             let t = s.now_us;
             s.calls.push(Call::Dtr(on, t));
+            Ok(())
+        }
+        fn set_rts(&mut self, on: bool) -> io::Result<()> {
+            self.0.borrow_mut().calls.push(Call::Rts(on));
             Ok(())
         }
         fn bytes_to_read(&mut self) -> io::Result<usize> {
@@ -1290,6 +1311,50 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(!break_times(&m).last().unwrap().0);
+    }
+
+    /// Step 7b FIX-1: `--rts low` raises DTR then drops RTS once, right after open, like
+    /// DDT2000's IOTBDSetup; `leave` (the default) never touches RTS.
+    #[test]
+    fn rts_mode_low_sets_dtr_high_then_rts_low_once() {
+        let (buf_sink, buf) = crate::out::Sink::buffer();
+        let (l, m) = line(500);
+        let mut link = crate::link::Link::new(Box::new(l), Tracer::to(buf_sink), None);
+        link.prepare_port(kline_core::RtsMode::Low).unwrap();
+        let calls: Vec<Call> =
+            m.0.borrow()
+                .calls
+                .iter()
+                .filter(|c| matches!(c, Call::Dtr(..) | Call::Rts(..)))
+                .cloned()
+                .collect();
+        assert!(
+            matches!(calls[..], [Call::Dtr(true, _), Call::Rts(false)]),
+            "{calls:?}"
+        );
+        let cfg = kline_core::LinkConfig::new(0x7A, kline_core::KTiming::default());
+        let _ = link.init(&cfg).unwrap();
+        let rts =
+            m.0.borrow()
+                .calls
+                .iter()
+                .filter(|c| matches!(c, Call::Rts(..)))
+                .count();
+        assert_eq!(rts, 1, "no other set_rts");
+        let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(text.contains("PORT dtr=1 rts=0"), "{text}");
+
+        let (l, m) = line(500);
+        let mut link = crate::link::Link::new(Box::new(l), Tracer::off(), None);
+        link.prepare_port(kline_core::RtsMode::Leave).unwrap();
+        let _ = link.init(&cfg).unwrap();
+        assert!(!m
+            .0
+            .borrow()
+            .calls
+            .iter()
+            .any(|c| matches!(c, Call::Rts(..))));
+        assert_eq!(kline_core::RtsMode::default(), kline_core::RtsMode::Leave);
     }
 
     #[test]

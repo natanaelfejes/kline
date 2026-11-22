@@ -14,6 +14,8 @@ pub trait Line {
     /// Monotonic milliseconds.
     fn now_ms(&self) -> u64;
     fn set_dtr(&mut self, on: bool) -> io::Result<()>;
+    /// RTS (recorded in the journal only).
+    fn set_rts(&mut self, on: bool) -> io::Result<()>;
     fn set_break(&mut self, on: bool) -> io::Result<()>;
     /// Whether RX saw the break since the last `set_break(true)`.
     fn break_loopback_seen(&mut self) -> io::Result<bool>;
@@ -113,6 +115,11 @@ impl Line for VirtualLine {
 
     fn set_dtr(&mut self, on: bool) -> io::Result<()> {
         self.bus.tester_dtr(on, self.now);
+        Ok(())
+    }
+
+    fn set_rts(&mut self, on: bool) -> io::Result<()> {
+        self.bus.tester_rts(on, self.now);
         Ok(())
     }
 

@@ -111,7 +111,7 @@ can target 0x7A as a fallback for the car test.
 |---|---|---|
 | Baud | **10400** 8N1, even when the XML says 10417 (Safir). Configurable (`KTiming::baud`) | RE: IOTBD32V3 Setup; the XML baud is never applied before the worker starts. Multipoint forces 10400 (RE: KWP2000Diag4 KWP2000Ecu) |
 | DTR | high while idle, low during the 5-baud bits | RE: IOTBD32V3 5-baud routine |
-| RTS | DDT2000: not driven (DCB RTS control disabled); kline: left as the OS opens the port. NOT VERIFIED whether the KKL cable uses it | RE: IOTBD32V3 Setup 0x10001e9a |
+| RTS | DDT2000: not driven (DCB RTS control disabled, so deasserted on Windows); kline: `--rts leave` (default) leaves it as the OS opens the port, `--rts low` raises DTR and then drops RTS once after open (`LinkConfig::rts`, `RtsMode`). NOT VERIFIED whether the KKL cable uses it | RE: IOTBD32V3 Setup 0x10001e9a / 0x10001f0e |
 | Tester address | 0xF1 | RE: KWP2000Diag4 KWP2000Ecu default ToolAddress |
 
 ## Timing values (`KTiming`)

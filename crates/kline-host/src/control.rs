@@ -1,5 +1,5 @@
 //! Client of the simulator's control socket (docs/sim.md "pty transport"): `BREAK 1|0`,
-//! `DTR 1|0` answered `OK`, `LOOPBACK?` answered `1|0`. Written from the documented protocol so
+//! `DTR 1|0`, `RTS 1|0` answered `OK`, `LOOPBACK?` answered `1|0`. Written from the documented protocol so
 //! the product binaries do not link the simulator.
 
 use std::io::{self, BufRead, BufReader, Write};
@@ -42,6 +42,10 @@ impl ControlClient {
 
     pub fn set_dtr(&mut self, on: bool) -> io::Result<()> {
         self.cmd(if on { "DTR 1" } else { "DTR 0" }).map(drop)
+    }
+
+    pub fn set_rts(&mut self, on: bool) -> io::Result<()> {
+        self.cmd(if on { "RTS 1" } else { "RTS 0" }).map(drop)
     }
 
     pub fn loopback_seen(&mut self) -> io::Result<bool> {
