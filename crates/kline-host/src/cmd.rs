@@ -245,6 +245,7 @@ impl<'a> Ctx<'a> {
             json: g.json,
             stdout: env.stdout.clone(),
             stderr: env.stderr.clone(),
+            record: crate::out::Recorder::default(),
         };
         Ctx { g, env, out, tool }
     }
@@ -255,6 +256,15 @@ impl<'a> Ctx<'a> {
 
     /// Report the result and return the exit code.
     pub fn finish(&self, r: Result<(), CliError>) -> u8 {
+        let code = self.report(r);
+        if !self.out.json {
+            // The last line of every human run, so a terminal log shows how it ended.
+            self.out.note(format!("done (exit {code})"));
+        }
+        code
+    }
+
+    fn report(&self, r: Result<(), CliError>) -> u8 {
         match r {
             Ok(()) => exit::OK,
             Err(e) => {
@@ -356,9 +366,18 @@ pub fn open_session(
     tracer
         .add_file(&trace_path)
         .map_err(|e| CliError::new(exit::CAPTURE, "capture", format!("trace file: {e}")))?;
+    let out_path = cap.path().with_extension("out.txt");
+    ctx.out.record.attach(&out_path).map_err(|e| {
+        CliError::new(
+            exit::CAPTURE,
+            "capture",
+            format!("output file {}: {e}", out_path.display()),
+        )
+    })?;
     ctx.out.emit(
         json!({"event": "capture", "path": cap.path().display().to_string(),
-               "trace": tracer.enabled().then(|| trace_path.display().to_string())}),
+               "trace": tracer.enabled().then(|| trace_path.display().to_string()),
+               "out": out_path.display().to_string()}),
         String::new(),
     );
     ctx.out.note(format!("capture: {}", cap.path().display()));

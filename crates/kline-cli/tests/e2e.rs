@@ -1374,3 +1374,50 @@ fn dtc_on_iso8_without_fault_memory_reports_fault_named_items() {
     assert_eq!(r.event("dtc_summary")[0]["active"], 1);
     j.assert_no_writes();
 }
+
+#[test]
+fn human_output_is_saved_next_to_the_capture_and_ends_with_done() {
+    let (r, _) = run(
+        sirius_ecu(),
+        &["read", "--xml", &xml("sirius_cli.xml"), "Live A9"],
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let cap = &r.captures()[0];
+    let out = cap.with_extension("out.txt");
+    let text = std::fs::read_to_string(&out).unwrap_or_else(|e| panic!("{}: {e}", out.display()));
+    for needle in [
+        "connected: sirius_cli at 7A",
+        "21 A9 -> 61 A9 ",
+        "Engine speed     850 rpm",
+        "capture: ",
+        "done (exit 0)",
+    ] {
+        assert!(text.contains(needle), "missing {needle:?} in\n{text}");
+    }
+    assert_eq!(
+        r.stderr.lines().last(),
+        Some("done (exit 0)"),
+        "{}",
+        r.stderr
+    );
+    // An error is saved too, with its exit code.
+    let ecu = sirius_ecu().with_fault(FaultRule::on(
+        &[0x21, 0xA9],
+        ReplyFault::Negative { nrc: 0x12 },
+    ));
+    let (r, _) = run(ecu, &["read", "--xml", &xml("sirius_cli.xml"), "21A9"]);
+    assert_eq!(r.code, 6);
+    let text = std::fs::read_to_string(r.captures()[0].with_extension("out.txt")).unwrap();
+    assert!(text.contains("ECU answered negatively: 7F 21 12"), "{text}");
+    assert!(text.trim_end().ends_with("done (exit 6)"), "{text}");
+    // --json: no done line (stdout stays JSON, stderr has no extra line), the capture event
+    // names the file.
+    let (r, _) = run(
+        sirius_ecu(),
+        &["--json", "read", "--xml", &xml("sirius_cli.xml"), "21A9"],
+    );
+    assert_eq!(r.code, 0);
+    assert!(!r.stderr.contains("done (exit"), "{}", r.stderr);
+    let c = &r.event("capture")[0];
+    assert!(c["out"].as_str().unwrap().ends_with(".out.txt"), "{c}");
+}

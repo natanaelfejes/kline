@@ -78,7 +78,7 @@ fn binary_runs_live_over_the_pty_with_trace() {
     );
     j.assert_no_writes();
     let n = std::fs::read_dir(&caps).unwrap().count();
-    assert_eq!(n, 2, "capture and trace file");
+    assert_eq!(n, 3, "capture, trace and output file");
 }
 
 #[test]

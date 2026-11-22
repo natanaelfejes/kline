@@ -161,6 +161,14 @@ TX/RX, flushed as written, in the kline-sim replay format ([sim.md](sim.md#repla
 {"t_ms":2408,"dir":"tx","hex":"70","unix_ms":...}
 ```
 
+Next to it, `<capture>.out.txt` holds what the command printed for a human: the init lines,
+`connected:`, the chosen definition, decoded values, notes, errors and the final `done (exit N)`
+(also with `--json`, where it holds the human text of the same events; the trace stays in
+`<capture>.trace.txt`). No `script` session is needed to keep the decoded values. The
+`capture` JSON event names it in `out`.
+
+In human mode every command ends with `done (exit N)` on stderr (not with `--json`).
+
 `t_ms` is ms since the port was opened. `kline replay` decodes it; kline-sim's `ReplayEcu` plays it
 back as the ECU (`crates/kline-cli/tests/replay.rs` replays a CLI capture and gets the same
 decoded values).
