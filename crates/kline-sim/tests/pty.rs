@@ -17,10 +17,42 @@ use kline_sim::timing::Tolerance;
 
 /// What a CLI transport for the simulator looks like: data through the serial port,
 /// break / DTR / loopback through the control socket.
+///
+/// Sleeps that follow a break edge are paced from the previous sleep's deadline, not from
+/// "now", as `kline_host`'s `KklLine` does. The simulator samples each 5-baud bit in its middle
+/// on a 200 ms grid from the start bit, so a plain `thread::sleep` per bit lets the lateness add
+/// up: on the GitHub macOS runner (macos-26-arm64, VirtualMac2,1) `thread::sleep(200 ms)` woke
+/// up to 83 ms late, the edges drifted by more than half a bit from the second data bit on, the
+/// simulator decoded the address 0x7A as 0xF4 (each bit sampled one bit late), did not accept it
+/// and sent no keywords (`NoKeywords { received: [] }`). Paced, an edge is late only by its own
+/// sleep, and the short chunks plus the spin tail keep that to a few ms.
 struct SerialLine {
     port: Box<dyn serialport::SerialPort>,
     ctl: ControlClient,
     t0: Instant,
+    /// Deadline of the last sleep since a break edge; `None` after DTR, flush, write or read.
+    pace: Option<Instant>,
+}
+
+/// Longest single OS sleep (ours): a short sleep wakes up less late than a long one on the
+/// GitHub macOS runner (1 ms: median 6.6 ms, max 7.6 ms; 200 ms: up to 83 ms late).
+const SLEEP_CHUNK: Duration = Duration::from_millis(5);
+/// Busy-wait the last this much of every sleep (ours: above the 1 ms sleep's 7.6 ms worst
+/// wake-up there).
+const SPIN_TAIL: Duration = Duration::from_millis(8);
+
+/// OS-sleep in short chunks until [`SPIN_TAIL`] before `target`, then spin.
+fn sleep_until(target: Instant) {
+    loop {
+        let left = target.saturating_duration_since(Instant::now());
+        if left <= SPIN_TAIL {
+            break;
+        }
+        std::thread::sleep((left - SPIN_TAIL).min(SLEEP_CHUNK));
+    }
+    while Instant::now() < target {
+        std::hint::spin_loop();
+    }
 }
 
 impl Line for SerialLine {
@@ -28,6 +60,8 @@ impl Line for SerialLine {
         self.t0.elapsed().as_millis() as u64
     }
     fn set_dtr(&mut self, on: bool) -> io::Result<()> {
+        // Every init starts with a DTR edge; pacing starts after it (as in KklLine).
+        self.pace = None;
         // TIOCMSET fails on a pty (ENOTTY); the control socket carries DTR.
         self.ctl.set_dtr(on)
     }
@@ -44,20 +78,25 @@ impl Line for SerialLine {
         self.ctl.loopback_seen()
     }
     fn sleep_ms(&mut self, ms: u32) {
-        std::thread::sleep(Duration::from_millis(u64::from(ms)));
+        let d = Duration::from_millis(u64::from(ms));
+        let target = self.pace.unwrap_or_else(Instant::now) + d;
+        sleep_until(target);
+        self.pace = Some(target);
     }
     fn flush_rx(&mut self) -> io::Result<()> {
+        self.pace = None;
         self.port
             .clear(serialport::ClearBuffer::Input)
             .map_err(io::Error::other)
     }
     fn write(&mut self, bytes: &[u8], inter_byte_ms: u32) -> io::Result<()> {
+        self.pace = None;
         if inter_byte_ms == 0 {
             self.port.write_all(bytes)?;
         } else {
             for (i, b) in bytes.iter().enumerate() {
                 if i > 0 {
-                    self.sleep_ms(inter_byte_ms);
+                    sleep_until(Instant::now() + Duration::from_millis(u64::from(inter_byte_ms)));
                 }
                 self.port.write_all(std::slice::from_ref(b))?;
             }
@@ -65,6 +104,7 @@ impl Line for SerialLine {
         self.port.flush()
     }
     fn read(&mut self, count: usize, timeout_ms: u32) -> io::Result<Vec<u8>> {
+        self.pace = None;
         let deadline = Instant::now() + Duration::from_millis(u64::from(timeout_ms));
         let mut out = vec![0u8; count];
         let mut n = 0;
@@ -121,10 +161,18 @@ fn pty_smoke_session() {
         port,
         ctl: ControlClient::connect(sim.control_path()).unwrap(),
         t0: Instant::now(),
+        pace: None,
     };
     let mut d = Driver::new(line);
     let cfg = cfg(&sirius());
-    let init = d.init(&cfg).unwrap();
+    // On failure show what the simulator decoded (e.g. "5-baud address 0xf4 not accepted").
+    let init = d.init(&cfg).unwrap_or_else(|e| {
+        panic!(
+            "init failed: {e:?}; simulator notes {:?}, violations {:?}",
+            journal.notes(),
+            journal.violations()
+        )
+    });
     assert_eq!(init.keywords(), (0xD0, 0x8F));
     assert_eq!(init.address_complement(), Some(0x85));
     let mut s = d.session(init);

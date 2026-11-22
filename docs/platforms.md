@@ -146,6 +146,12 @@ why the tail is adaptive. A spin cannot help when the thread itself is preempted
 a VM whose vCPU is descheduled): run `selftest` and close heavy programs if it says
 `TOO IMPRECISE`.
 
+The GitHub macOS runner (macos-26-arm64, macOS 26.7.2, `VirtualMac2,1`, 2026-11-22) is much
+coarser than the hosts above: in the simulator's pty test `thread::sleep(1 ms)` took 1.1-7.6 ms
+(median 5.8-6.6 ms) and `thread::sleep(200 ms)` 203-276 ms, one 300 ms sleep 375 ms. A tester
+that does not pace its 5-baud edges from deadlines fails the init there (docs/sim.md "pty
+transport"). This is CI only; no real cable is attached to that runner.
+
 Break edges on the Windows VM (FT232R on the Mac's USB, attached to Parallels "Windows 11"
 ARM64 as COM1; 2026-11-22). `kline selftest` (40 edges, 10 ms half-period) gave max deviation
 0.55-5.74 ms over 8 runs (one outlier 63.7 ms with a 47 ms `set_break`), so TiniL (+-1 ms) is

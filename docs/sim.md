@@ -92,6 +92,20 @@ a timing guess on the byte stream: a 5-baud init on the real cable produces no b
 only break edges, so there is nothing in-band to detect. Wall-clock jitter of a few ms is
 normal on the pty; use lenient tolerance there.
 
+Pace the break edges from deadlines, not with one plain sleep per bit. The bus samples each
+5-baud bit in its middle on a 200 ms grid counted from the start bit, so lateness that adds up
+over the bits shifts the decoded address. On the GitHub macOS runner (macos-26-arm64, a
+`VirtualMac2,1` VM, 2026-11-22) `thread::sleep(200 ms)` woke up to 83 ms late and
+`thread::sleep(1 ms)` took 6.6 ms median; a tester that slept 200 ms after each edge drifted by
+more than half a bit from the second data bit on, the bus decoded 0x7A as 0xF4, the ECU did not
+accept it and sent no keywords (the init failed with `NoKeywords { received: [] }`). `SerialLine`
+in `tests/pty.rs` therefore sleeps each bit until the previous deadline plus 200 ms, in OS sleeps
+of at most 5 ms and a busy-waited 8 ms tail, so an edge is late only by its own sleep.
+`kline_host`'s `KklLine` also paces from deadlines, with its adaptive spin tail (docs/platforms.md
+"Timing precision"); its pty test in kline-cli passed on the same runner. When an init
+over the pty fails, the test prints the simulator's notes, which name the address the bus
+decoded.
+
 ## Replay log (JSONL)
 
 One object per line: `{"t_ms":300,"dir":"tx","kind":"five_baud","hex":"7A"}`.
