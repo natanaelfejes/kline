@@ -4,6 +4,7 @@
      protocol facts from docs/protocol.md; names, positions and scaling are invented. -->
 <Target Name="CLI fixture Sirius" xmlns="http://www-diag.renault.com/2002/ECU">
 <Function Name="Injection" Address="122"/>
+<Failures Name="Flags" Id="1"/>
 <K BaudRate="10400">
 <KWP Multipoint="1">
 <ISO8><KW1 Value="208"/><KW2 Value="143" Timeout="300"/><FirstRequest Delay="20"/></ISO8>
@@ -73,9 +74,18 @@
 <Sent><SentBytes>3BD01000</SentBytes><DataItem Name="Config value" FirstByte="4"/></Sent>
 <Received MinBytes="2"></Received>
 </Request>
+<Request Name="Reinit flags de pannes">
+<Sent><SentBytes>140000</SentBytes></Sent>
+<Received MinBytes="1"></Received>
+</Request>
 <Request Name="Reset learning">
 <Sent><SentBytes>11FF</SentBytes></Sent>
 <Received MinBytes="1"></Received>
 </Request>
 </Requests>
+<Devices>
+<Device Name="Injector 1"><DeviceData Name="Injector 1 circuit" FailureFlag="1"/><DeviceData Name="Engine speed" FailureFlag="0"/></Device>
+<Device Name="Coolant sensor"><DeviceData Name="Coolant sensor circuit" FailureFlag="1"/></Device>
+<Device Name="Knock sensor"><DeviceData Name="Knock sensor circuit" FailureFlag="1"/></Device>
+</Devices>
 </Target>

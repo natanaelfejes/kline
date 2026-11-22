@@ -20,6 +20,7 @@ mod addressing;
 mod codec;
 mod ddt2000;
 mod error;
+mod failures;
 mod model;
 mod parse;
 mod report;
@@ -28,5 +29,9 @@ mod xml;
 pub use addressing::{AddrFunction, AddrProtocol, Addressing, LocalizedName};
 pub use codec::{DecodedItem, Raw, Value};
 pub use error::SpecError;
+pub use failures::{
+    ActiveFault, ClearChoice, ClearPlan, ClearSource, DDT2000_CLEAR_FALLBACK, DDT2000_CLEAR_NAMES,
+    DDT2000_CLEAR_PREFIX,
+};
 pub use model::*;
 pub use report::{ParseReport, ParseWarning};

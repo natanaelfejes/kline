@@ -57,7 +57,8 @@ is refused: "CAN not supported by a KKL cable yet" (exit 8).
 | `ident` | `21 80` (KWP; else Tier 0 requests named like "ident"), chooses the definition | first candidate whose declared key bytes match and whose identification requests all decode with the checked decoder; `ambiguous: true` when several fit. AutoIdent matching is not implemented |
 | `read REQ` | one request (definition name or hex), decoded | Tier 0 only; a non-read is refused before the port is opened (exit 7) and again by clio-core |
 | `live --frames A,B --rate HZ [--count N]` | all frames once per cycle, `HZ` cycles/s | TesterPresent when idle >= TesterPresent delay; Ctrl-C stops cleanly; 3 failed cycles in a row is exit 5 |
-| `dtc` | reads the Tier 0 frames whose name says `panne`/`defaut`/`fault`/`dtc`, lists flags whose raw value is not 0 | |
+| `dtc` | `<Failures Id="1">` (Sirius 32): reads the Tier 0 frames that carry `FailureFlag="1"` items of `<Devices>` and lists the set flags with their device (DDT2000 DiagFailures); otherwise the frames whose name says `panne`/`defaut`/`fault`/`dtc`, non-zero items. Ends with the clear plan | never clears |
+| `clear-dtc [--ddt2000-clear]` | Tier 1 clear: prints the exact bytes (default: `ClearDiagnosticInformation.*` if the definition has one, else the definition's own `14 ..` request; Sirius `14 00 00`) and what DDT2000's global clear would send (`14 FF 00` for the Sirius), then the `exec` approval | `clio` only; `--ddt2000-clear` sends DDT2000's choice |
 | `scan --range 21:B0-C5 [--interval MS]` | clio-core `ScanPlan`: `21`/`1A` only, >= 200 ms apart, stops after 3 missing replies or a security NRC (exit 12) | `clio` only; not offered by clio-agent |
 | `risk REQ` | tier and `RiskInfo` of a request, nothing sent | exit 7 when forbidden or refused by the name guard |
 | `exec REQ` | ONE non-read request | `clio` only, see below |

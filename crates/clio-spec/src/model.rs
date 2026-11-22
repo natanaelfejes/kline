@@ -21,6 +21,10 @@ impl HexBytes {
     }
 }
 
+pub(crate) fn ser_hex<S: Serializer>(b: &[u8], s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&crate::codec::to_hex_upper(b))
+}
+
 impl Serialize for HexBytes {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(&self.to_hex())

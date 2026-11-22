@@ -712,3 +712,94 @@ fn human_output_matches_the_quickstart() {
     }
     assert!(r.stderr.contains("capture: "), "{}", r.stderr);
 }
+
+#[test]
+fn dtc_uses_failure_flags_and_reports_the_clear_plan() {
+    let (r, j) = run(
+        sirius_ecu(),
+        &["--json", "dtc", "--xml", &xml("sirius_cli.xml")],
+    );
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    let d = &r.event("dtc")[0];
+    assert_eq!(d["active"][0]["devices"][0], "Injector 1");
+    let s = &r.event("dtc_summary")[0];
+    assert!(
+        s["method"].as_str().unwrap().starts_with("Failures Id=1"),
+        "{s}"
+    );
+    assert_eq!(s["clear_plan"]["ours"]["payload"], "140000");
+    assert_eq!(s["clear_plan"]["ddt2000"]["payload"], "14FF00");
+    assert_eq!(s["clear_plan"]["differs"], true);
+    j.assert_no_writes();
+}
+
+#[test]
+fn clear_dtc_sends_the_definition_request_only_after_approval() {
+    let (r, j) = run_opts(
+        sirius_ecu(),
+        &["clear-dtc", "--xml", &xml("sirius_cli.xml")],
+        Opts {
+            interactive: true,
+            human: Human::TypesShownCode,
+        },
+    );
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("will send: 14 00 00"), "{}", r.stdout);
+    assert!(
+        r.stdout
+            .contains("DDT2000's global clear would send 14 FF 00"),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        r.screen.contains("APPROVAL REQUIRED: service (tier 1)"),
+        "{}",
+        r.screen
+    );
+    let w = j.writes();
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert_eq!(w[0].payload, vec![0x14, 0x00, 0x00]);
+}
+
+#[test]
+fn clear_dtc_ddt2000_mode_and_refusals() {
+    let (r, j) = run_opts(
+        sirius_ecu(),
+        &[
+            "clear-dtc",
+            "--ddt2000-clear",
+            "--xml",
+            &xml("sirius_cli.xml"),
+        ],
+        Opts {
+            interactive: true,
+            human: Human::TypesShownCode,
+        },
+    );
+    // The simulated ECU only knows its definition's 14 00 00 and answers 7F 14 12 (exit 6).
+    assert_eq!(r.code, 6, "{}\n{}", r.stdout, r.stderr);
+    assert_eq!(j.writes()[0].payload, vec![0x14, 0xFF, 0x00]);
+    // Never with --json, never without a TTY, nothing sent.
+    let (r, j) = run(
+        sirius_ecu(),
+        &["--json", "clear-dtc", "--xml", &xml("sirius_cli.xml")],
+    );
+    assert_ne!(r.code, 0);
+    j.assert_no_writes();
+    let (r, j) = run(
+        sirius_ecu(),
+        &["clear-dtc", "--xml", &xml("sirius_cli.xml")],
+    );
+    assert_ne!(r.code, 0);
+    j.assert_no_writes();
+    let (r, j) = run_opts(
+        sirius_ecu(),
+        &["clear-dtc", "--xml", &xml("sirius_cli.xml")],
+        Opts {
+            interactive: true,
+            human: Human::TypesWrongCode,
+        },
+    );
+    assert_eq!(r.code, 9, "{}", r.stdout);
+    j.assert_no_writes();
+}

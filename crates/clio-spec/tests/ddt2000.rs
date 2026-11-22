@@ -173,3 +173,81 @@ fn failures_and_devices_are_parsed() {
     assert!(e.devices[0].data[0].failure_flag);
     assert!(!e.devices[0].data[1].failure_flag);
 }
+
+fn flags_frame(a: bool, b: bool) -> Vec<u8> {
+    vec![0x61, 0x02, u8::from(a) | (u8::from(b) << 1)]
+}
+
+#[test]
+fn failure_flags_are_read_and_decoded_by_device() {
+    let e = ecu();
+    let reqs: Vec<&str> = e
+        .failure_flag_requests()
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
+    assert_eq!(reqs, ["Flags"]);
+    let r = e.request("Flags").unwrap();
+    let items = r.decode_checked(&e, &flags_frame(false, true)).unwrap();
+    let active = e.active_faults(&r.name, &items);
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].item, "flag b");
+    assert_eq!(active[0].devices, ["Sensor B"]);
+    assert!(e
+        .active_faults(
+            &r.name,
+            &r.decode_checked(&e, &flags_frame(false, false)).unwrap()
+        )
+        .is_empty());
+}
+
+#[test]
+fn clear_plan_prefers_the_definition_and_reports_ddt2000_fallback() {
+    let e = ecu();
+    let plan = e.clear_plan();
+    assert_eq!(plan.ours.payload, [0x14, 0x00, 0x00]);
+    assert_eq!(
+        plan.ours.source,
+        clio_spec::ClearSource::DefinitionRequest {
+            name: "Reinit flags".into()
+        }
+    );
+    assert_eq!(plan.ddt2000.payload, clio_spec::DDT2000_CLEAR_FALLBACK);
+    assert!(plan.differs());
+    // A ClearDiagnosticInformation.* request is what both pick.
+    let xml = br#"<Target Name="t" xmlns="http://www-diag.renault.com/2002/ECU"><Requests>
+<Request Name="Clear"><Sent><SentBytes>140000</SentBytes></Sent><Received MinBytes="1"/></Request>
+<Request Name="ClearDiagnosticInformation.All"><Sent><SentBytes>14FFFF</SentBytes></Sent><Received MinBytes="1"/></Request>
+</Requests></Target>"#;
+    let p = EcuDef::from_xml_bytes(xml).unwrap().clear_plan();
+    assert_eq!(
+        (p.ours.payload.clone(), p.ddt2000.payload.clone()),
+        (vec![0x14, 0xFF, 0xFF], vec![0x14, 0xFF, 0xFF])
+    );
+    assert!(!p.differs());
+}
+
+#[test]
+fn real_files_clear_plan_and_flag_frames() {
+    let Some(sirius) =
+        common::ddt_ecu_as("SIRIUS32___EMS3132___Soft_RE1_maj.xml", Semantics::Ddt2000)
+    else {
+        return;
+    };
+    let p = sirius.clear_plan();
+    assert_eq!(p.ours.payload, [0x14, 0x00, 0x00]); // "Reinit flags de pannes"
+    assert_eq!(p.ddt2000.payload, [0x14, 0xFF, 0x00]); // no ClearDiagnosticInformation.*
+    assert!(sirius.failures.as_ref().unwrap().is_flags());
+    assert_eq!(sirius.devices.len(), 42); // grep -c '<Device '
+    assert_eq!(sirius.failure_flag_items().len(), 206); // grep -c 'FailureFlag="1"' (all distinct)
+    assert!(!sirius.failure_flag_requests().is_empty());
+    let Some(bmt) = common::ddt_ecu_as("BMT_X65_ph1_p.xml", Semantics::Ddt2000) else {
+        return;
+    };
+    let p = bmt.clear_plan();
+    assert_eq!(
+        (p.ours.payload.as_slice(), p.differs()),
+        (&[0x14, 0xFF, 0x00][..], false)
+    );
+    assert!(bmt.failure_flag_requests().is_empty()); // Failures Id 0
+}

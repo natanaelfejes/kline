@@ -694,16 +694,36 @@ pub fn live(ctx: &mut Ctx, a: &LiveArgs) -> Result<(), CliError> {
     })
 }
 
+/// `dtc`: for `<Failures Id="1">` the frames carrying `FailureFlag="1"` items and the set flags
+/// with their devices (DDT2000 DiagFailures "Reading flags"); otherwise the Tier 0 requests named
+/// like faults and every non-zero item. Ends with the clear plan (what `clio clear-dtc` would send
+/// and what DDT2000 would send); nothing is cleared here.
 pub fn dtc(ctx: &mut Ctx, a: &LinkArgs) -> Result<(), CliError> {
     with_session(ctx, a, "dtc", |ctx, o| {
         let t = o.target();
-        let reqs: Vec<(String, Vec<u8>)> = defs::dtc_requests(o.ecu.def(), &t)
-            .iter()
-            .map(|r| (r.name.clone(), r.sent_bytes.0.clone()))
+        let def = o.ecu.def();
+        let flag_reqs: Vec<&clio_spec::Request> = def
+            .failure_flag_requests()
+            .into_iter()
+            .filter(|r| safety::classify(&t, &r.sent_bytes.0) == Ok(Tier::Read))
             .collect();
+        let method = if flag_reqs.is_empty() {
+            "requests named like faults; non-zero items"
+        } else {
+            "Failures Id=1: frames with FailureFlag items; non-zero flags (DDT2000 DiagFailures)"
+        };
+        let reqs: Vec<(String, Vec<u8>)> = if flag_reqs.is_empty() {
+            defs::dtc_requests(def, &t)
+        } else {
+            flag_reqs
+        }
+        .iter()
+        .map(|r| (r.name.clone(), r.sent_bytes.0.clone()))
+        .collect();
+        let by_flags = method.starts_with("Failures");
         if reqs.is_empty() {
             return Err(CliError::definition(
-                "the definition has no fault-flag read (no Tier 0 request named panne/defaut/fault/dtc)",
+                "the definition has no fault-flag read (no Failures/Devices flags, no Tier 0 request named panne/defaut/fault/dtc)",
             ));
         }
         let mut total = 0usize;
@@ -717,8 +737,14 @@ pub fn dtc(ctx: &mut Ctx, a: &LinkArgs) -> Result<(), CliError> {
             let reply = link::positive(&r)?.to_vec();
             let decoded = defs::decode_reply(o.ecu.def(), &p, &reply);
             let mut active = Vec::new();
-            for (_, d) in &decoded {
-                if let Ok(items) = d {
+            for (rname, d) in &decoded {
+                let Ok(items) = d else { continue };
+                if by_flags {
+                    for f in o.ecu.def().active_faults(rname, items) {
+                        active.push(json!({"name": f.item, "devices": f.devices,
+                                           "display": f.display, "raw": f.raw}));
+                    }
+                } else {
                     for i in items {
                         if i.raw_int().is_some_and(|v| v != 0) {
                             active.push(
@@ -736,9 +762,20 @@ pub fn dtc(ctx: &mut Ctx, a: &LinkArgs) -> Result<(), CliError> {
                 active
                     .iter()
                     .map(|a| format!(
-                        "\n    {} = {}",
+                        "\n    {} = {}{}",
                         a["name"].as_str().unwrap_or(""),
-                        a["display"].as_str().unwrap_or("")
+                        a["display"].as_str().unwrap_or(""),
+                        a["devices"]
+                            .as_array()
+                            .filter(|d| !d.is_empty())
+                            .map(|d| format!(
+                                "  [{}]",
+                                d.iter()
+                                    .filter_map(|x| x.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ))
+                            .unwrap_or_default()
                     ))
                     .collect::<String>()
             );
@@ -748,12 +785,50 @@ pub fn dtc(ctx: &mut Ctx, a: &LinkArgs) -> Result<(), CliError> {
                 human,
             );
         }
+        let plan = o.ecu.def().clear_plan();
         ctx.out.emit(
-            json!({"event": "dtc_summary", "active": total}),
-            format!("{total} fault flag(s) set"),
+            json!({"event": "dtc_summary", "active": total, "method": method,
+                   "clear_plan": clear_plan_json(&plan)}),
+            format!("{total} fault flag(s) set\n{}", clear_plan_human(&plan)),
         );
         Ok(())
     })
+}
+
+/// JSON of a [`clio_spec::ClearPlan`].
+pub fn clear_plan_json(p: &clio_spec::ClearPlan) -> Json {
+    json!({"ours": {"payload": hex(&p.ours.payload), "source": p.ours.source},
+           "ddt2000": {"payload": hex(&p.ddt2000.payload), "source": p.ddt2000.source},
+           "differs": p.differs(), "tier": "service (tier 1)"})
+}
+
+fn clear_source_text(s: &clio_spec::ClearSource) -> String {
+    match s {
+        clio_spec::ClearSource::NamedRequest { name } => format!("definition request {name:?}"),
+        clio_spec::ClearSource::DefinitionRequest { name } => {
+            format!("the definition's own clear request {name:?}")
+        }
+        clio_spec::ClearSource::Ddt2000Fallback => "DDT2000's built-in fallback".into(),
+    }
+}
+
+/// Human text of a clear plan: the bytes `clio clear-dtc` sends and what DDT2000 would send.
+pub fn clear_plan_human(p: &clio_spec::ClearPlan) -> String {
+    let mut s = format!(
+        "clear (Tier 1, human approval): clio clear-dtc would send {} ({})",
+        hex_sp(&p.ours.payload),
+        clear_source_text(&p.ours.source)
+    );
+    if p.differs() {
+        s.push_str(&format!(
+            "\nDDT2000's global clear would send {} instead ({}; no ClearDiagnosticInformation.* request in the definition); use --ddt2000-clear for that",
+            hex_sp(&p.ddt2000.payload),
+            clear_source_text(&p.ddt2000.source)
+        ));
+    } else {
+        s.push_str("; DDT2000 sends the same bytes");
+    }
+    s
 }
 
 pub fn parse_range(s: &str) -> Result<(ScanService, u8, u8), CliError> {

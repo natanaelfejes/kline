@@ -58,8 +58,23 @@ pub enum Command {
     Risk(RiskArgs),
     /// Send ONE non-read request after showing its risk and a typed confirmation code (TTY only).
     Exec(ExecArgs),
+    /// Clear the fault memory (Tier 1): shows the exact bytes, then runs like `exec` (TTY only).
+    ClearDtc(ClearArgs),
     /// Decode a capture (JSONL) offline.
     Replay(ReplayArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ClearArgs {
+    #[command(flatten)]
+    pub link: LinkArgs,
+    /// Send what DDT2000's global clear would send (`ClearDiagnosticInformation.*`, else
+    /// `14 FF 00`) instead of the definition's own clear request.
+    #[arg(long)]
+    pub ddt2000_clear: bool,
+    /// Seconds to wait for the confirmation code.
+    #[arg(long, default_value_t = 120)]
+    pub confirm_timeout: u64,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -179,9 +194,42 @@ pub fn run(cli: Cli, env: &mut CliEnv) -> u8 {
         Command::Scan(a) => cmd::scan(&mut ctx, a),
         Command::Risk(a) => cmd::risk(&mut ctx, a),
         Command::Exec(a) => exec(&mut ctx, a, interactive, tty),
+        Command::ClearDtc(a) => clear_dtc(&mut ctx, a, interactive, tty),
         Command::Replay(a) => cmd::replay(&mut ctx, a),
     };
     ctx.finish(r)
+}
+
+/// `clio clear-dtc`: pick the clear request (the author's DDT2000 behaviour notes "Failures"), show its bytes
+/// and DDT2000's choice, then the normal Tier 1 approval of `exec`.
+pub fn clear_dtc(
+    ctx: &mut Ctx,
+    a: &ClearArgs,
+    interactive: bool,
+    tty: &mut TtyOpener,
+) -> Result<(), CliError> {
+    let ecu = Ecu::resolve(&a.link.ecu, &ctx.g.defs_dir())?;
+    let plan = ecu.def().clear_plan();
+    let choice = if a.ddt2000_clear {
+        &plan.ddt2000
+    } else {
+        &plan.ours
+    };
+    ctx.out.emit(
+        json!({"event": "clear_plan", "plan": cmd::clear_plan_json(&plan),
+               "chosen": hex(&choice.payload)}),
+        format!(
+            "{}\nwill send: {}",
+            cmd::clear_plan_human(&plan),
+            hex_sp(&choice.payload)
+        ),
+    );
+    let e = ExecArgs {
+        link: a.link.clone(),
+        request: hex(&choice.payload),
+        confirm_timeout: a.confirm_timeout,
+    };
+    exec(ctx, &e, interactive, tty)
 }
 
 /// `clio exec`: one human-approved non-read request.
