@@ -114,6 +114,7 @@ pub fn warning_name(w: Warning) -> &'static str {
         Warning::MayLeaveProgrammingSession => "MAY_LEAVE_PROGRAMMING_SESSION",
         Warning::SecurityAccess => "SECURITY_ACCESS",
         Warning::ChangesRemoteType => "CHANGES_REMOTE_TYPE",
+        Warning::SafetySystem => "SAFETY_SYSTEM",
     }
 }
 

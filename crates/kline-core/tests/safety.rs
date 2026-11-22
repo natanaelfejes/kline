@@ -573,3 +573,34 @@ fn bmt_trf_remote_type_is_tier2_with_specific_risk() {
     assert_eq!(tier(&BMT, &[0x3B, 0xD2, 0x03, 0x00]), Tier::ConfigWrite);
     assert_eq!(tier(&BMT, &[0x3B, 0xD2, 0x03, 0x01]), Tier::ConfigWrite);
 }
+
+/// Airbag ECU (X65 addressing 0x2C): writes and tests stay allowed with approval (owner:
+/// nothing forbidden except the immobilizer), but every non-read carries a safety-system
+/// warning (step 7, HIDDEN.md section 3: 3B D0 / 3B E0 airbag config writes).
+#[test]
+fn airbag_non_reads_carry_safety_system_warning() {
+    const AIRBAG: Target = Target {
+        protocol: Protocol::Kwp,
+        ecu_address: 0x2C,
+    };
+    for p in [
+        &[0x3B, 0xD0, 0x01][..],
+        &[0x3B, 0xE0, 0x00],
+        &[0x14, 0xFF, 0x00],
+        &[0x30, 0x80, 0x00, 0x01],
+        &[0x31, 0x81],
+    ] {
+        let r = assess(&AIRBAG, p).unwrap_or_else(|d| panic!("{p:02X?}: {d}"));
+        assert_ne!(r.tier, Tier::Read, "{p:02X?}");
+        assert!(
+            r.warnings.contains(&Warning::SafetySystem),
+            "{p:02X?} {r:?}"
+        );
+        assert!(r.what_can_go_wrong.contains("AIRBAG"), "{p:02X?} {r:?}");
+    }
+    // Reads are untouched; other ECUs get no airbag warning.
+    let read = assess(&AIRBAG, &[0x21, 0x80]).unwrap();
+    assert!(!read.warnings.contains(&Warning::SafetySystem));
+    let sirius = assess(&SIRIUS, &[0x3B, 0xD1, 0x10]).unwrap();
+    assert!(!sirius.warnings.contains(&Warning::SafetySystem));
+}

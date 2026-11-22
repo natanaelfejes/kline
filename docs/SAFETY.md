@@ -42,6 +42,9 @@ Default-deny, decided on exact payload bytes and the target of the init that act
   warnings (`MayBrickEcu`, `MayLeaveProgrammingSession`, `SecurityAccess`), not forbidden
   (owner decision 2026-11-22, final; on the BMT see rule 3). BMT memory read `23` stays Expert
   (owner decision, step 7).
+- **Airbag ECU.** Requests to the airbag ECU (`0x2C` in the X65 addressing) follow the normal
+  tiers, but every non-read carries the `SafetySystem` warning and a fixed airbag risk text
+  (disabled airbags or pretensioners, airbag lamp, squib on an output test).
 - **Protocol frames.** ISO8 `36` (keep-alive) and `3F` (stop), KWP `81`/`82`: sent only by the
   init machines and `Session::tester_present`/`stop`, never as requests.
 
@@ -52,7 +55,7 @@ In any tier, including expert. This is the only forbidden class (owner-approved)
 - **On a BMT/UCH/decoder** (address `0x26`/`0xA6`, or any ECU whose loaded definition is a
   BMT/UCH/decoder: `kline_core::spec::definition_guard`): `3D`, `38`-`3A`, `2C`;
   download/upload/transfer `34`-`37` and flash erase/checksum `31`/`32`/`33` `81`/`82` (they
-  overwrite or erase the key-code EEPROM, owner decision step 7); `30`/`31`/`32`/`33` C0-C9
+  overwrite or erase the key-code EEPROM); `30`/`31`/`32`/`33` C0-C9
   (except exact `31C7000000`/`31C8000000`) or with the immobilizer actuator outputs `A6`
   "Ligne Transpondeur", `AB` "Led Verlog", `AC` "Ligne ECM" (both BMT definitions, step 7);
   any `2E`/`2F`; any `3B` except `3B D2` and `3B D2` index 2 (AP1CLE); `21A4` with extra

@@ -63,12 +63,12 @@ pub const BMT_ACTUATOR_OUTPUTS: core::ops::RangeInclusive<u8> = 0xA0..=0xB3;
 /// step 7 guard review).
 pub const BMT_IMMOBILIZER_OUTPUTS: [u8; 3] = [0xA6, 0xAB, 0xAC];
 /// Download / upload / transfer services `34`-`37`: on a BMT/UCH/decoder they can overwrite or
-/// dump the EEPROM that holds the key codes, so they are forbidden there (owner decision step 7,
+/// dump the EEPROM that holds the key codes, so they are forbidden there (SAFETY.md rule 3,
 /// same reason as [`BMT_MEMORY_SERVICES`]). On other ECUs they stay Expert.
 pub const BMT_TRANSFER_SERVICES: core::ops::RangeInclusive<u8> = 0x34..=0x37;
 /// Flash erase (`81`) and flash checksum (`82`) routine numbers of the KWP reprogramming
 /// sequence (`31 81 ..` / `31 82 ..`, also via `32`/`33`): forbidden on a BMT/UCH/decoder
-/// (owner decision step 7: they erase the key-code memory there); Expert with
+/// (SAFETY.md rule 3: they erase the key-code memory there); Expert with
 /// [`Warning::MayBrickEcu`] elsewhere.
 pub const FLASH_ROUTINES: [u8; 2] = [0x81, 0x82];
 /// BMT `3B D2 index value` configuration write and the read that backs it up
@@ -246,6 +246,9 @@ pub enum Warning {
     /// Changes the remote-control type (BMT config TRF: RF or infrared); a remote of the other
     /// type stops working.
     ChangesRemoteType,
+    /// Airbag / restraint ECU (safety system): a wrong write or test can disable the airbags
+    /// or pretensioners or light the airbag lamp.
+    SafetySystem,
 }
 
 /// What a non-read request does, shown to the human before approval and quoted by the
@@ -591,7 +594,44 @@ pub fn assess_in(
     payload: &[u8],
 ) -> Result<RiskInfo, Denied> {
     let tier = tier_of_in(guard, target, payload)?;
-    Ok(risk_info(is_immobilizer_ecu(guard, target), payload, tier))
+    let info = risk_info(is_immobilizer_ecu(guard, target), payload, tier);
+    Ok(
+        if target.ecu_address == AIRBAG_ADDRESS && tier != Tier::Read {
+            airbag_risk(info)
+        } else {
+            info
+        },
+    )
+}
+
+/// Airbag ECU address in the X65 addressing (`vehicles/x65/addressing.xml`: 0x2C "Airbag").
+/// Not forbidden (owner decision 2026-11-22: only the immobilizer is), but every non-read is
+/// marked as a safety-system change.
+pub const AIRBAG_ADDRESS: u8 = 0x2C;
+
+fn airbag_risk(info: RiskInfo) -> RiskInfo {
+    const WHAT: &str = "AIRBAG ECU (safety system): a wrong write, test or clear can disable the airbags or seat-belt pretensioners, light the airbag lamp, or on an output test fire a squib";
+    let warnings: &'static [Warning] = match info.tier {
+        Tier::Read => &[],
+        Tier::Service => &[Warning::SafetySystem, Warning::MovesActuator],
+        Tier::ConfigWrite => &[Warning::SafetySystem, Warning::EepromWrite],
+        Tier::Expert => &[
+            Warning::SafetySystem,
+            Warning::UnknownEffect,
+            Warning::MayBrickEcu,
+        ],
+    };
+    RiskInfo {
+        what_can_go_wrong: WHAT,
+        reversible: false,
+        prerequisites: &[
+            "nobody in the car, ignition on, engine off",
+            "read and save the airbag fault frames first",
+            "after any change, check that the airbag lamp goes out at the next ignition on",
+        ],
+        warnings,
+        ..info
+    }
 }
 
 const NONE: &[&str] = &[];
