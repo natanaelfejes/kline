@@ -83,7 +83,7 @@ These options apply to every command that talks to an ECU, and to `risk`, `prepa
 | Option | Meaning |
 |---|---|
 | `--ecu sirius` | `SIRIUS32___EMS3132___Soft_RE1_maj.xml` (0x7A) |
-| `--ecu bmt` | `BMT_X65_ph1_p.xml` (0x26); `BMT_SAGEM.xml` is an extra candidate if present: the definition choice stays unresolved ([Choosing the BMT definition](#choosing-the-bmt-definition)) |
+| `--ecu bmt` | `BMT_X65_ph1_p.xml` (0x26); `BMT_SAGEM.xml` is an extra candidate if present: the definition choice stays unresolved, also when only ph1_p is present, so config writes are refused ([Choosing the BMT definition](#choosing-the-bmt-definition)) |
 | `--ecu bmt-ph1p` | `BMT_X65_ph1_p.xml` only: the BMT definition choice made (config writes need one) |
 | `--ecu bmt-sagem` | `BMT_SAGEM.xml` only |
 | `--xml PATH` | any DDT2000 ECU definition; repeat for `ident` candidates (the first one sets up the link) |
@@ -106,8 +106,9 @@ The car's BMT (0x26) has two DDT2000 definitions, `BMT_X65_ph1_p.xml` and `BMT_S
 `--ecu bmt` both are loaded: `ident` says `AMBIGUOUS` and lists the bits in which they differ,
 and `read`/`live` print `definition choice unresolved: ...; values below decoded with ...`
 plus both decodings of every item that differs. That is fine for reads. A config write
-(`exec 3B D2 ..`) is refused (exit 7) until one definition is named: `--ecu bmt-ph1p`,
-`--ecu bmt-sagem` or `--xml PATH`.
+(`exec 3B D2 ..`) is refused (exit 7, before anything is sent) until one definition is named:
+`--ecu bmt-ph1p`, `--ecu bmt-sagem` or `--xml PATH`. This holds also when only one of the two
+files is in the definitions directory: `--ecu bmt` never counts as a choice.
 
 kline cannot make that choice from `21 80`, and neither could DDT2000: both files declare the
 same `21 80` layout (same items, positions and data definitions: version, calibration,

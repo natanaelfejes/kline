@@ -1628,6 +1628,52 @@ fn bmt_definition_shortcuts_resolve_an_ambiguous_config_write() {
     );
 }
 
+/// Code review M3: `--ecu bmt` leaves the definition choice unresolved even when only one BMT
+/// file is present, so a config write is refused until the definition is named.
+#[test]
+fn ecu_bmt_with_one_definition_still_refuses_a_config_write() {
+    let d = temp_dir("bmt-defs-one");
+    std::fs::copy(fixture_path("bmt_cli.xml"), d.join("BMT_X65_ph1_p.xml")).unwrap();
+    let defs = path_str(&d);
+    let exec = |ecu: &str| {
+        run_opts(
+            bmt_ecu(),
+            &["--defs", &defs, "exec", "--ecu", ecu, "3BD20501"],
+            Opts {
+                interactive: true,
+                human: Human::TypesShownCode,
+                ..Opts::default()
+            },
+        )
+    };
+    let (r, j) = exec("bmt");
+    assert_eq!(r.code, 7, "{}\n{}", r.stdout, r.stderr);
+    for needle in ["--ecu bmt-ph1p", "--ecu bmt-sagem", "--xml"] {
+        assert!(
+            r.stderr.contains(needle),
+            "missing {needle:?}: {}",
+            r.stderr
+        );
+    }
+    assert!(r.screen.is_empty(), "no approval offered: {}", r.screen);
+    j.assert_no_writes();
+    // Named explicitly: offered and sent (the fixture sim answers 7F 3B 12, exit 6).
+    let (r, j) = exec("bmt-ph1p");
+    assert_eq!(r.code, 6, "{}\n{}", r.stdout, r.stderr);
+    assert_eq!(j.writes().len(), 1);
+    // A Tier 1 request is not affected by the unresolved choice.
+    let (r, _) = run_opts(
+        bmt_ecu(),
+        &["--defs", &defs, "exec", "--ecu", "bmt", "14FF00"],
+        Opts {
+            interactive: true,
+            human: Human::TypesShownCode,
+            ..Opts::default()
+        },
+    );
+    assert_ne!(r.code, 7, "{}\n{}", r.stdout, r.stderr);
+}
+
 /// A definitions directory with bmt_cli.xml as ph1_p and bmt_cli_alt.xml as SAGEM.
 fn differing_bmt_defs() -> String {
     let d = temp_dir("bmt-defs-diff");

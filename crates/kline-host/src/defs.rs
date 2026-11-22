@@ -116,6 +116,9 @@ pub struct Ecu {
     pub defs: Vec<LoadedDef>,
     pub address_override: Option<u8>,
     pub vehicle: Option<(PathBuf, Addressing)>,
+    /// `--ecu bmt`: the owner has not named the BMT definition, whatever files were found, so
+    /// config writes are refused (docs/cli.md "Choosing the BMT definition", code review M3).
+    pub choice_unresolved: bool,
 }
 
 pub fn default_defs_dir() -> PathBuf {
@@ -165,6 +168,18 @@ pub fn missing_definition(dir: &Path, file: &str) -> CliError {
     CliError::definition(format!(
         "definition {file} not found: {state}. Fix: copy the DDT2000 XML files there once with `kline setup --defs-from DIR`, or name their folder with --defs DIR or KLINE_DDT_XML=DIR (default definitions directory: {})",
         data_dir().join("ecus").display()
+    ))
+}
+
+/// Exit 7 for a config write with `--ecu bmt`: the definition choice is the owner's.
+pub fn unresolved_choice_refusal(ecu: &Ecu) -> CliError {
+    CliError::refused(format!(
+        "config write refused: --ecu bmt leaves the BMT definition choice unresolved (loaded: {}); name the definition that matches the car with --ecu bmt-ph1p, --ecu bmt-sagem or --xml PATH (docs/cli.md \"Choosing the BMT definition\"); nothing was sent",
+        ecu.defs
+            .iter()
+            .map(|d| d.path.file_name().unwrap_or_default().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(", ")
     ))
 }
 
@@ -246,6 +261,7 @@ impl Ecu {
             defs,
             address_override: a.address,
             vehicle,
+            choice_unresolved: a.xml.is_empty() && a.ecu == Some(EcuName::Bmt),
         };
         ecu.check_kline()?;
         Ok(ecu)

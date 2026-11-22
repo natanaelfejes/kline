@@ -315,6 +315,13 @@ pub fn exec(
         }
         None => None,
     };
+    let config_write = risk.tier == Tier::ConfigWrite
+        || stop
+            .as_ref()
+            .is_some_and(|(_, r)| r.tier == Tier::ConfigWrite);
+    if config_write && ecu.choice_unresolved {
+        return Err(defs::unresolved_choice_refusal(&ecu));
+    }
     let mut prompt = (tty)().map_err(|e| {
         CliError::refused(format!("cannot open {TTY_IN} for the confirmation: {e}"))
     })?;
