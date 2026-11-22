@@ -56,6 +56,12 @@ pub const BMT_REMOTE_LEARNING: [[u8; 5]; 2] = [
 /// BMT actuator outputs for `31 out param count` (lock motors, window). Capability catalogue
 /// 9.1 / 7 #14: 0xA0..=0xB3 are the documented outputs.
 pub const BMT_ACTUATOR_OUTPUTS: core::ops::RangeInclusive<u8> = 0xA0..=0xB3;
+/// BMT actuator outputs `A0`/`A1` (door lock motors) and `A2`/`A3` (window) of `31 out param
+/// count`: a count of `FF` is permanent activation (final critique F07; record BLOCKED.md item 7,
+/// CAR-KNOWLEDGE.md: locks get 1-3 cycles).
+pub const BMT_LOCK_WINDOW_FIRST: u8 = 0xA0;
+/// Last of the lock/window outputs, see [`BMT_LOCK_WINDOW_FIRST`].
+pub const BMT_LOCK_WINDOW_LAST: u8 = 0xA3;
 /// BMT actuator outputs that drive the immobilizer line: 166 `0xA6` "Ligne Transpondeur", 171
 /// `0xAB` "Led Verlog", 172 `0xAC` "Ligne ECM" (the coded VERLOG line to the engine ECU), in the
 /// "sortie a activer" list of BMT_X65_ph1_p and BMT_SAGEM "COMMANDE DES ACTUATEURS". On the
@@ -836,11 +842,26 @@ fn risk_info(bmt: bool, payload: &[u8], tier: Tier) -> RiskInfo {
             &[Warning::ErasesRemotes],
         ),
         (Tier::Service, [0x31, 0xC8, ..]) => r(
-            "learns remote 2",
-            "remote not learned if the sequence timing is missed",
+            "learns remote 2 (slot 1 is kept: inferred from the name, NOT VERIFIED)",
+            "remote not learned if it is not pressed within the learning window (about 10 s)",
             false,
-            &["right after 31 C7 with remote 1"],
+            // Final critique F17: the pairing plan runs 31 C8 alone when remote 1 is already
+            // learned; the screen must not send the human to 31 C7 (which erases slot 1).
+            &[
+                "remote 1 already learned (31C7 earlier, or a working remote 1)",
+                "have remote 2 at hand",
+            ],
             &[],
+        ),
+        // Final critique F07: count FF on a lock motor (A0/A1) or the window (A2/A3) means
+        // permanent activation (record BLOCKED.md item 7). Still Tier 1 (owner: do not
+        // forbid), with a text that says it.
+        (Tier::Service, [0x31, BMT_LOCK_WINDOW_FIRST..=BMT_LOCK_WINDOW_LAST, _, 0xFF]) if bmt => r(
+            "drives a door lock motor or the window (byte 2) with count FF",
+            "count FF = permanent: lock/window motor may run until stopped; use 1-3; keep hands clear",
+            true,
+            &["doors and window clear", "count 1-3 instead of FF"],
+            &[Warning::MovesActuator],
         ),
         (Tier::Service, [0x31, ..]) => r(
             "drives a body output (door lock motor, window, lights) as given in byte 2",

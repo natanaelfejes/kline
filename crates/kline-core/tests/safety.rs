@@ -691,3 +691,39 @@ fn airbag_risk_keeps_the_request_warnings_and_prerequisites() {
         .warnings
         .contains(&Warning::ErasesLearnedValues));
 }
+
+/// Final critique F17: the 31 C8 approval screen must not tell the human to run 31 C7 first
+/// (the pairing plan uses 31 C8 alone when remote 1 is already learned).
+#[test]
+fn bmt_31c8_prerequisite_matches_the_pairing_plan() {
+    let r = assess(&BMT, &[0x31, 0xC8, 0x00, 0x00, 0x00]).unwrap();
+    let pre: Vec<&str> = r.prerequisites.iter().copied().collect();
+    assert!(
+        !pre.iter().any(|p| p.contains("right after")),
+        "{pre:?}"
+    );
+    assert!(
+        pre.contains(&"remote 1 already learned (31C7 earlier, or a working remote 1)"),
+        "{pre:?}"
+    );
+    assert!(pre.contains(&"have remote 2 at hand"), "{pre:?}");
+}
+
+/// Final critique F07: count FF on the lock motors / window stays Tier 1 but says so.
+#[test]
+fn bmt_actuator_count_ff_on_lock_and_window_has_a_specific_warning() {
+    const FF: &str = "count FF = permanent: lock/window motor may run until stopped; use 1-3";
+    for out in [0xA0, 0xA1, 0xA2, 0xA3] {
+        let r = assess(&BMT, &[0x31, out, 0x00, 0xFF]).unwrap();
+        assert_eq!(r.tier, Tier::Service, "{out:02X}");
+        assert!(r.what_can_go_wrong.contains(FF), "{out:02X}: {}", r.what_can_go_wrong);
+        assert!(r.warnings.iter().any(|w| *w == Warning::MovesActuator));
+        // Counts 1-3 keep the normal text.
+        let r = assess(&BMT, &[0x31, out, 0x00, 0x02]).unwrap();
+        assert_eq!(r.tier, Tier::Service);
+        assert!(!r.what_can_go_wrong.contains("count FF"), "{}", r.what_can_go_wrong);
+    }
+    // Another output with FF: not a lock/window motor, no lock/window text.
+    let r = assess(&BMT, &[0x31, 0xA4, 0x00, 0xFF]).unwrap();
+    assert!(!r.what_can_go_wrong.contains("count FF"));
+}
