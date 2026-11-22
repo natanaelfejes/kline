@@ -36,10 +36,12 @@ Default-deny, decided on exact payload bytes and the target of the init that act
   mistake. An automated agent that drives a terminal (pty) can read and type the code; the owner
   permits that when he chooses (owner decision 2026-11-22). Do not present it as protection
   against an agent with terminal access.
-- **Expert, not forbidden.** Security access `27`, download/upload/transfer `34`-`37`, sessions
-  other than `10 81`/`10 A0` and memory/routine-by-address services on non-immobilizer ECUs are
-  Tier 3 Expert with specific warnings (`MayBrickEcu`, `MayLeaveProgrammingSession`,
-  `SecurityAccess`), not forbidden (owner decision 2026-11-22, final).
+- **Expert, not forbidden.** Security access `27`, sessions other than `10 81`/`10 A0`, and on
+  non-immobilizer ECUs download/upload/transfer `34`-`37`, flash erase/checksum routines
+  `31 81`/`31 82` and memory/routine-by-address services are Tier 3 Expert with specific
+  warnings (`MayBrickEcu`, `MayLeaveProgrammingSession`, `SecurityAccess`), not forbidden
+  (owner decision 2026-11-22, final; on the BMT see rule 3). BMT memory read `23` stays Expert
+  (owner decision, step 7).
 - **Protocol frames.** ISO8 `36` (keep-alive) and `3F` (stop), KWP `81`/`82`: sent only by the
   init machines and `Session::tester_present`/`stop`, never as requests.
 
@@ -49,13 +51,19 @@ In any tier, including expert. This is the only forbidden class (owner-approved)
 
 - **On a BMT/UCH/decoder** (address `0x26`/`0xA6`, or any ECU whose loaded definition is a
   BMT/UCH/decoder: `kline_core::spec::definition_guard`): `3D`, `38`-`3A`, `2C`;
-  `30`/`31`/`32`/`33` C0-C9 (except exact `31C7000000`/`31C8000000`); any `2E`/`2F`; any `3B`
-  except `3B D2` and `3B D2` index 2 (AP1CLE); `21A4` with extra bytes.
+  download/upload/transfer `34`-`37` and flash erase/checksum `31`/`32`/`33` `81`/`82` (they
+  overwrite or erase the key-code EEPROM, owner decision step 7); `30`/`31`/`32`/`33` C0-C9
+  (except exact `31C7000000`/`31C8000000`) or with the immobilizer actuator outputs `A6`
+  "Ligne Transpondeur", `AB` "Led Verlog", `AC` "Ligne ECM" (both BMT definitions, step 7);
+  any `2E`/`2F`; any `3B` except `3B D2` and `3B D2` index 2 (AP1CLE); `21A4` with extra
+  bytes.
 - **On non-immobilizer ECUs**: `31 A0 A3` (and `32`/`33`/`38`-`3A` `A0 A3`), writes
   `2E`/`2F`/`3B` to `A0`/`A2`/`AE`/`BD`; on a Sirius (0x7A or a Sirius definition) also output
   control `30` and routines on those LIDs.
 - **Name guard**: a Tier 1-3 request whose definition names look immobilizer/transponder/key
-  related, applied by `Session` in kline-core ([cli.md](cli.md#name-guard)).
+  related, applied by `Session` in kline-core ([cli.md](cli.md#name-guard)). The texts of an
+  enumerated sent parameter count too: the value whose text has such a word is refused (fixed
+  bytes plus that byte), or the whole request when the parameter is not one whole byte.
 - **Allowed**: reading transponder *status* (BMT `21A4`, exactly 2 bytes) is Tier 0.
 
 Writing, learning, resetting or disabling the immobilizer is never implemented.

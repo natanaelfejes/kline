@@ -153,3 +153,28 @@ fn bmt_remote_learning_is_tier1_and_in_definition() {
     assert_eq!(tp.len(), 1);
     assert_eq!(classify(&target, &tp[0].sent_bytes.0).unwrap(), Tier::Read);
 }
+
+/// Step 7: in both BMT definitions the name guard flags the immobilizer outputs of
+/// "COMMANDE DES ACTUATEURS" by their list texts (0xA6 "Ligne Transpondeur", 0xAB "Led
+/// Verlog"), not the other outputs, and not the two remote-learning routines.
+#[test]
+fn bmt_definition_guard_flags_immobilizer_actuator_outputs() {
+    for file in ["BMT_X65_ph1_p.xml", "BMT_SAGEM.xml"] {
+        let Some(bytes) = common::ddt_file(file) else {
+            continue;
+        };
+        let ecu = EcuDef::from_xml_bytes(&bytes).unwrap();
+        let t = Target {
+            protocol: Protocol::Kwp,
+            ecu_address: 0x26,
+        };
+        let named = |p: &[u8]| kline_core::spec::immobilizer_named_requests(&ecu, &t, p);
+        assert!(!named(&[0x31, 0xA6, 0x00, 0x01]).is_empty(), "{file}");
+        assert!(!named(&[0x31, 0xAB, 0x00, 0x01]).is_empty(), "{file}");
+        assert!(named(&[0x31, 0xA0, 0x00, 0x01]).is_empty(), "{file}");
+        assert!(named(&[0x31, 0xB3, 0x00, 0x01]).is_empty(), "{file}");
+        for r in BMT_REMOTE_LEARNING {
+            assert!(named(&r).is_empty(), "{file} {r:02X?}");
+        }
+    }
+}

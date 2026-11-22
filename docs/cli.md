@@ -127,6 +127,10 @@ immobilizer/transponder/key keyword (`kline_core::safety::immobilizer_keyword`: 
 transpond, immo, verlog, verrou, apptrp, ap1cle, code cle, key code, wegfahr, and the words
 cle/cles/key/keys). The exact BMT remote-learning payloads `31C7000000`/`31C8000000` on a BMT/UCH/decoder
 (0x26/0xA6 or a BMT/UCH/decoder definition) are exempt (their names contain "CLE"). "verrou" also matches central locking; that is refused too.
+An enumerated sent parameter counts as well: when a text of its `<List>` has such a keyword,
+the request with that value is refused (fixed bytes plus the value byte; the whole request when
+the parameter is not one whole byte), e.g. BMT actuator outputs `A6` "Ligne Transpondeur" and
+`AB` "Led Verlog"; the other outputs stay available.
 
 ## Exit codes
 

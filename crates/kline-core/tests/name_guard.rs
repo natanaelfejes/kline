@@ -106,3 +106,52 @@ mod with_spec {
         );
     }
 }
+
+/// Step 7: the texts of an enumerated sent parameter are scanned too. Only the list value that
+/// names an immobilizer output is flagged (fixed bytes + that value), so the other outputs of
+/// the same actuator request stay usable.
+#[cfg(feature = "spec")]
+mod list_texts {
+    use kline_core::safety::{Protocol, Target};
+    use kline_spec::EcuDef;
+
+    const XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Target Name="Body box" xmlns="http://www-diag.renault.com/2002/ECU">
+<Function Name="Body" Address="81"/>
+<Datas>
+<Data Name="sortie"><Bits count="8"><List><Item Value="160" Text="Moteur condamnation"/><Item Value="166" Text="Ligne Transpondeur"/><Item Value="171" Text="Led Verlog"/></List></Bits></Data>
+<Data Name="param"><Bits count="8"/></Data>
+<Data Name="mode"><Bits count="4"><List><Item Value="1" Text="Transpondeur"/></List></Bits></Data>
+</Datas>
+<Requests Endian="Big">
+<Request Name="COMMANDE DES ACTUATEURS"><Sent><SentBytes>31000000</SentBytes><DataItem Name="sortie" FirstByte="2"/><DataItem Name="param" FirstByte="3"/></Sent><Received MinBytes="1"/></Request>
+<Request Name="Nibble"><Sent><SentBytes>3B4000</SentBytes><DataItem Name="mode" FirstByte="3"/></Sent><Received MinBytes="1"/></Request>
+</Requests>
+</Target>"#;
+
+    fn names(p: &[u8]) -> Vec<String> {
+        let def = EcuDef::from_xml_bytes(XML.as_bytes()).unwrap();
+        let t = Target {
+            protocol: Protocol::Kwp,
+            ecu_address: 0x51,
+        };
+        kline_core::spec::immobilizer_named_requests(&def, &t, p)
+    }
+
+    #[test]
+    fn immobilizer_list_values_are_flagged_with_their_byte() {
+        assert_eq!(
+            names(&[0x31, 0xA6, 0x00, 0x01]),
+            vec!["COMMANDE DES ACTUATEURS"]
+        );
+        assert_eq!(
+            names(&[0x31, 0xAB, 0x00, 0xFF]),
+            vec!["COMMANDE DES ACTUATEURS"]
+        );
+        assert!(names(&[0x31, 0xA0, 0x00, 0x01]).is_empty());
+        assert!(names(&[0x31, 0xC7, 0x00, 0x00, 0x00]).is_empty());
+        // Not a whole byte at the first parameter position (4-bit item): no exact byte to
+        // match, so the whole request is flagged.
+        assert_eq!(names(&[0x3B, 0x40, 0x00]), vec!["Nibble"]);
+    }
+}

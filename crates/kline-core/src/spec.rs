@@ -165,7 +165,9 @@ pub fn ecu_class(ecu: &EcuDef) -> EcuClass {
 /// The policy's view of `ecu` ([`DefinitionGuard`]): its class ([`ecu_class`]) and every
 /// request whose request name, or the name, description, comment or mnemonic of one of its
 /// data items, contains an immobilizer keyword ([`crate::safety::immobilizer_keyword`]),
-/// flagged with its fixed sent bytes (up to the first sent data item). `Session` applies it to
+/// flagged with its fixed sent bytes (up to the first sent data item). A sent item whose
+/// `<List>` has a text with such a keyword flags the fixed bytes plus that value (when the item
+/// is the whole byte right after them; otherwise the whole request). `Session` applies it to
 /// every request once it is set with `Session::set_definition_guard`.
 pub fn definition_guard(ecu: &EcuDef) -> DefinitionGuard {
     use crate::safety::immobilizer_keyword;
@@ -196,6 +198,38 @@ pub fn definition_guard(ecu: &EcuDef) -> DefinitionGuard {
                 .any(|i| flagged(&i.name));
         if fixed > 0 && hit {
             g.flag(sent[..fixed].to_vec(), r.name.clone());
+            continue;
+        }
+        // Enumerated sent parameters (step 7: BMT "sortie a activer" lists 0xA6 "Ligne
+        // Transpondeur" and 0xAB "Led Verlog"): a list text with an immobilizer keyword flags
+        // the fixed bytes plus that value when the item is the whole byte right after them,
+        // else the whole request.
+        for i in &r.sent_items {
+            let Some(d) = ecu.data(&i.name) else {
+                continue;
+            };
+            let values: Vec<i64> = d
+                .list
+                .iter()
+                .filter(|l| immobilizer_keyword(&l.text).is_some())
+                .map(|l| l.value)
+                .collect();
+            if values.is_empty() || fixed == 0 {
+                continue;
+            }
+            let whole_byte = i.first_byte as usize == fixed + 1
+                && i.bit_offset == 0
+                && d.bits_count == 8
+                && !d.is_bytes;
+            if whole_byte {
+                for v in values.into_iter().filter_map(|v| u8::try_from(v).ok()) {
+                    let mut p = sent[..fixed].to_vec();
+                    p.push(v);
+                    g.flag(p, r.name.clone());
+                }
+            } else {
+                g.flag(sent[..fixed].to_vec(), r.name.clone());
+            }
         }
     }
     g

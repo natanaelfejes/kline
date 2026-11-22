@@ -206,24 +206,41 @@ fn sirius_lid_rules_follow_the_definition_only() {
 }
 
 /// Owner decision 2026-11-22 (final): nothing outside the immobilizer line is forbidden.
-/// Security access, transfer and other sessions are Expert with specific warnings.
+/// Security access, transfer and other sessions are Expert with specific warnings. Step 7
+/// owner decision: on the BMT (immobilizer decoder) transfer `34`-`37` is part of the
+/// immobilizer line (it can overwrite the key-code EEPROM) and is forbidden there.
 #[test]
 fn owner_final_decision_security_transfer_and_sessions_are_expert() {
     use kline_core::safety::{assess, Warning};
+    let transfer: [(&[u8], Warning); 4] = [
+        (&[0x34, 0x00, 0x00], Warning::MayBrickEcu),
+        (&[0x35], Warning::MayBrickEcu),
+        (&[0x36, 0x01], Warning::MayBrickEcu),
+        (&[0x37], Warning::MayBrickEcu),
+    ];
     for t in [SIRIUS, BMT] {
         for (p, w) in [
             (&[0x27, 0x01][..], Warning::SecurityAccess),
-            (&[0x34, 0x00, 0x00], Warning::MayBrickEcu),
-            (&[0x35], Warning::MayBrickEcu),
-            (&[0x36, 0x01], Warning::MayBrickEcu),
-            (&[0x37], Warning::MayBrickEcu),
             (&[0x10, 0x85], Warning::MayLeaveProgrammingSession),
             (&[0x10, 0xC0], Warning::MayLeaveProgrammingSession),
-        ] {
+        ]
+        .into_iter()
+        .chain(if t == SIRIUS {
+            transfer.to_vec()
+        } else {
+            Vec::new()
+        }) {
             let r = assess(&t, p).unwrap();
             assert_eq!(r.tier, Tier::Expert, "{p:02X?}");
             assert!(r.warnings.contains(&w), "{p:02X?} {r:?}");
         }
+    }
+    for (p, _) in transfer {
+        assert_eq!(
+            safety::forbidden(&BMT, p),
+            Some(DenyReason::Immobilizer),
+            "{p:02X?}"
+        );
     }
     let r = assess(&SIRIUS, &[0x3D, 0x01, 0x00, 0x01, 0x00]).unwrap();
     assert!(r.warnings.contains(&Warning::MayBrickEcu));

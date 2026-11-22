@@ -459,3 +459,97 @@ fn undocumented_service_requests_are_expert() {
         r.what_can_go_wrong
     );
 }
+
+/// Step 7 (independent RE cross-check, safe extract section C.1 and owner GAP 3 decision): BMT
+/// actuator outputs 0xA6 "Ligne Transpondeur", 0xAB "Led Verlog", 0xAC "Ligne ECM"
+/// (BMT_X65_ph1_p / BMT_SAGEM "COMMANDE DES ACTUATEURS"), and download / flash erase and
+/// checksum on the immobilizer decoder, are forbidden on every BMT target; ordinary outputs and
+/// the two remote-learning routines stay Tier 1; the Sirius keeps flash services Expert.
+#[test]
+fn bmt_immobilizer_outputs_and_flash_services_are_forbidden() {
+    use kline_core::safety::{classify_in, DefinitionGuard, EcuClass};
+    let bmt_guard = DefinitionGuard::new(EcuClass::Immobilizer);
+    let elsewhere = Target {
+        protocol: Protocol::Kwp,
+        ecu_address: 0x40,
+    };
+    let bmt_alt = Target {
+        protocol: Protocol::Kwp,
+        ecu_address: 0xA6,
+    };
+    let none = DefinitionGuard::default();
+    let forbidden: &[&[u8]] = &[
+        &[0x31, 0xA6, 0x00, 0x01],
+        &[0x31, 0xAB, 0x00, 0xFF],
+        &[0x31, 0xAC, 0x01, 0x00],
+        &[0x30, 0xA6, 0x00, 0x01],
+        &[0x32, 0xAC, 0x00],
+        &[0x33, 0xAB],
+        &[0x34, 0x00, 0x00, 0x00, 0x30],
+        &[0x35],
+        &[0x36, 0x01, 0x02],
+        &[0x37],
+        &[0x31, 0x81, 0xF0, 0x5A],
+        &[0x31, 0x82, 0x00],
+        &[0x32, 0x81],
+        &[0x33, 0x82],
+    ];
+    for p in forbidden {
+        for (g, t) in [(&none, BMT), (&none, bmt_alt), (&bmt_guard, elsewhere)] {
+            let d = classify_in(g, &t, p).expect_err("must be refused");
+            assert_eq!(d.reason, DenyReason::Immobilizer, "{p:02X?} at {t:?}");
+            assert!(d.reason.is_forbidden(), "{p:02X?}");
+        }
+    }
+    for p in [
+        &[0x31, 0xA0, 0x00, 0x01][..],
+        &[0x31, 0xA5, 0x00, 0x01],
+        &[0x31, 0xA7, 0x00, 0x01],
+        &[0x31, 0xB3, 0x00, 0x01],
+        &[0x31, 0xC7, 0x00, 0x00, 0x00],
+        &[0x31, 0xC8, 0x00, 0x00, 0x00],
+    ] {
+        assert_eq!(tier(&BMT, p), Tier::Service, "{p:02X?}");
+        assert_eq!(
+            classify_in(&bmt_guard, &elsewhere, p),
+            Ok(Tier::Service),
+            "{p:02X?}"
+        );
+    }
+    // BMT memory read 23 stays Expert (owner decision, GAP 3).
+    assert!(matches!(
+        reason(&BMT, &[0x23, 0x00, 0x10, 0x00, 0x04]),
+        Some(DenyReason::ServiceNotAllowed { .. })
+    ));
+    // Not a BMT output on the Sirius; flash services stay Expert there.
+    for p in [
+        &[0x31, 0xA6, 0x00, 0x01][..],
+        &[0x34, 0x00],
+        &[0x31, 0x81, 0xF0, 0x5A],
+        &[0x31, 0x82, 0x00],
+    ] {
+        let r = reason(&SIRIUS, p);
+        assert!(
+            r.as_ref().is_some_and(|r| !r.is_forbidden()),
+            "{p:02X?} {r:?}"
+        );
+    }
+}
+
+/// Safe extract C.3: Sirius flash erase / checksum routines get specific warnings.
+#[test]
+fn sirius_flash_routines_warn_may_brick() {
+    for p in [
+        &[0x31, 0x81, 0xF0, 0x5A][..],
+        &[0x31, 0x82, 0x00],
+        &[0x31, 0x81],
+    ] {
+        let r = assess(&SIRIUS, p).unwrap();
+        assert_eq!(r.tier, Tier::Expert, "{p:02X?}");
+        assert!(r.warnings.contains(&Warning::MayBrickEcu), "{p:02X?} {r:?}");
+        assert!(
+            r.warnings.contains(&Warning::MayLeaveProgrammingSession),
+            "{p:02X?} {r:?}"
+        );
+    }
+}

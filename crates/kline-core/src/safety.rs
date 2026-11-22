@@ -6,8 +6,8 @@
 //! | [`Tier::Read`] | documented reads, `10 81`/`10 A0`, `3E` | anyone: [`check`] / `Session::request` (CLI, `--json`, MCP) |
 //! | [`Tier::Service`] | clear DTC, output tests, adaptation reset, Sirius `31 A0 A0`, BMT remote learning and actuators | a human, one typed `Approval` per request |
 //! | [`Tier::ConfigWrite`] | `3B` config writes | a human `Approval`, after the backup read and (BMT) the `21 80` identification the definition was chosen from |
-//! | [`Tier::Expert`] | any other request that is not forbidden: undocumented services and identifiers, security access `27`, download/upload/transfer `34`-`37`, other `10 xx` sessions, memory/routine-by-address services on non-immobilizer ECUs (with specific warnings such as [`Warning::MayBrickEcu`]) | a human expert `Approval` that shows the risk |
-//! | forbidden | the immobilizer line only (owner decision 2026-11-22, final): on a BMT/UCH/decoder (address `26`/`A6` or a BMT/UCH/decoder definition, [`DefinitionGuard`]) `3D`, `38`-`3A`, `2C`, `30`-`33` with `C0`-`C9` (except exact `31C7000000`/`31C8000000`), `2E`/`2F`, `3B` other than `3B D2` and `3B D2 02` (AP1CLE), `21 A4` with extra bytes; elsewhere (Sirius) `2E`/`2F`/`3B`/`30` on `A0`/`A2`/`AE`/`BD`, routines on `A2`/`AE`/`BD` and `A0 A3`; definition requests named like immobilizer/transponder/key ([`DenyReason::ImmobilizerNamed`]) | nobody, never |
+//! | [`Tier::Expert`] | any other request that is not forbidden: undocumented services and identifiers, security access `27`, download/upload/transfer `34`-`37` and flash erase/checksum `31 81`/`31 82` (not on a BMT), other `10 xx` sessions, memory/routine-by-address services on non-immobilizer ECUs (with specific warnings such as [`Warning::MayBrickEcu`]) | a human expert `Approval` that shows the risk |
+//! | forbidden | the immobilizer line only (owner decision 2026-11-22, final): on a BMT/UCH/decoder (address `26`/`A6` or a BMT/UCH/decoder definition, [`DefinitionGuard`]) `3D`, `38`-`3A`, `2C`, `34`-`37`, `31`-`33` `81`/`82` (flash erase/checksum), `30`-`33` with `C0`-`C9` (except exact `31C7000000`/`31C8000000`) or with the immobilizer outputs `A6`/`AB`/`AC` ([`BMT_IMMOBILIZER_OUTPUTS`]), `2E`/`2F`, `3B` other than `3B D2` and `3B D2 02` (AP1CLE), `21 A4` with extra bytes; elsewhere (Sirius) `2E`/`2F`/`3B`/`30` on `A0`/`A2`/`AE`/`BD`, routines on `A2`/`AE`/`BD` and `A0 A3`; definition requests named like immobilizer/transponder/key ([`DenyReason::ImmobilizerNamed`]) | nobody, never |
 //!
 //! Link frames (`81`, `82`, ISO8 `36`/`3F`) are refused as requests ([`DenyReason::ProtocolReserved`]),
 //! not as a safety rule: sent as a request they would desynchronise the session state machine.
@@ -56,6 +56,21 @@ pub const BMT_REMOTE_LEARNING: [[u8; 5]; 2] = [
 /// BMT actuator outputs for `31 out param count` (lock motors, window). Capability catalogue
 /// 9.1 / 7 #14: 0xA0..=0xB3 are the documented outputs.
 pub const BMT_ACTUATOR_OUTPUTS: core::ops::RangeInclusive<u8> = 0xA0..=0xB3;
+/// BMT actuator outputs that drive the immobilizer line: 166 `0xA6` "Ligne Transpondeur", 171
+/// `0xAB` "Led Verlog", 172 `0xAC` "Ligne ECM" (the coded VERLOG line to the engine ECU), in the
+/// "sortie a activer" list of BMT_X65_ph1_p and BMT_SAGEM "COMMANDE DES ACTUATEURS". On the
+/// BMT, `30`-`33` with one of them as byte 2 is [`DenyReason::Immobilizer`] (SAFETY.md rule 3,
+/// step 7 guard review).
+pub const BMT_IMMOBILIZER_OUTPUTS: [u8; 3] = [0xA6, 0xAB, 0xAC];
+/// Download / upload / transfer services `34`-`37`: on a BMT/UCH/decoder they can overwrite or
+/// dump the EEPROM that holds the key codes, so they are forbidden there (owner decision step 7,
+/// same reason as [`BMT_MEMORY_SERVICES`]). On other ECUs they stay Expert.
+pub const BMT_TRANSFER_SERVICES: core::ops::RangeInclusive<u8> = 0x34..=0x37;
+/// Flash erase (`81`) and flash checksum (`82`) routine numbers of the KWP reprogramming
+/// sequence (`31 81 ..` / `31 82 ..`, also via `32`/`33`): forbidden on a BMT/UCH/decoder
+/// (owner decision step 7: they erase the key-code memory there); Expert with
+/// [`Warning::MayBrickEcu`] elsewhere.
+pub const FLASH_ROUTINES: [u8; 2] = [0x81, 0x82];
 /// BMT `3B D2 index value` configuration write and the read that backs it up
 /// ("LECTURE CONFIGURATION" `21 A1`). Capability catalogue 3.4. On the BMT every other `3B`,
 /// and every `2E`/`2F`, is refused: the BMT config holds key/remote options (AP1CLE, TRF) and
@@ -395,10 +410,13 @@ fn forbidden_bytes(guard: &DefinitionGuard, target: &Target, payload: &[u8]) -> 
     if bmt {
         let immo = match service {
             0x30..=0x33 => {
-                p1.is_some_and(|b| BMT_IMMOBILIZER_RANGE.contains(&b))
-                    && !is_remote_learning(payload)
+                (p1.is_some_and(|b| BMT_IMMOBILIZER_RANGE.contains(&b))
+                    && !is_remote_learning(payload))
+                    || p1.is_some_and(|b| BMT_IMMOBILIZER_OUTPUTS.contains(&b))
+                    || (service != 0x30 && p1.is_some_and(|b| FLASH_ROUTINES.contains(&b)))
             }
             s if BMT_MEMORY_SERVICES.contains(&s) => true,
+            s if BMT_TRANSFER_SERVICES.contains(&s) => true,
             0x2E | 0x2F => true,
             0x3B => {
                 p1 != Some(BMT_CONFIG_WRITE_LID)
@@ -677,6 +695,13 @@ fn risk_info(bmt: bool, payload: &[u8], tier: Tier) -> RiskInfo {
             false,
             &["stable supply voltage", "the exact image and procedure for this ECU", "a recovery path (bench flasher)"],
             &[Warning::MayBrickEcu, Warning::MayLeaveProgrammingSession, Warning::EepromWrite, Warning::UnknownEffect],
+        ),
+        (Tier::Expert, [0x31..=0x33, 0x81 | 0x82, ..]) => r(
+            "erases (81) or checks (82) ECU flash: a step of KWP reprogramming",
+            "MAY BRICK THE ECU: an erased flash leaves the ECU unable to run until it is reprogrammed; may leave the ECU in a programming session",
+            false,
+            &["stable supply voltage", "the exact image and procedure for this ECU", "a recovery path (bench flasher)"],
+            &[Warning::MayBrickEcu, Warning::MayLeaveProgrammingSession, Warning::UnknownEffect],
         ),
         (Tier::Expert, [0x10, ..]) => r(
             "switches the ECU to another diagnostic session (e.g. programming / extended)",
