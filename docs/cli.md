@@ -90,7 +90,7 @@ These options apply to every command that talks to an ECU, and to `risk`, `prepa
 | `--address 0xNN` | overrides the definition's `<Function Address>` (also the safety target) |
 | `--vehicle PATH` | vehicle addressing file (e.g. `vehicles/x65_addressing.xml`): function name, protocols, tool address |
 | `--variant auto\|single\|multi\|fast` | init variant ([protocol.md](protocol.md#init-variants-single-ecu-multipoint-fast-init)). `auto` tries FastInit, SingleEcu (DDT2000's detection order), then MultiEcu, skips variants that would run the identical init, and logs each attempt (`init_attempt` events with `round`). In human output a failed attempt that another one follows is information, not an error: `init fast   fast init not answered (normal for many Renault K-line ECUs), trying 5-baud byte 7A`; the trace has `INIT attempt fast (round 1) failed: no reply from ECU` |
-| `--init-attempts N` | rounds over the variants, 500 ms apart (default 3, DDT2000) |
+| `--init-attempts N` | rounds over the variants, 500 ms apart (default 3, DDT2000). For an ECU that does not answer at all, `--init-attempts 1` gives up after one round (about 6 s instead of 19 s) |
 | `--nrc-tries N` | `ident`: tries of a request answered `7F xx 21`/`23` (default 10; 200/500 ms) |
 | `--periodic-tester-present` | `3E` every 2000 ms with a required reply (DDT2000 screen option) instead of after 3000 ms idle |
 | `--strict-loopback` | 5-baud: abort with "K line inactive" when RX shows nothing during the start-bit break, like DDT2000 (which waits for the Windows `EV_BREAK` event). Default: a `warning` event (`break_loopback_not_seen`) and the init goes on, because a POSIX tty may deliver no byte for a break ([protocol.md](protocol.md#5-baud-init-iso-9141-2-slow-init)) |
@@ -241,49 +241,80 @@ How the simulator works: [sim.md](sim.md).
 
 ## First test on the car
 
-This is the planned first hardware-in-the-loop session. Nothing here has been run on the car yet. Do the steps in order and keep every capture
-(`~/.local/share/kline/captures`, with `.trace.txt` when `--trace` is on). Do **not** run `exec` or
-`scan` on the first visit.
+This is the planned first hardware-in-the-loop session, reads only. Nothing here has been run on
+the car yet. Do the steps in order: the engine ECU (Sirius, 0x7A) first, then the BMT (0x26);
+`scan` is optional and comes last. Do **not** run `exec` or `clear-dtc` on the first visit.
+The same order is in the owner's record (`PROJECT-RECORD/NEXT-STEPS.md` step 10 and
+`REHEARSAL.md`).
 
-Before: definitions in `~/.local/share/kline/ecus` (or pass `--defs`); cable in the OBD
-socket and the Mac; ignition ON, engine off; nothing else (DDT2000, another tester) on the line.
+Every command keeps its capture (`<capture>.jsonl`), the trace with `--trace`
+(`.trace.txt`) and what it printed (`.out.txt`, decoded values included) in the capture
+directory (`--capture-dir`, `$KLINE_CAPTURE_DIR`, default `~/.local/share/kline/captures`), and
+ends with `done (exit N)` on stderr. No `script` log or `echo $?` is needed.
+
+Before: kline installed and the definitions copied once with `kline setup --defs-from DIR`
+([Installing](#installing-on-the-mac-binary-and-definitions)); cable in the OBD socket and the
+Mac; ignition ON, engine off; nothing else (DDT2000, another tester) on the line.
 
 0. At home, cable in the Mac only: `kline selftest`. Expect `5-baud bits (+-10 ms): OK`; if the
-   fast-init line says `TOO IMPRECISE`, fast init may fail (the auto order tries it first).
+   fast-init line says `TOO IMPRECISE`, fast init may fail (the auto order tries it first, then
+   5-baud).
 1. `kline ports`
    - OK: a line `* /dev/cu.usbserial-XXXX  usb 0403:6001 ...` and `cable: /dev/cu.usbserial-XXXX`.
+     The `/dev/tty.usbserial-XXXX` line says `(not used, ...)`: ignore it.
    - Fail: `no KKL cable found` (exit 3): replug, check `ls /dev/cu.*`; several cables: pass `--port`.
-2. `kline --trace connect --ecu bmt --variant single`
-   - OK (exit 0): `BREAK LOOPBACK seen`, about 2 s of `BREAK on/off` + `SLEEP 200 ms`,
-     `RX 3/3 ...: 55 D0 8F`, `TX 70`, `RX 2/2 ...: 70 D9`, then
-     `connected: bmt at 26 (kwp, kwp 5-baud) with variant single; sync 55 KW D0 8F, ~address D9`
-     and `TX 81 26 F1 82 ..` (Stop).
+2. `kline --trace connect --ecu sirius`
+   - OK (exit 0): `init fast   fast init not answered (normal for many Renault K-line ECUs),
+     trying 5-baud byte 7A` (information, not an error), `BREAK LOOPBACK seen`, about 2 s of
+     `BREAK on/off` + `SLEEP 200 ms`, `RX 3/3 ...: 55 D0 8F`, `TX 70`, `RX 2/2 ...: 70 85`,
+     `connected: sirius at 7A (kwp, kwp 5-baud) with variant single; sync 55 KW D0 8F, ~address 85`,
+     `session 10 A0: ok 50A0`, then the Stop. If fast init answers instead:
+     `connected: ... with variant fast`. Note which variant worked.
    - `BREAK LOOPBACK NOT seen` / `K line inactive` (exit 4): the break does not reach RX. Check
      ignition, the cable's K line (OBD pin 7). How the FTDI reports a looped break under macOS is
      NOT VERIFIED: send the trace.
-   - `RX 0/3` (`no keywords`): the ECU did not wake on 0x26. Go to step 3.
+   - No answer at all (exit 4 after about 19 s: 3 rounds of fast, single, multi): check ignition
+     and the plug, wait 10 s, then retry once with one round only:
+     `kline --trace connect --ecu sirius --init-attempts 1` (one round of fast, single and multi:
+     about 6 s instead of 19 s).
    - `RX 1/3` or `2/3`, or key bytes other than `D0 8F`: keep the capture, stop, report it.
-3. Only if step 2 got no keywords: `kline --trace connect --ecu bmt --variant multi`
-   (expects `TX A6` as the 5-baud byte and `~address 59`), then `--variant fast`
-   (`TX 81 26 F1 81 19`, expects `C1 ..`). Then `kline --trace connect --ecu bmt` (auto) should
-   log the failed attempts and connect with the variant that worked.
-4. `kline ident --ecu bmt`
-   - OK: `21 80 -> 61 80 ...`, `definition: .../BMT_X65_ph1_p.xml` (or BMT_SAGEM). `AMBIGUOUS` means
-     both definitions decode the reply: fine for reads, decides nothing for config writes.
-   - `7F 21 xx` (exit 6) or `NONE fits` (exit 10): keep the capture, report it.
-5. `kline live --ecu bmt --frames 21A3 --rate 2` and press the remote a few times: the remote
-   status items should change. Ctrl-C to stop.
-6. `kline dtc --ecu bmt`: lists the fault flags that are set (exit 0 even when some are set).
-7. `kline --trace connect --ecu sirius --variant single`
-   - OK: `RX 3/3 ...: 55 D0 8F`, `TX 70`, `RX 2/2 ...: 70 85`, then `session 10 A0: ok 50A0`.
-   - Failures as in step 2; then step 3 with `--ecu sirius` (`FA` / `~address 05`; fast init
-     `81 7A F1 81 6D`).
-8. `kline ident --ecu sirius`, then
-   `kline live --ecu sirius --frames 21A9,21AA --rate 2` (engine off: rpm 0, coolant and battery
-   voltage plausible), then start the engine and watch rpm.
-9. `kline dtc --ecu sirius`.
-10. Offline: `kline replay ~/.local/share/kline/captures/<file>.jsonl --ecu sirius` should show the same
-    values. Send the captures and traces for the [protocol.md "Not verified"](protocol.md#not-verified-needs-the-car) list.
+   - Only if 5-baud on 7A got no keywords: `--variant multi` (`TX FA`, `~address 05`) or
+     `--variant fast` (`TX 81 7A F1 81 6D`, expects `C1 ..`).
+3. `kline ident --ecu sirius`: `21 80 -> 61 80 ...` and `definition: ...RE1_maj.xml (DDT2000
+   AutoIdent: ...)`. `note: 24 bytes; DDT2000's DiagFailures identification needs exactly 26`
+   is only about DDT2000's fault screen. `NONE fits` (exit 10): keep the capture, report it.
+4. `kline live --ecu sirius --frames 21A9,21AA --rate 2` (engine off: rpm 0, coolant about the
+   outside temperature, battery 12.0 to 12.8 V), then start the engine and watch rpm
+   (800 to 900) and voltage (13.5 to 14.7 V). `--items "Régime moteur,Tension batterie mesurée"
+   --compact` gives one line per cycle. Ctrl-C ends it: `stopped by Ctrl-C, Stop sent`.
+5. `kline dtc --ecu sirius`: `N set (present: a, memorized: b)` per frame (exit 0 even when
+   some are set). Clear nothing today.
+6. `kline --trace connect --ecu bmt`
+   - OK: as step 2 with `byte 26`, `RX 2/2 ...: 70 D9`,
+     `connected: bmt at 26 (kwp, kwp 5-baud) with variant single; ... ~address D9`; no
+     `session` line (the BMT definition has no `10 A0`).
+   - No keywords on 26 but `init multi  byte A6: ok` (`~address 59`) is also fine.
+   - Failures as in step 2 (`--variant multi`: `TX A6`; `--variant fast`: `TX 81 26 F1 81 19`).
+7. `kline ident --ecu bmt`: `AMBIGUOUS` and `definition choice unresolved: BMT_X65_ph1_p,
+   BMT_SAGEM ...` are expected (both definitions decode `21 80`): fine for reads; the note lists
+   the bits in which they differ. The choice is made later, at home
+   ([Choosing the BMT definition](#choosing-the-bmt-definition)). Keep the `21 80 -> ...` line.
+8. BMT reads, each about 3.5 s:
+   - `kline read --ecu bmt 21A1` (configuration): `TRF  1  (RF remote)` is expected; `TRF 0`
+     (infrared) alone would explain a dead RF remote. Keep the raw `21 A1 -> ...` line (the
+     backup before any later write); the `decoded differently by the candidates` lines show the
+     SAGEM reading of the same bytes.
+   - `kline read --ecu bmt 21A3`, then `kline live --ecu bmt --frames 21A3 --rate 2 --compact`
+     while pressing the remote 3 times, 3 s apart, 1 to 2 m from the car: `TIR RF RECU`
+     (`1 = a remote frame was received`), `TIR RF VAL`, `TIR RF OK` should change. Ctrl-C.
+   - `kline read --ecu bmt 21A4` (transponder status only, key in, ignition ON): `INTCLE`,
+     `TRP RECU`, `TRP VAL`, `TRPOK`, `VERLOGI` with their meanings.
+9. `kline dtc --ecu bmt`.
+10. Optional, last, only if everything above passed: `kline scan --ecu sirius --range 21:B0-BF`
+    (about 8 s; `21` reads only, 200 ms apart). `negative 12` is normal (no such frame); exit 12
+    means it stopped by itself (3 missing replies or a security NRC): nothing happened, note it.
+11. Offline: `kline replay <capture>.jsonl --ecu sirius` should show the same values. Send the
+    capture directory for the [protocol.md "Not verified"](protocol.md#not-verified-needs-the-car) list.
 
 ## Not verified (host and cable)
 
