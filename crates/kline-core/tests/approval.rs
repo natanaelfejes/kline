@@ -379,3 +379,23 @@ fn config_write_refused_when_backup_is_invalidated_after_challenge() {
         Err(SessionError::Denied(ref d)) if d.reason == DenyReason::PreReadRequired { identifier: 0xA1 }
     ));
 }
+
+/// Security review L8 (mutant M53): setting a definition guard closes the pending challenge,
+/// even when the new guard gives the same risk.
+#[test]
+fn set_definition_guard_closes_the_pending_challenge() {
+    let mut s = sirius();
+    let p = [0x14, 0xFF, 0x00];
+    let ch = s.service_challenge(&p).unwrap();
+    let code = ch.code().to_string();
+    s.set_definition_guard(kline_core::safety::DefinitionGuard::default());
+    let a = Approval::confirm(ch, &code).unwrap();
+    let e = s.request_approved(&p, a, 0).unwrap_err();
+    assert!(
+        matches!(e, SessionError::Denied(ref d) if d.reason == DenyReason::ApprovalMismatch),
+        "{e:?}"
+    );
+    // Control: without the guard change the same flow sends.
+    let a = approve(&mut s, &p);
+    assert!(s.request_approved(&p, a, 0).is_ok());
+}

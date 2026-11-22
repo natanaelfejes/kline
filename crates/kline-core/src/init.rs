@@ -35,6 +35,26 @@ pub struct InitOutcome {
 }
 
 impl InitOutcome {
+    /// A KWP 5-baud outcome for `cfg` without running an init (unit tests of this crate only).
+    #[cfg(test)]
+    pub(crate) fn for_test(cfg: &LinkConfig) -> InitOutcome {
+        InitOutcome {
+            cfg: cfg.clone(),
+            kind: InitKind::KwpFiveBaud { multipoint: false },
+            target: Target {
+                protocol: crate::safety::Protocol::Kwp,
+                ecu_address: cfg.ecu_address,
+            },
+            address_byte: Some(cfg.ecu_address),
+            sync: Some(0x55),
+            kw1: 0xD0,
+            kw2: 0x8F,
+            address_complement: Some(!cfg.ecu_address),
+            keywords_match: Some(true),
+            break_loopback_seen: None,
+        }
+    }
+
     /// The init kind that ran.
     pub fn kind(&self) -> InitKind {
         self.kind

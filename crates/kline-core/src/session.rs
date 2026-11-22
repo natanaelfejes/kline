@@ -488,3 +488,34 @@ impl Session {
         step
     }
 }
+
+#[cfg(all(test, feature = "approved-routines"))]
+mod tests {
+    use super::*;
+    use crate::safety::Approval;
+    use crate::{KTiming, LinkConfig};
+
+    /// Security review L8 (mutant M51): an approval whose risk differs from the policy's
+    /// current risk for the same bound request is refused. The public API cannot change the
+    /// risk of a pending challenge, so the approval is altered here.
+    #[test]
+    fn request_approved_compares_the_approved_risk() {
+        let cfg = LinkConfig::new(0x7A, KTiming::default());
+        let mut s = Session::new(InitOutcome::for_test(&cfg), 0);
+        let p = [0x14, 0xFF, 0x00];
+        let ch = s.service_challenge(&p).unwrap();
+        let code = ch.code().to_string();
+        let mut a = Approval::confirm(ch, &code).unwrap();
+        a.risk.what_can_go_wrong = "something else";
+        let e = s.request_approved(&p, a, 0).unwrap_err();
+        assert!(
+            matches!(e, SessionError::Denied(ref d) if d.reason == safety::DenyReason::ApprovalMismatch),
+            "{e:?}"
+        );
+        // Control: the unaltered approval goes out.
+        let ch = s.service_challenge(&p).unwrap();
+        let code = ch.code().to_string();
+        let a = Approval::confirm(ch, &code).unwrap();
+        assert!(s.request_approved(&p, a, 0).is_ok());
+    }
+}
