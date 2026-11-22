@@ -571,6 +571,19 @@ fn bmt_trf_remote_type_is_tier2_with_specific_risk() {
     assert!(rf.what_it_changes.contains("RF remote"), "{rf:?}");
     assert_eq!(tier(&BMT, &[0x3B, 0xD2, 0x03, 0x00]), Tier::ConfigWrite);
     assert_eq!(tier(&BMT, &[0x3B, 0xD2, 0x03, 0x01]), Tier::ConfigWrite);
+    // Security review L5: any other TRF value is still a remote-type change.
+    for v in [0x02u8, 0x80, 0xFF] {
+        let r = assess(&BMT, &[0x3B, 0xD2, 0x03, v]).unwrap();
+        assert_eq!(r.tier, Tier::ConfigWrite, "{v:02X}");
+        assert!(r.warnings.contains(&Warning::ChangesRemoteType), "{r:?}");
+        assert!(r.what_it_changes.contains("unknown TRF value"), "{r:?}");
+        assert!(r.prerequisites.iter().any(|p| p.contains("21 A1")), "{r:?}");
+    }
+    // Other indices keep value 0/1 only.
+    assert_eq!(
+        tier_of(&BMT, &[0x3B, 0xD2, 0x04, 0x02]).unwrap(),
+        Tier::Expert
+    );
 }
 
 /// Airbag ECU (X65 addressing 0x2C): writes and tests stay allowed with approval (owner:

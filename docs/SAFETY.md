@@ -62,7 +62,8 @@ In any tier, including expert. This is the only forbidden class (owner-approved)
   nibble is 2 (`12`, `22`, .. `F2`: an alias of AP1CLE if the firmware masks the index, NOT
   VERIFIED); `21A4` with extra
   bytes. `3B D2` index 3 (TRF) is the remote type, RF or infrared, not key related: Tier 2 with
-  a specific warning (`ChangesRemoteType`).
+  a specific warning (`ChangesRemoteType`); a value other than 0/1 is also Tier 2 with that
+  warning and the text "unknown TRF value".
 - **On non-immobilizer ECUs**: `31 A0 A3` (and `32`/`33`/`38`-`3A` `A0 A3`, reset of the
   backed-up memory).
 - **On a Sirius** (0x7A or a Sirius definition): also writes `2E`/`2F`/`3B` to the frame

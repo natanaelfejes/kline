@@ -550,8 +550,11 @@ fn classify_bytes(
         // Tier 1, other KWP ECUs (Sirius): only injector inhibition `31 A0 A0`.
         (Kwp, 0x31) => (payload == [0x31, SIRIUS_SPECIAL_FUNCTION, SIRIUS_INJECTOR_INHIBITION])
             .then_some(Service),
-        // Tier 2, BMT: `3B D2 index value`, one boolean option (catalogue 3.4).
-        (Kwp, 0x3B) if bmt => (len == 4 && payload[2] <= BMT_CONFIG_MAX_INDEX && payload[3] <= 1)
+        // Tier 2, BMT: `3B D2 index value`, one boolean option (catalogue 3.4). TRF with any
+        // value is still a remote-type change (security review L5).
+        (Kwp, 0x3B) if bmt => (len == 4
+            && payload[2] <= BMT_CONFIG_MAX_INDEX
+            && (payload[3] <= 1 || payload[2] == BMT_CONFIG_TRF_INDEX))
             .then_some(ConfigWrite),
         // Tier 2: WriteDataByLocalIdentifier (Sirius 3BD010).
         (Kwp, 0x3B) => (3..=6).contains(&len).then_some(ConfigWrite),
@@ -725,6 +728,17 @@ fn risk_info(bmt: bool, payload: &[u8], tier: Tier) -> RiskInfo {
         (Tier::ConfigWrite, [0x3B, BMT_CONFIG_WRITE_LID, BMT_CONFIG_TRF_INDEX, 0x01]) if bmt => r(
             "switches the BMT to an RF remote (config TRF = 1)",
             "an infrared remote stops working; the type may lock once a remote is learned (Technical Note: change it only after clearing the remotes)",
+            true,
+            &[
+                "21 80 read and the definition chosen from it",
+                "21 A1 backup read in this session",
+                "read back 21 A1 after the write",
+            ],
+            &[Warning::ChangesRemoteType, Warning::EepromWrite],
+        ),
+        (Tier::ConfigWrite, [0x3B, BMT_CONFIG_WRITE_LID, BMT_CONFIG_TRF_INDEX, _]) if bmt => r(
+            "writes an unknown TRF value (remote type, defined values 0 = infrared, 1 = RF) to the BMT config",
+            "unknown TRF value: the BMT may take it as RF or infrared or reject it; a remote of the other type stops working",
             true,
             &[
                 "21 80 read and the definition chosen from it",
