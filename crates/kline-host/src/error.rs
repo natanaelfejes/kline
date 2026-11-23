@@ -149,6 +149,9 @@ pub fn deny_text(r: &DenyReason) -> String {
             "Bosch 5.3 ABS {}: permanently forbidden: a routine can leave a valve or the pump energized and kline cannot guarantee the OFF frame (release on 3F / keep-alive loss NOT VERIFIED); use a garage (SAFETY.md \"ABS / brake ECU\")",
             if *service == 0x41 { "41 RAM download" } else { "71 routine run" }
         ),
+        DenyReason::SafetySystemForbidden { name } => format!(
+            "{name}: permanently forbidden on this safety-system ECU (owner decision 2026-11-23); use a garage (SAFETY.md \"Airbag ECU\" / \"ABS / brake ECU\")"
+        ),
         DenyReason::OneApprovedRequestPerSession => {
             "one approved request per session on the ISO8 unit at 01 (ABS): close this session (Stop), read 58, then start a new one".into()
         }
@@ -171,6 +174,22 @@ pub fn deny_text(r: &DenyReason) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn safety_system_refusals_say_permanently_forbidden_and_what_it_is() {
+        let t = kline_core::safety::Target {
+            protocol: kline_core::safety::Protocol::Kwp,
+            ecu_address: kline_core::safety::AIRBAG_ADDRESS,
+            keywords: None,
+        };
+        let d = kline_core::safety::classify(&t, &[0x3B, 0xD0, 0xFF]).unwrap_err();
+        let m = CliError::denied(&d).message;
+        assert!(
+            m.contains("firing line lock") && m.contains("permanently forbidden"),
+            "{m}"
+        );
+        assert_eq!(CliError::denied(&d).code, exit::REFUSED);
+    }
 
     #[test]
     fn a_stalled_write_gets_a_hint_other_io_errors_do_not() {

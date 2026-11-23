@@ -593,9 +593,10 @@ fn bmt_trf_remote_type_is_tier2_with_specific_risk() {
     );
 }
 
-/// Airbag ECU (X65 addressing 0x2C): writes and tests stay allowed with approval (owner:
-/// nothing forbidden except the immobilizer), but every non-read carries a safety-system
-/// warning (step 7, HIDDEN.md section 3: 3B D0 / 3B E0 airbag config writes).
+/// Airbag ECU (X65 addressing 0x2C): the non-reads that are not forbidden (dates, config 1,
+/// expert services) need an approval, and every one carries a safety-system warning (step 7).
+/// The firing-line, crash-data, clear and output requests are forbidden
+/// (`airbag_requests_that_touch_firing_lines_or_crash_data_are_forbidden`).
 #[test]
 fn airbag_non_reads_carry_safety_system_warning() {
     const AIRBAG: Target = Target {
@@ -604,10 +605,9 @@ fn airbag_non_reads_carry_safety_system_warning() {
         keywords: None,
     };
     for p in [
-        &[0x3B, 0xD0, 0x01][..],
-        &[0x3B, 0xE0, 0x00],
-        &[0x14, 0xFF, 0x00],
-        &[0x30, 0x80, 0x00, 0x01],
+        &[0x3B, 0xC0, 0xFF, 0xFF, 0xFF][..],
+        &[0x3B, 0xD1, 0xF0],
+        &[0x23, 0x00, 0x00, 0xB6, 0x00, 0x19],
         &[0x31, 0x81],
     ] {
         let r = assess(&AIRBAG, p).unwrap_or_else(|d| panic!("{p:02X?}: {d}"));
@@ -646,10 +646,8 @@ fn airbag_risk_keeps_the_request_warnings_and_prerequisites() {
         keywords: None,
     };
     for p in [
-        &[0x14, 0xFF, 0x00][..],
-        &[0x11, 0xFF],
+        &[0x3B, 0xC0, 0x01, 0x02, 0x03][..],
         &[0x27, 0x01],
-        &[0x10, 0x85],
         &[0x34, 0x00, 0x00],
         &[0x37],
         &[0x31, 0x81],
@@ -657,9 +655,7 @@ fn airbag_risk_keeps_the_request_warnings_and_prerequisites() {
         &[0x38, 0x10, 0x00],
         &[0x2C, 0xF0],
         &[0x23, 0x00, 0x10],
-        &[0x30, 0x80, 0x00, 0x01],
-        &[0x32, 0xA0, 0x00],
-        &[0x3B, 0xD0, 0x01],
+        &[0x3B, 0xD5, 0x28],
         &[0x31, 0x00],
         &[0x99],
     ] {
@@ -683,23 +679,139 @@ fn airbag_risk_keeps_the_request_warnings_and_prerequisites() {
         assert_eq!(a.what_it_changes, o.what_it_changes, "{p:02X?}");
         assert_eq!(a.what_can_go_wrong, o.what_can_go_wrong, "{p:02X?}");
     }
-    let clear = assess(&AIRBAG, &[0x14, 0xFF, 0x00]).unwrap();
-    assert!(clear.warnings.contains(&Warning::ErasesFaultMemory));
-    assert!(!clear.warnings.contains(&Warning::MovesActuator));
+    let date = assess(&AIRBAG, &[0x3B, 0xC0, 0x01, 0x02, 0x03]).unwrap();
+    assert!(date.warnings.contains(&Warning::EepromWrite));
+    assert!(!date.warnings.contains(&Warning::MovesActuator));
     assert!(assess(&AIRBAG, &[0x27, 0x01])
         .unwrap()
         .warnings
         .contains(&Warning::SecurityAccess));
-    for p in [&[0x10, 0x85][..], &[0x34, 0x00, 0x00]] {
-        assert!(assess(&AIRBAG, p)
-            .unwrap()
-            .warnings
-            .contains(&Warning::MayLeaveProgrammingSession));
-    }
-    assert!(assess(&AIRBAG, &[0x11, 0xFF])
+    assert!(assess(&AIRBAG, &[0x34, 0x00, 0x00])
         .unwrap()
         .warnings
-        .contains(&Warning::ErasesLearnedValues));
+        .contains(&Warning::MayLeaveProgrammingSession));
+}
+
+/// Owner decision 2026-11-23: on the airbag ECU (0x2C, any protocol, with or without a
+/// definition) nothing that touches the firing lines or the crash data, no fault clear and no
+/// output control; only `10 81` opens a session. Each refusal names what the request is.
+#[test]
+fn airbag_requests_that_touch_firing_lines_or_crash_data_are_forbidden() {
+    let forbidden = |t: &Target, p: &[u8], what: &str| match classify(t, p) {
+        Err(d) => match d.reason {
+            DenyReason::SafetySystemForbidden { name } => {
+                assert!(name.contains(what), "{p:02X?}: {name}");
+                assert!(tier_of(t, p).is_err() && assess(t, p).is_err(), "{p:02X?}");
+            }
+            r => panic!("{t:?} {p:02X?}: {r:?}"),
+        },
+        Ok(tier) => panic!("{t:?} {p:02X?}: {tier:?}"),
+    };
+    for protocol in [Protocol::Kwp, Protocol::Iso8] {
+        let t = Target {
+            protocol,
+            ecu_address: 0x2C,
+            keywords: None,
+        };
+        for (p, what) in [
+            (&[0x3B, 0xD0, 0x00][..], "firing line lock"),
+            (&[0x3B, 0xD0, 0xFF], "firing line lock"),
+            (&[0x3B, 0xD0, 0xAA], "passenger airbag inhibit"),
+            (&[0x3B, 0xD0, 0x55], "passenger airbag inhibit"),
+            (&[0x3B, 0xD0], "3B D0"),
+            (
+                &[
+                    0x3B, 0xD2, 0x87, 0x28, 0x4D, 0x19, 0x4D, 0x19, 0x4D, 0x19, 0x4D, 0x19, 0x00,
+                ],
+                "impedance",
+            ),
+            (&[0x3B, 0xD3, 0x00, 0x00], "impedance"),
+            (&[0x3B, 0xD6, 0x0F, 0x20, 0x00, 0x00], "configuration 2"),
+            (&[0x3B, 0xD7], "robustness counter"),
+            (&[0x3B, 0xE0, 0x00, 0x00, 0x00, 0x00], "crash counter"),
+            (&[0x3B, 0xE0, 0x22, 0x04, 0x19, 0x98], "crash counter"),
+            (&[0x14, 0xFF, 0x00], "fault memory clear"),
+            (&[0x14, 0x00, 0x00], "fault memory clear"),
+            (&[0x14], "fault memory clear"),
+            (&[0x30, 0x80, 0x00], "crash output"),
+            (&[0x30, 0x80, 0x12], "crash output"),
+            (&[0x30], "output control"),
+            (&[0x10, 0x80], "session"),
+            (&[0x10, 0xA0], "session"),
+            (&[0x10, 0xB0], "session"),
+            (&[0x10, 0xC0], "session"),
+            (&[0x10, 0x81, 0x00], "session"),
+            (&[0x11, 0xFF], "generic"),
+            (&[0x31, 0xA0, 0x00], "generic"),
+            (&[0x32, 0xA0, 0x00], "generic"),
+        ] {
+            forbidden(&t, p, what);
+        }
+    }
+    let kwp = Target {
+        protocol: Protocol::Kwp,
+        ecu_address: 0x2C,
+        keywords: None,
+    };
+    // Tier 0 stays the reads and the default session.
+    for p in [
+        &[0x21, 0x80][..],
+        &[0x21, 0x87],
+        &[0x1A, 0x80],
+        &[0x17, 0xFF, 0x00],
+        &[0x18, 0x00, 0xFF, 0x00],
+        &[0x10, 0x81],
+        &[0x3E],
+    ] {
+        assert_eq!(tier(&kwp, p), Tier::Read, "{p:02X?}");
+    }
+    // Not forbidden there: dates (Tier 2), config 1 (Tier 2), other routines (Expert).
+    assert_eq!(
+        tier(&kwp, &[0x3B, 0xC0, 0xFF, 0xFF, 0xFF]),
+        Tier::ConfigWrite
+    );
+    assert_eq!(tier(&kwp, &[0x3B, 0xD1, 0xF0]), Tier::ConfigWrite);
+    assert_eq!(tier_of(&kwp, &[0x31, 0xA0, 0x01]).unwrap(), Tier::Expert);
+    // Other ECUs keep their tiers for the same bytes (10 A0 stays a read on the Sirius).
+    assert_eq!(tier(&SIRIUS, &[0x10, 0xA0]), Tier::Read);
+    assert_eq!(tier(&SIRIUS, &[0x14, 0x00, 0x00]), Tier::Service);
+    assert_eq!(tier(&SIRIUS, &[0x11, 0xFF]), Tier::Service);
+}
+
+/// The ISO8 unit at 0x01 (ABS), with any key bytes: the generic engine forms are forbidden.
+#[test]
+fn generic_engine_services_are_forbidden_on_the_iso8_abs() {
+    for keywords in [Some((0xDC, 0x83)), Some((0xC2, 0x85)), None] {
+        let t = Target {
+            protocol: Protocol::Iso8,
+            ecu_address: 0x01,
+            keywords,
+        };
+        for p in [
+            &[0x11, 0xFF][..],
+            &[0x31, 0xA0, 0x00],
+            &[0x32, 0xA0, 0x00],
+            &[0x30, 0x80, 0x00],
+            &[0x30, 0x80, 0x00, 0x01, 0x02, 0x03],
+        ] {
+            assert!(
+                matches!(
+                    reason(&t, p),
+                    Some(DenyReason::SafetySystemForbidden { .. })
+                ),
+                "{keywords:02X?} {p:02X?}"
+            );
+        }
+        // Other shapes keep their tier (Expert).
+        assert_eq!(tier_of(&t, &[0x30, 0x80]).unwrap(), Tier::Expert);
+    }
+    // KWP at 0x01 is not the ISO8 ABS: generic forms keep their pre-branch tiers.
+    let kwp = Target {
+        protocol: Protocol::Kwp,
+        ecu_address: 0x01,
+        keywords: None,
+    };
+    assert_eq!(tier(&kwp, &[0x11, 0xFF]), Tier::Service);
 }
 
 /// Final critique F17: the 31 C8 approval screen must not tell the human to run 31 C7 first
@@ -854,20 +966,16 @@ fn sirius_ac_output_warns_the_car_has_no_ac() {
     assert!(r.warnings.contains(&Warning::MovesActuator));
     let other = assess(&SIRIUS, &[0x30, 0x80, 0x00, 0x0A]).unwrap();
     assert!(!other.what_it_changes.contains("A/C"), "{other:?}");
-    for addr in [0x2Cu8, 0x40] {
-        let t = Target {
-            protocol: Protocol::Kwp,
-            ecu_address: addr,
-            keywords: None,
-        };
-        let r = assess(&t, &[0x30, 0x82, 0x00, 0x0A]).unwrap();
-        assert_eq!(r.tier, Tier::Service, "{addr:02X}");
-        assert!(!r.what_it_changes.contains("A/C"), "{addr:02X}: {r:?}");
-        assert!(
-            !r.prerequisites.iter().any(|t| t.contains("A/C")),
-            "{addr:02X}"
-        );
-    }
+    // A generic ECU (at the airbag 0x2C every 30 is forbidden).
+    let t = Target {
+        protocol: Protocol::Kwp,
+        ecu_address: 0x40,
+        keywords: None,
+    };
+    let r = assess(&t, &[0x30, 0x82, 0x00, 0x0A]).unwrap();
+    assert_eq!(r.tier, Tier::Service);
+    assert!(!r.what_it_changes.contains("A/C"), "{r:?}");
+    assert!(!r.prerequisites.iter().any(|t| t.contains("A/C")));
 }
 
 /// The Sirius allowlist follows `is_sirius_ecu`: a Sirius definition at a non-7A address

@@ -7,8 +7,7 @@ mod common;
 
 use kline_core::safety::{
     bosch_abs_fill_bleed_names, classify, DenyReason, Protocol, Target, Tier,
-    BOSCH_ABS_FILL_BLEED_DOWNLOADS, BOSCH_ABS_FILL_BLEED_DOWNLOAD_HEADER,
-    BOSCH_ABS_FILL_BLEED_FRAMES, BOSCH_ABS_KEYWORDS,
+    BOSCH_ABS_FILL_BLEED_DOWNLOADS, BOSCH_ABS_FILL_BLEED_FRAMES, BOSCH_ABS_KEYWORDS,
 };
 use kline_spec::EcuDef;
 
@@ -29,7 +28,8 @@ fn is_fill_or_bleed(name: &str) -> bool {
 
 /// The hard-coded names and bytes equal X24_ABS_Bosch5.3, both ways: every MES_PURGE_* /
 /// MES_REMPLISSAGE* request is in the table with its exact bytes, every table entry is in the
-/// XML, and the download header picks exactly DOWNLOAD_PURGE and DOWNLOAD_remplissage_usine.
+/// XML, and the download headers pick exactly DOWNLOAD_PURGE, DOWNLOAD_remplissage_usine and
+/// DOWNLOAD_Y265K14311.
 #[test]
 fn fill_and_bleed_table_matches_the_x24_definition() {
     let Some(def) = load("X24_ABS_Bosch5.3.xml") else {
@@ -48,19 +48,27 @@ fn fill_and_bleed_table_matches_the_x24_definition() {
     from_xml.sort();
     table.sort();
     assert_eq!(table, from_xml);
-    let mut downloads: Vec<&str> = def
-        .requests
-        .iter()
-        .filter(|r| r.sent_bytes.0.first() == Some(&0x41))
-        .filter(|r| {
-            r.sent_bytes
-                .0
-                .starts_with(&BOSCH_ABS_FILL_BLEED_DOWNLOAD_HEADER)
-        })
-        .map(|r| r.name.as_str())
-        .collect();
-    downloads.sort();
-    assert_eq!(downloads, BOSCH_ABS_FILL_BLEED_DOWNLOADS);
+    // Each download header picks exactly its named downloads among all 41 requests.
+    let mut downloads: Vec<&str> = Vec::new();
+    for (header, names) in BOSCH_ABS_FILL_BLEED_DOWNLOADS {
+        let mut found: Vec<&str> = def
+            .requests
+            .iter()
+            .filter(|r| r.sent_bytes.0.starts_with(&header))
+            .map(|r| r.name.as_str())
+            .collect();
+        found.sort();
+        assert_eq!(found, names, "{header:02X?}");
+        downloads.extend(found);
+    }
+    assert_eq!(
+        downloads,
+        [
+            "DOWNLOAD_PURGE",
+            "DOWNLOAD_remplissage_usine",
+            "DOWNLOAD_Y265K14311"
+        ]
+    );
     // The refusal names each of them.
     for r in &def.requests {
         let names = bosch_abs_fill_bleed_names(&r.sent_bytes.0);

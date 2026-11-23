@@ -7,7 +7,7 @@
 //! | [`Tier::Service`] | clear DTC, output tests (Sirius: the 13 listed output ids only), adaptation reset, Sirius `31 A0 00`, BMT remote learning and actuators (not `A4`/`A5`) | a human, one typed `Approval` per request |
 //! | [`Tier::ConfigWrite`] | `3B` config writes | a human `Approval`, after the backup read and (BMT) the `21 80` identification the definition was chosen from |
 //! | [`Tier::Expert`] | any other request that is not forbidden: undocumented services and identifiers, security access `27`, download/upload/transfer `34`-`37` and flash erase/checksum `31 81`/`31 82` (not on a BMT), other `10 xx` sessions, memory/routine-by-address services on non-immobilizer ECUs (with specific warnings such as [`Warning::MayBrickEcu`]) | a human expert `Approval` that shows the risk |
-//! | forbidden | the Bosch 5.3 ABS (ISO8 `01`, key bytes `DC 83`) RAM download `41` and routine run `71`, all of them, named when they are the factory fill / brake bleed ([`DenyReason::BoschAbsRoutine`], owner decision 2026-11-23); the immobilizer line (owner decision 2026-11-22, final): on a BMT/UCH/decoder (address `26`/`A6` or a BMT/UCH/decoder definition, [`DefinitionGuard`]) `3D`, `38`-`3A`, `2C`, `34`-`37`, `31`-`33` `81`/`82` (flash erase/checksum), `30`-`33` with `C0`-`C9` (except exact `31C7000000`/`31C8000000`) or with the immobilizer outputs `A6`/`AB`/`AC` ([`BMT_IMMOBILIZER_OUTPUTS`]), `2E`/`2F`, `3B` other than `3B D2` and `3B D2 x2` (AP1CLE, also with a high nibble), `21 A4` with extra bytes; on every other ECU routines `31`-`33`/`38`-`3A` on `A0 A3`; on a Sirius (`7A` or a Sirius definition) also `31`-`33 A3 ..` (function 0xA3, reset of the backed-up memory) and writes `2E`/`2F`/`3B` to the frames `A0`/`A2`/`AE`/`BD`; definition requests named like immobilizer/transponder/key ([`DenyReason::ImmobilizerNamed`]) | nobody, never |
+//! | forbidden | on the airbag ECU (`2C`, any protocol) the firing-line, impedance, configuration 2 and crash/robustness counter writes `3B D0`/`D2`/`D3`/`D6`/`D7`/`E0`, every `14` and `30`, sessions other than `10 81`, and `11 FF`/`31 A0 00`/`32 A0 00`; on the ISO8 unit at `01` those generic forms and `30 lid ..` ([`DenyReason::SafetySystemForbidden`], owner decision 2026-11-23); the Bosch 5.3 ABS (ISO8 `01`, key bytes `DC 83`) RAM download `41` and routine run `71`, all of them, named when they are the factory fill / brake bleed ([`DenyReason::BoschAbsRoutine`], owner decision 2026-11-23); the immobilizer line (owner decision 2026-11-22, final): on a BMT/UCH/decoder (address `26`/`A6` or a BMT/UCH/decoder definition, [`DefinitionGuard`]) `3D`, `38`-`3A`, `2C`, `34`-`37`, `31`-`33` `81`/`82` (flash erase/checksum), `30`-`33` with `C0`-`C9` (except exact `31C7000000`/`31C8000000`) or with the immobilizer outputs `A6`/`AB`/`AC` ([`BMT_IMMOBILIZER_OUTPUTS`]), `2E`/`2F`, `3B` other than `3B D2` and `3B D2 x2` (AP1CLE, also with a high nibble), `21 A4` with extra bytes; on every other ECU routines `31`-`33`/`38`-`3A` on `A0 A3`; on a Sirius (`7A` or a Sirius definition) also `31`-`33 A3 ..` (function 0xA3, reset of the backed-up memory) and writes `2E`/`2F`/`3B` to the frames `A0`/`A2`/`AE`/`BD`; definition requests named like immobilizer/transponder/key ([`DenyReason::ImmobilizerNamed`]) | nobody, never |
 //!
 //! Link frames (`81`, `82`, ISO8 `36`/`3F`) are refused as requests ([`DenyReason::ProtocolReserved`]),
 //! not as a safety rule: sent as a request they would desynchronise the session state machine.
@@ -185,15 +185,23 @@ pub const BOSCH_ABS_DOWNLOAD: u8 = 0x41;
 /// VERIFIED, so a valve or the pump could stay energized.
 pub const BOSCH_ABS_RUN: u8 = 0x71;
 
-/// The first 9 bytes (download header) shared by X24_ABS_Bosch5.3 "DOWNLOAD_PURGE" (brake
-/// bleed routine, 134 bytes) and "DOWNLOAD_remplissage_usine" (factory fill routine, 131
-/// bytes); no other download of that definition starts with them. Only the header is kept
-/// here, not the Renault routine code (SAFETY.md rule 1); the test checks it against the XML.
-pub const BOSCH_ABS_FILL_BLEED_DOWNLOAD_HEADER: [u8; 9] =
-    [0x41, 0x04, 0x00, 0x00, 0x00, 0x00, 0x12, 0x06, 0x00];
-/// Names of the downloads that start with [`BOSCH_ABS_FILL_BLEED_DOWNLOAD_HEADER`].
-pub const BOSCH_ABS_FILL_BLEED_DOWNLOADS: [&str; 2] =
-    ["DOWNLOAD_PURGE", "DOWNLOAD_remplissage_usine"];
+/// Download headers (the first 9 bytes) of the X24_ABS_Bosch5.3 downloads that belong to the
+/// factory fill and the brake bleed, with their names: `41 04 00 00 00 00 12 06 00` starts both
+/// "DOWNLOAD_PURGE" (bleed routine, 134 bytes) and "DOWNLOAD_remplissage_usine" (factory fill
+/// routine, 131 bytes); `41 04 00 00 BB 07 07 64 07` starts "DOWNLOAD_Y265K14311" (the valve /
+/// pump driver the bleed frames run, 113 bytes). No other download of that definition starts
+/// with one of them. Only the headers are kept here, not the Renault routine code (SAFETY.md
+/// rule 1); the test checks them against the XML.
+pub const BOSCH_ABS_FILL_BLEED_DOWNLOADS: [([u8; 9], &[&str]); 2] = [
+    (
+        [0x41, 0x04, 0x00, 0x00, 0x00, 0x00, 0x12, 0x06, 0x00],
+        &["DOWNLOAD_PURGE", "DOWNLOAD_remplissage_usine"],
+    ),
+    (
+        [0x41, 0x04, 0x00, 0x00, 0xBB, 0x07, 0x07, 0x64, 0x07],
+        &["DOWNLOAD_Y265K14311"],
+    ),
+];
 /// The factory fill (MES_REMPLISSAGE*, run after DOWNLOAD_remplissage_usine on the filling
 /// rig) and brake bleed (MES_PURGE_*: GARAGE_*, SEC_*, ECH_*, DESACTIVE_*, CONDITIONS, run
 /// after DOWNLOAD_PURGE) `71` frames of X24_ABS_Bosch5.3, exact bytes (11 each; the test checks
@@ -395,6 +403,71 @@ pub const BOSCH_ABS_FILL_BLEED_FRAMES: [(&str, [u8; 11]); 32] = [
     ),
 ];
 
+/// Airbag ECU (address [`AIRBAG_ADDRESS`], any protocol) local identifiers whose writes
+/// (`3B lid ..`) are forbidden (owner decision 2026-11-23; COMMAND-INVENTORY.md section 3, the
+/// AB70_X65 and AB80_X65_X90_V1 definitions): the firing-line state, the squib-line
+/// impedance windows, the component configuration and the crash / robustness counters.
+pub const AIRBAG_FORBIDDEN_WRITES: [(u8, &str); 6] = [
+    (
+        0xD0,
+        "airbag firing line lock / unlock or passenger airbag inhibit (3B D0: Verrouillage / Deverrouillage MAF, Inhibition AB_PSG)",
+    ),
+    (
+        0xD2,
+        "airbag firing line impedance thresholds (3B D2: Correction impedances lignes frontales)",
+    ),
+    (
+        0xD3,
+        "airbag side firing line impedance thresholds (3B D3: Correction impedances lignes laterales)",
+    ),
+    (
+        0xD6,
+        "airbag system configuration 2: which airbags / pretensioners / crash output exist (3B D6)",
+    ),
+    (0xD7, "airbag robustness counter reset (3B D7: ResetCptRobust)"),
+    (
+        0xE0,
+        "airbag crash counter reset / supplier mode (3B E0: Reset compteur crash, ResetBE)",
+    ),
+];
+
+/// What a payload to the airbag ECU ([`AIRBAG_ADDRESS`], any protocol) is when it is
+/// forbidden there (owner decision 2026-11-23: no airbag fault clear yet, nothing that touches
+/// the firing lines or the crash data), else `None`: the writes of
+/// [`AIRBAG_FORBIDDEN_WRITES`], every `14` (fault clear; on AB80 `14 FF 00` is the EEPROM
+/// reset), every `30` (output control: AB80 `30 80` drives the crash output), every session
+/// `10` other than exactly `10 81` (`10 80` supplier, `10 A0` engineering "BE", `10 B0`
+/// production, `10 C0` after-sales), and the generic Tier 1 forms `11 FF`, `31 A0 00`,
+/// `32 A0 00`.
+pub fn airbag_forbidden(payload: &[u8]) -> Option<&'static str> {
+    match payload {
+        [0x3B, lid, ..] => AIRBAG_FORBIDDEN_WRITES
+            .iter()
+            .find(|(l, _)| l == lid)
+            .map(|(_, n)| *n),
+        [0x14, ..] => Some("airbag fault memory clear / EEPROM reset (14: ClearDiagInfo, AB80 Reinitialisation EEPROM)"),
+        [0x30, ..] => Some("airbag output control (30: AB80 30 80 crash output, Activation sortie crash: the crash signal to the other ECUs)"),
+        [0x10, ..] if payload != [0x10, DEFAULT_SESSION] => Some(
+            "airbag diagnostic session other than 10 81 (10 80 supplier, 10 A0 engineering BE, 10 B0 production, 10 C0 after-sales)",
+        ),
+        _ => generic_service_forbidden(payload).map(|_| {
+            "airbag generic service (11 FF adaptation reset, 31 A0 00 / 32 A0 00 routine): not an airbag request"
+        }),
+    }
+}
+
+/// The generic KWP Tier 1 forms that mean something only on an engine ECU (`11 FF`
+/// adaptation reset, `31 A0 00` / `32 A0 00` injector inhibition) and the generic output
+/// control shape `30 lid` + 1-4 bytes: forbidden on the safety-system ECUs (airbag 0x2C, ISO8
+/// unit at 0x01), where they are no documented request (owner decision 2026-11-23).
+fn generic_service_forbidden(payload: &[u8]) -> Option<()> {
+    let generic = payload == [0x11, 0xFF]
+        || payload == [0x31, SIRIUS_INJECTOR_INHIBITION, SIRIUS_FUNCTION_START]
+        || payload == [0x32, SIRIUS_INJECTOR_INHIBITION, SIRIUS_FUNCTION_START]
+        || (payload.first() == Some(&0x30) && (3..=6).contains(&payload.len()));
+    generic.then_some(())
+}
+
 /// Key bytes (KW1, KW2) of the Bosch 5.3 ABS: `55 DC 83` on the car (2026-11-23), KW1=220 /
 /// KW2=131 in X24_ABS_Bosch5.3 and J64_Bosch5.3_4X4_V2.
 pub const BOSCH_ABS_KEYWORDS: (u8, u8) = (0xDC, 0x83);
@@ -410,12 +483,15 @@ pub fn is_bosch_abs(target: &Target) -> bool {
 }
 
 /// The factory fill / brake bleed names (DDT2000 X24_ABS_Bosch5.3) of a Bosch 5.3 ABS
-/// `payload`: the downloads by their header, the `71` frames by their exact bytes (one payload
+/// `payload`: the downloads by their header ([`BOSCH_ABS_FILL_BLEED_DOWNLOADS`]), the `71` frames by their exact bytes (one payload
 /// can carry several names: MES_PURGE_GARAGE_FIN is MES_REMPLISSAGE_Message8). Empty for any
 /// other payload.
 pub fn bosch_abs_fill_bleed_names(payload: &[u8]) -> Vec<&'static str> {
-    if payload.starts_with(&BOSCH_ABS_FILL_BLEED_DOWNLOAD_HEADER) {
-        return BOSCH_ABS_FILL_BLEED_DOWNLOADS.to_vec();
+    if let Some((_, names)) = BOSCH_ABS_FILL_BLEED_DOWNLOADS
+        .iter()
+        .find(|(h, _)| payload.starts_with(h))
+    {
+        return names.to_vec();
     }
     BOSCH_ABS_FILL_BLEED_FRAMES
         .iter()
@@ -718,6 +794,11 @@ pub enum DenyReason {
         service: u8,
         names: Vec<&'static str>,
     },
+    /// A request to a safety-system ECU that no approval can unlock (owner decision
+    /// 2026-11-23): on the airbag ECU (0x2C) [`airbag_forbidden`], on the ISO8 unit at 0x01
+    /// (ABS) the generic engine forms `11 FF`, `31 A0 00`, `32 A0 00`, `30 lid ..`. `name`
+    /// says what it is.
+    SafetySystemForbidden { name: &'static str },
     /// A second approved (non-read) request in one session on the ISO8 unit at 0x01 (ABS):
     /// refused by `Session` (defence in depth: no download followed by a run, no test followed
     /// by another). Close the session (Stop) and open a new one.
@@ -746,6 +827,7 @@ impl DenyReason {
                 | DenyReason::Immobilizer
                 | DenyReason::ImmobilizerNamed { .. }
                 | DenyReason::BoschAbsRoutine { .. }
+                | DenyReason::SafetySystemForbidden { .. }
                 | DenyReason::ProtocolReserved { .. }
         )
     }
@@ -908,6 +990,21 @@ fn forbidden_bytes(guard: &DefinitionGuard, target: &Target, payload: &[u8]) -> 
         if reset || immo_write {
             return Some(DenyReason::Immobilizer);
         }
+    }
+    // Airbag ECU, any protocol (owner decision 2026-11-23, SAFETY.md "Airbag ECU").
+    if target.ecu_address == AIRBAG_ADDRESS {
+        if let Some(name) = airbag_forbidden(payload) {
+            return Some(DenyReason::SafetySystemForbidden { name });
+        }
+    }
+    // ISO8 unit at 0x01 (ABS), any key bytes: the generic engine forms are no ABS request.
+    if target.protocol == Protocol::Iso8
+        && target.ecu_address == ABS_ADDRESS
+        && generic_service_forbidden(payload).is_some()
+    {
+        return Some(DenyReason::SafetySystemForbidden {
+            name: "generic service on the ABS (11 FF adaptation reset, 31 A0 00 / 32 A0 00 routine, 30 output control): not an ABS request",
+        });
     }
     // Bosch 5.3 ABS: no RAM download, no routine run, in any tier (owner decision 2026-11-23,
     // SAFETY.md "ABS / brake ECU").
