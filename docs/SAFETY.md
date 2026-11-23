@@ -206,6 +206,13 @@ AB80_X65_X90_V1).
 | StartDiagSession other than `10 81` | `10 80` supplier, `10 A0` BE (engineering), `10 B0` production, `10 C0` after-sales, and any `10` other than exactly `10 81` | privileged sessions | gate of the forbidden writes; `10 A0` is the engineering session on this ECU, not a read |
 | generic engine forms | `11 FF`, `31 A0 00`, `32 A0 00` | adaptation reset / injector inhibition elsewhere | no airbag requests |
 
-Tier 0 on the airbag stays the reads: `21 xx`, `1A xx`, `17`/`18`, `3E`, `10 81`. The dates
-(`3B B0`, `3B C0`) and configuration 1 (`3B D1`) stay Tier 2 with the airbag warnings. The
-name guard is unchanged (it still refuses immobilizer-named requests on every ECU).
+Tier 0 on the airbag stays the reads: `21 xx`, `1A xx`, `17`/`18`, `3E`, `10 81`. Only the
+two date writes (`3B B0`, `3B C0` + 3 bytes) are Tier 2; configuration 1 (`3B D1`), the crash
+sensor signature (`3B D4`), the fault detection time (`3B D5`), any other `3B` and the memory
+read `23` are Expert, all with the airbag warnings (command inventory 2026-11-23, section 3.3).
+**These writes are unusable for now**: the airbag definitions open the after-sales session
+`10 C0` before a write, and every session other than `10 81` is forbidden on the airbag until
+the owner lifts it ("do not touch the airbag yet"). The name guard is unchanged (it still
+refuses immobilizer-named requests on every ECU). `crates/kline-core/tests/airbag_defs.rs`
+checks every request of AB70_X65.xml and AB80_X65_X90_V1.xml against this table (skipped
+without `ddt-xml/`).

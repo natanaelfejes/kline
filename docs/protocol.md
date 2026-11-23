@@ -517,7 +517,9 @@ unlock, passenger airbag inhibit), `3B D2` / `3B D3` (firing line impedance thre
 clear; on AB80 `14 FF 00` is the EEPROM reset); every `30` (AB80 `30 80` crash output); every
 `10` except exactly `10 81` (`10 80` supplier, `10 A0` engineering "BE", `10 B0` production,
 `10 C0` after-sales); `11 FF`, `31 A0 00`, `32 A0 00`. Tier 0 there: `21 xx`, `1A xx`,
-`17`/`18`, `3E`, `10 81`. Dates `3B B0`/`3B C0` and configuration 1 `3B D1` stay Tier 2.
+`17`/`18`, `3E`, `10 81`. Only the dates `3B B0`/`3B C0` + 3 bytes stay Tier 2; `3B D1`/`D4`/`D5`
+and any other `3B` are Expert there. With `10 C0` forbidden these writes are unusable until the
+owner lifts the airbag rule.
 
 Every non-read to the ABS (ISO8 at 0x01) also carries `SafetySystem` first, the brake text
 (`RiskInfo::safety_system`) and brake prerequisites (stationary, engine off, handbrake; read
