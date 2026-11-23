@@ -141,6 +141,8 @@ impl EcuProfile {
     /// `36`, `3F` with `3F` (then sleeps) and a request with its own SID (`51` -> `51 ..`).
     /// All from the car capture of 2026-11-23 (docs/protocol.md "Bosch 5.3 ABS"). P3min:
     /// [`BOSCH_ABS_P3_MIN_MS`].
+    /// The Bosch 5.3 ABS profile; its session lasts through the 7000 ms keep-alive of the
+    /// definition (X24_ABS_Bosch5.3 `TesterPresent@Delay`), as on the car.
     pub fn bosch_abs53() -> EcuProfile {
         EcuProfile {
             name: "Bosch ABS 5.3".into(),
@@ -151,6 +153,10 @@ impl EcuProfile {
             iso8_stop_reply: Some(vec![0x3F]),
             positive_sid_offset: 0,
             tolerance: Tolerance::strict(BOSCH_ABS_P3_MIN_MS),
+            timing: EcuTiming {
+                session_timeout_ms: iso8_session_timeout_ms(BOSCH_ABS_TESTER_PRESENT_MS),
+                ..EcuTiming::default()
+            },
             ..EcuProfile::safir_iso8()
         }
     }
@@ -198,7 +204,13 @@ impl EcuProfile {
             iso8_tester_present_reply: bosch_abs.then(|| vec![0x36]),
             iso8_stop_reply: bosch_abs.then(|| vec![0x3F]),
             positive_sid_offset: if bosch_abs { 0 } else { POSITIVE_SID_OFFSET },
-            timing: EcuTiming::default(),
+            timing: EcuTiming {
+                session_timeout_ms: match (protocol, k.tester_present_delay) {
+                    (EcuProtocol::Iso8, Some(tp)) => iso8_session_timeout_ms(u64::from(tp)),
+                    _ => EcuTiming::default().session_timeout_ms,
+                },
+                ..EcuTiming::default()
+            },
             tolerance: Tolerance::strict(if bosch_abs { BOSCH_ABS_P3_MIN_MS } else { p3 }),
         })
     }
@@ -305,6 +317,17 @@ enum State {
     AwaitInvKw2 { kw2: u8, kw2_end: u64, addr: u8 },
     AwaitStartComm { deadline: u64 },
     Ready,
+}
+
+/// The Bosch 5.3 ABS keep-alive interval: X24_ABS_Bosch5.3 `TesterPresent@Delay` 7000 ms; the
+/// car kept its ISO8 session with it (capture 2026-11-23, docs/protocol.md "Bosch 5.3 ABS").
+pub const BOSCH_ABS_TESTER_PRESENT_MS: u64 = 7_000;
+
+/// Session timeout of an ISO8 ECU whose definition declares a keep-alive interval of `tp_ms`:
+/// the ECU must stay awake through that interval (it does on the car for the ABS), so it sleeps
+/// only after `tp_ms` plus 1 s of silence. ours. KWP ECUs keep P3max (ISO 14230-2, 5000 ms).
+pub fn iso8_session_timeout_ms(tp_ms: u64) -> u64 {
+    tp_ms.max(EcuTiming::default().session_timeout_ms) + 1_000
 }
 
 /// The simulated ECU. Attach it to a [`crate::bus::Bus`] (usually through
