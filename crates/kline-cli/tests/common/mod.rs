@@ -399,6 +399,8 @@ pub struct Run {
     pub capture_dir: PathBuf,
     pub screen: String,
     pub opened: bool,
+    /// Removes `capture_dir` when the run is dropped.
+    _capture_guard: TempDir,
 }
 
 impl Run {
@@ -430,15 +432,50 @@ impl Run {
 
 static N: AtomicU32 = AtomicU32::new(0);
 
-pub fn temp_dir(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!(
-        "kline-cli-test-{}-{tag}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::SeqCst)
-    ));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+/// A fresh directory under the system temp dir, removed with everything in it when the guard
+/// is dropped (also when the test panics), so test runs do not leave `kline-cli-test-*`
+/// directories behind. Derefs to its path.
+pub struct TempDir(PathBuf);
+
+impl TempDir {
+    pub fn new(tag: &str) -> TempDir {
+        let d = std::env::temp_dir().join(format!(
+            "kline-cli-test-{}-{tag}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        TempDir(d)
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for TempDir {
+    type Target = PathBuf;
+    fn deref(&self) -> &PathBuf {
+        &self.0
+    }
+}
+
+impl AsRef<std::path::Path> for TempDir {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// [`TempDir::new`]; keep the guard alive as long as the directory is used.
+pub fn temp_dir(tag: &str) -> TempDir {
+    TempDir::new(tag)
 }
 
 /// Options of one in-process run.
@@ -535,7 +572,8 @@ pub fn run_line_port(line: VirtualLine, port: &str, args: &[&str], o: Opts) -> R
 }
 
 fn run_line_inner(line: VirtualLine, port: &str, args: &[&str], o: Opts, blind: bool) -> Run {
-    let capture_dir = temp_dir("cap");
+    let capture_guard = temp_dir("cap");
+    let capture_dir = capture_guard.to_path_buf();
     let (out, out_buf) = Sink::buffer();
     let (err, err_buf) = Sink::buffer();
     let line = Arc::new(Mutex::new(Some(line)));
@@ -629,6 +667,7 @@ fn run_line_inner(line: VirtualLine, port: &str, args: &[&str], o: Opts, blind: 
         capture_dir,
         screen: screen.lock().unwrap().clone(),
         opened: *opened.lock().unwrap(),
+        _capture_guard: capture_guard,
     };
     r
 }

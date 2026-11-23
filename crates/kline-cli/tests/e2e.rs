@@ -1641,7 +1641,8 @@ fn missing_definitions_say_how_to_fix_it() {
 #[test]
 fn setup_copies_the_definitions_and_then_ecu_works() {
     let src = temp_dir("setup-src");
-    let dest = temp_dir("setup-dest").join("ecus");
+    let dest_root = temp_dir("setup-dest");
+    let dest = dest_root.join("ecus");
     std::fs::copy(
         fixture_path("sirius_cli.xml"),
         src.join("SIRIUS32___EMS3132___Soft_RE1_maj.xml"),
@@ -1706,17 +1707,18 @@ fn setup_copies_the_definitions_and_then_ecu_works() {
 }
 
 /// A definitions directory with the BMT fixture under both real BMT file names.
-fn two_bmt_defs() -> String {
+fn two_bmt_defs() -> (TempDir, String) {
     let d = temp_dir("bmt-defs");
     for name in ["BMT_X65_ph1_p.xml", "BMT_SAGEM.xml"] {
         std::fs::copy(fixture_path("bmt_cli.xml"), d.join(name)).unwrap();
     }
-    path_str(&d)
+    let p = path_str(&d);
+    (d, p)
 }
 
 #[test]
 fn bmt_definition_shortcuts_resolve_an_ambiguous_config_write() {
-    let defs = two_bmt_defs();
+    let (_dir, defs) = two_bmt_defs();
     let exec = |ecu: &str| {
         run_opts(
             bmt_ecu(),
@@ -1764,7 +1766,7 @@ fn bmt_definition_shortcuts_resolve_an_ambiguous_config_write() {
 /// Expert ones (`3B D2 0E 01`, index 14), with the same message as the Tier 2 write.
 #[test]
 fn unresolved_bmt_refuses_expert_3b_d2_like_tier_2() {
-    let defs = two_bmt_defs();
+    let (_dir, defs) = two_bmt_defs();
     let exec = |req: &str| {
         run_opts(
             bmt_ecu(),
@@ -1842,16 +1844,17 @@ fn ecu_bmt_with_one_definition_still_refuses_a_config_write() {
 }
 
 /// A definitions directory with bmt_cli.xml as ph1_p and bmt_cli_alt.xml as SAGEM.
-fn differing_bmt_defs() -> String {
+fn differing_bmt_defs() -> (TempDir, String) {
     let d = temp_dir("bmt-defs-diff");
     std::fs::copy(fixture_path("bmt_cli.xml"), d.join("BMT_X65_ph1_p.xml")).unwrap();
     std::fs::copy(fixture_path("bmt_cli_alt.xml"), d.join("BMT_SAGEM.xml")).unwrap();
-    path_str(&d)
+    let p = path_str(&d);
+    (d, p)
 }
 
 #[test]
 fn ambiguous_ident_explains_the_impact_and_names_the_differing_bits() {
-    let defs = differing_bmt_defs();
+    let (_dir, defs) = differing_bmt_defs();
     let (r, _) = run(bmt_ecu(), &["--defs", &defs, "ident", "--ecu", "bmt"]);
     assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
     for needle in [
@@ -1888,7 +1891,7 @@ fn ambiguous_ident_explains_the_impact_and_names_the_differing_bits() {
 
 #[test]
 fn read_and_live_with_an_unresolved_bmt_choice_show_both_decodings_where_they_differ() {
-    let defs = differing_bmt_defs();
+    let (_dir, defs) = differing_bmt_defs();
     let (r, j) = run(
         bmt_ecu(),
         &["--defs", &defs, "read", "--ecu", "bmt", "21A1"],
@@ -2382,4 +2385,23 @@ fn wrong_sync_byte_warns_but_does_not_fail() {
     let (r, _) = run(sirius_ecu(), &["--json", "connect", "--xml", &sx]);
     assert_eq!(connected(&r)["sync_ok"], json!(true));
     assert!(r.event("warning").iter().all(|w| w["kind"] != "sync_byte"));
+}
+
+/// Test hygiene: temp dirs and the capture dir of a run are removed when dropped (they used
+/// to pile up as /tmp/kline-cli-test-*).
+#[test]
+fn test_temp_dirs_are_removed_on_drop() {
+    let d = temp_dir("drop");
+    std::fs::write(d.join("x"), "x").unwrap();
+    let p = d.to_path_buf();
+    drop(d);
+    assert!(!p.exists(), "{}", p.display());
+    let (r, _) = run(
+        sirius_ecu(),
+        &["clear-dtc", "--xml", &xml("sirius_cli.xml")],
+    );
+    let cap = r.capture_dir.clone();
+    assert!(cap.exists());
+    drop(r);
+    assert!(!cap.exists(), "{}", cap.display());
 }
