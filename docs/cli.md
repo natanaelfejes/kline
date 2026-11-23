@@ -165,7 +165,7 @@ nothing.
 | `clear-dtc [--ddt2000-clear]` | Tier 1 clear: prints the exact bytes (default: `ClearDiagnosticInformation.*` if the definition has one, else the definition's own `14 ..` request; Sirius `14 00 00`) and what DDT2000's global clear would send (`14 FF 00` for the Sirius), then the `exec` approval | `kline` only; `--ddt2000-clear` sends DDT2000's choice |
 | `scan --range 21:B0-C5 [--interval MS]` | kline-core `ScanPlan`: `21`/`1A` only, >= 200 ms apart, stops after 3 missing replies or a security NRC (exit 12) | `kline` only; not offered by kline-agent |
 | `risk REQ [--hold S --watch REQ]` | tier and `RiskInfo` of a request, nothing sent; for an allowed non-read also the exact `kline exec` command (`command:`, JSON `command`) with the given `--hold`/`--watch`; for the BMT remote learning without `--hold` it suggests `--hold 30 --watch 21A3` | exit 7 when forbidden, refused by the name guard, or `--watch` is not a read |
-| `exec REQ [--set ..] [--stop REQ [--stop-set ..]] [--hold S [--watch REQ [--watch-interval MS]]]` | ONE non-read request; `--stop` offers a second request afterwards (end of an actuator test) with its own `RiskInfo` and code; `--hold` keeps the session open after a positive reply, `--watch` reads one frame meanwhile | `kline` only, see below |
+| `exec REQ [--set ..] [--stop REQ [--stop-set ..]] [--hold S [--watch REQ [--watch-interval MS]]]` | ONE non-read request; `--stop` offers a second request afterwards (end of an actuator test) with its own `RiskInfo` and code (not on the ISO8 unit at `01`, ABS: refused before the port is opened, one approved request per session there); `--hold` keeps the session open after a positive reply, `--watch` reads one frame meanwhile | `kline` only, see below |
 | `replay FILE [--ecu/--xml]` | decodes a capture offline: wake-ups, each request with its replies (echo stripped, 0x78 sequences split), decoded with the definition if given | |
 | `prepare REQ` | `kline-agent` only: `RiskInfo` plus the exact `kline ... exec ...` command for a human | never sends |
 
@@ -446,9 +446,18 @@ link and the same `51`/`58` layout as the car's replies (2026-11-23). Use it wit
    sends `45` (MES_RAZ, Tier 1, brake-system warnings and prerequisites), then `kline dtc`
    again to see whether the slot stays empty.
 
-`41` downloads and `71` routine runs (live values, valve tests, bleeding, coding) are Expert
-and not usable yet: `exec` sends one request per session, while each `71` needs its `41`
-download in the same session. `kline risk --xml X24_ABS_Bosch5.3.xml 41..` shows why.
+`41` downloads and `71` routine runs (live values, valve tests, factory fill, bleeding,
+coding) are **forbidden** in kline-core on the Bosch 5.3 ABS (owner decision 2026-11-23,
+[SAFETY.md](SAFETY.md) "ABS / brake ECU"): a `71` can leave a valve or the pump energized, kline
+has no sequence executor that sends the OFF / FIN frame by itself, and whether the ECU releases
+its outputs on `3F` or keep-alive loss is NOT VERIFIED. `kline risk` and `exec` refuse them
+before the port is opened (exit 7); the factory fill / bleed bytes are named in the refusal
+("permanently forbidden: factory fill rig / brake bleed; use a garage"). When the definition
+does not declare `DC 83`, kline-core refuses them after the init on the key bytes the ECU
+answered (only init and `3F` go out). `exec --stop` with a non-read stop request is refused
+on the ISO8 unit at `01` (kline-core allows one approved request per session there).
+`11 FF`, `31 A0 00`, `32 A0 00` and `30 lid ..` are forbidden there too (no ABS requests).
+A lost reply to `45` points at `kline read .. 58`.
 
 ## Not verified (host and cable)
 

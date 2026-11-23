@@ -298,7 +298,9 @@ Reply checks: at least 3 bytes, `N` = byte count - 1, checksum. A one-byte paylo
 
 Positive replies on ISO8 start with the request SID + 0x40 (KWP rule, assumed for Safir) or
 with the request SID itself (Bosch 5.3 ABS, car 2026-11-23); `Request::decode_checked`
-accepts both for an ISO8 definition, as DDT2000's ISO8 parser checks no SID at all.
+accepts the echo only for a Bosch 5.3 ABS definition (ISO8 with key bytes KW1=220 / KW2=131,
+`DC 83`); other ISO8 definitions (Safir) keep the strict SID + 0x40 rule. DDT2000's ISO8
+parser checks no SID at all.
 
 ### Bosch 5.3 ABS (0x01, ISO8)
 
@@ -321,7 +323,10 @@ Verified on the car on 2026-11-23 (captures `20261123T1221*-X24_ABS_Bosch5_3-*`,
   before each request (`ReplyToRequest@Delay`), all from the X24 definition and accepted by
   the car.
 
-Not yet seen on the car: `45` (fault memory clear), any `41` download or `71` run. The full
+Not yet seen on the car: `45` (fault memory clear), any `41` download or `71` run. `41` and
+`71` are forbidden in kline (owner decision 2026-11-23, "Always forbidden: Bosch 5.3 ABS
+routines" below); whether the ECU releases its outputs on `3F` or keep-alive loss is NOT
+VERIFIED. The full
 command list, the download analysis and the tier proposal are in the separate ABS protocol
 notes (outside this repository, `drive-data/ABS-PROTOCOL.md`).
 
@@ -429,11 +434,11 @@ payload bytes and the target taken from the init that actually ran; the loaded d
 
 | Tier | Requests (exact bytes) | How |
 |---|---|---|
-| 0 Read | KWP: `3E [x]`, `10 81`, `10 A0`, `1A xx`, `21 xx` (exactly 2 bytes, BMT `21 A4` transponder *status* included), `17`/`18` + 1-3 bytes. ISO8 (Safir): `21`, `33 50`, `33 51`, `33 52`, `33 54` (exactly what Safir_1/Safir_2 contain). ISO8 Bosch 5.3 ABS (target ISO8 at 0x01): exactly `51` (identification) and `58` (fault memory); `21`/`33` are not reads there | `Session::request`; autonomous use OK (CLI, `--json`, MCP). Read-only scan via `ScanPlan` (below) |
-| 1 Service | KWP: `14 xx xx` clear DTC; not BMT: `30 lid` + 1-4 bytes output control (on a Sirius only exactly `30 id cmd cycles` with the 13 ids of the definition's "Output Temporary Control List" `80 82 83 86 88 8F 94 9E 9F A0 A7 AA AC` as exactly `30 id 00 cc` start with cycles `cc` 1..=10, `30 id 01 00` status or `30 id 11 00` stop; cycles 0 or above 10, other shapes and other ids are Expert), `11 FF` adaptation reset, exactly `32 A0 00` (end of injector inhibition; other `32`, and BMT `30`/`11`/`32`, are Expert, found in a review); Sirius `31 A0 00` injector inhibition (warning `StopsEngine`; "Fonctions particulieres" `31A000` has the function number at byte 2, final critique F02); BMT `31 C7 00 00 00` / `31 C8 00 00 00` remote learning, BMT actuator `31 out param count` with `out` 0xA0..=0xB3 except `A4`/`A5` (unnamed, Expert) and `A6`/`AB`/`AC` (forbidden); Bosch 5.3 ABS (ISO8 at 0x01) exactly `45` (fault memory clear) | human `Approval` per request |
+| 0 Read | KWP: `3E [x]`, `10 81`, `10 A0` (not on the airbag `2C`), `1A xx`, `21 xx` (exactly 2 bytes, BMT `21 A4` transponder *status* included), `17`/`18` + 1-3 bytes. ISO8 (Safir): `21`, `33 50`, `33 51`, `33 52`, `33 54` (exactly what Safir_1/Safir_2 contain). ISO8 Bosch 5.3 ABS (target ISO8 at 0x01 that answered key bytes `DC 83`): exactly `51` (identification) and `58` (fault memory); `21`/`33` are not reads there. Another ISO8 unit at 0x01 (other key bytes) keeps the generic ISO8 tiers | `Session::request`; autonomous use OK (CLI, `--json`, MCP). Read-only scan via `ScanPlan` (below) |
+| 1 Service | (none on the airbag `2C`, see below) KWP: `14 xx xx` clear DTC; not BMT: `30 lid` + 1-4 bytes output control (on a Sirius only exactly `30 id cmd cycles` with the 13 ids of the definition's "Output Temporary Control List" `80 82 83 86 88 8F 94 9E 9F A0 A7 AA AC` as exactly `30 id 00 cc` start with cycles `cc` 1..=10, `30 id 01 00` status or `30 id 11 00` stop; cycles 0 or above 10, other shapes and other ids are Expert), `11 FF` adaptation reset, exactly `32 A0 00` (end of injector inhibition; other `32`, and BMT `30`/`11`/`32`, are Expert, found in a review); Sirius `31 A0 00` injector inhibition (warning `StopsEngine`; "Fonctions particulieres" `31A000` has the function number at byte 2, final critique F02); BMT `31 C7 00 00 00` / `31 C8 00 00 00` remote learning, BMT actuator `31 out param count` with `out` 0xA0..=0xB3 except `A4`/`A5` (unnamed, Expert) and `A6`/`AB`/`AC` (forbidden); Bosch 5.3 ABS (ISO8 at 0x01, `DC 83`) exactly `45` (fault memory clear) | human `Approval` per request; on the ISO8 unit at 0x01 only one approved request per session (`OneApprovedRequestPerSession`) |
 | 2 Config write | BMT `3B D2 index value` (index 0..=13 except 2, value 0/1; index 3 TRF = remote type RF/infrared, warning `ChangesRemoteType`, also with any other value, then with the text "unknown TRF value"); other KWP ECUs `3B lid` + 1-4 bytes | human `Approval`, plus in the same session: a positive backup read (`21 A1` for BMT `3B D2`, else `21 lid`) and a positive `21 80` whose exact reply the caller says it chose the ECU definition from (BMT config indices differ between BMT_X65_ph1_p and BMT_SAGEM) |
-| 3 Expert | any other request that is not forbidden (undocumented service, identifier, parameters or length), including `27` security access (`SecurityAccess`, `MayBrickEcu`), `34`-`37` transfer and `31 81`/`31 82` flash erase/checksum on non-BMT ECUs (`MayBrickEcu`, `MayLeaveProgrammingSession`), `10 xx` other than `10 81`/`10 A0` (`MayLeaveProgrammingSession`), `3D`/`38`-`3A`/`2C`/`23` on non-immobilizer ECUs (maintainer decision 2026-11-22, final); on the Bosch 5.3 ABS every `41` RAM download (`MayBrickEcu`) and every `71` routine run (bare `71`: runs the loaded routine, `UnknownEffect`; 11 bytes: valve/pump frame, `MovesActuator`; any other length: parameter frame, `EepromWrite`) | human *expert* `Approval` (10-character code), `RiskInfo` with "unknown effect" and the specific warnings |
-| forbidden | the immobilizer line only, see below | never, not even in expert mode |
+| 3 Expert | any other request that is not forbidden (undocumented service, identifier, parameters or length), including `27` security access (`SecurityAccess`, `MayBrickEcu`), `34`-`37` transfer and `31 81`/`31 82` flash erase/checksum on non-BMT ECUs (`MayBrickEcu`, `MayLeaveProgrammingSession`), `10 xx` other than `10 81`/`10 A0` (`MayLeaveProgrammingSession`), `3D`/`38`-`3A`/`2C`/`23` on non-immobilizer ECUs (maintainer decision 2026-11-22, final) | human *expert* `Approval` (10-character code), `RiskInfo` with "unknown effect" and the specific warnings |
+| forbidden | the immobilizer line, the Bosch 5.3 ABS `41`/`71`, the airbag firing-line / crash-data / clear / output / session requests, see below | never, not even in expert mode |
 
 ### Always forbidden: the immobilizer
 
@@ -475,6 +480,43 @@ not safety rules:
   `Session::stop` send them. ISO8 `36` (keep-alive) and `3F` (stop) are protocol-required
   (RE: KWP2000Diag4 ISO8Ecu init) although no Safir definition lists them (the Bosch 5.3
   definitions list `36` as MES_NOP; it stays reserved).
+
+### Always forbidden: Bosch 5.3 ABS routines (owner decision 2026-11-23)
+
+`DenyReason::BoschAbsRoutine { service, names }`, on the target ISO8 at 0x01 that answered key
+bytes `DC 83`:
+
+- Every `41` (RAM download of 80C196 code) and every `71` (run of the downloaded routine), any
+  length. A `71` frame opens inlet / outlet valves or runs the return pump; kline has no
+  sequence executor that sends the matching OFF / FIN frame by itself on an error, a lost reply
+  or Ctrl-C, and **whether the ECU releases its outputs when it receives `3F` or when the
+  keep-alive `36` stops is NOT VERIFIED**. That is the reason for the forbid.
+- Named in the refusal: the X24_ABS_Bosch5.3 factory fill (`DOWNLOAD_remplissage_usine`,
+  `MES_REMPLISSAGE`, `MES_REMPLISSAGE_Message2`..`8`) and brake bleed (`DOWNLOAD_PURGE`,
+  `DOWNLOAD_Y265K14311`, `MES_PURGE_*`: `GARAGE_*`, `SEC_*`, `ECH_*`, `DESACTIVE_*`,
+  `CONDITIONS`), downloads by their 9-byte header, `71` frames by exact bytes
+  (docs/SAFETY.md "ABS / brake ECU" has the table).
+- Not implemented, future path only: a sequence executor that sends only frames pinned by
+  exact bytes, in the definition's order, and sends the OFF / FIN frame automatically on any
+  error or Ctrl-C. Until it exists and the output release on `3F` / keep-alive loss is
+  verified on the car, nothing of this is reachable.
+
+On the ISO8 unit at 0x01 with any key bytes the generic engine forms `11 FF`, `31 A0 00`,
+`32 A0 00` and `30 lid` + 1-4 bytes are forbidden (`SafetySystemForbidden`), and `Session`
+refuses a second approved request in the same session (`OneApprovedRequestPerSession`), so no
+caller can chain a download and a run.
+
+### Always forbidden: airbag ECU (owner decision 2026-11-23)
+
+`DenyReason::SafetySystemForbidden { name }` at address 0x2C, any protocol, with or without a
+definition (it no longer depends on name-guard keyword matches): `3B D0` (firing line lock /
+unlock, passenger airbag inhibit), `3B D2` / `3B D3` (firing line impedance thresholds),
+`3B D6` (configuration 2: which airbags, pretensioners, crash output exist), `3B D7`
+(robustness counter reset), `3B E0` (crash counter reset, supplier mode); every `14` (fault
+clear; on AB80 `14 FF 00` is the EEPROM reset); every `30` (AB80 `30 80` crash output); every
+`10` except exactly `10 81` (`10 80` supplier, `10 A0` engineering "BE", `10 B0` production,
+`10 C0` after-sales); `11 FF`, `31 A0 00`, `32 A0 00`. Tier 0 there: `21 xx`, `1A xx`,
+`17`/`18`, `3E`, `10 81`. Dates `3B B0`/`3B C0` and configuration 1 `3B D1` stay Tier 2.
 
 Every non-read to the ABS (ISO8 at 0x01) also carries `SafetySystem` first, the brake text
 (`RiskInfo::safety_system`) and brake prerequisites (stationary, engine off, handbrake; read
@@ -539,7 +581,8 @@ command, every request and reply logged. Never scans `30`/`31`/`3B` or anything 
   is now known from DDT2000's errors.xml).
 - Bosch 5.3 ABS: what `45` answers and whether it clears; whether the X65 software (51:
   `02 49 12`) has the ROM entry points the X24/J64 download blocks call; whether the X24 fault
-  code list applies to this car.
+  code list applies to this car; whether the ECU releases valves and pump on `3F` or when the
+  keep-alive stops (the reason `41`/`71` are forbidden).
 - The 5000 ms / 10x responsePending bounds; DTR effect on the KKL cable.
 - Fast init on 0x7A.
 - Whether any ECU needs a wider keyword window than KW2Timeout + 100 (`kw_window_ms`).

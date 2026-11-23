@@ -5,7 +5,8 @@ code and covered by tests. Code comments refer to them as "SAFETY.md rule N". Th
 bytes for each tier are in [protocol.md](protocol.md#safety-policy).
 
 In short: reads are free, anything else needs a human to approve that exact request in a
-terminal, and the immobilizer is never touched.
+terminal, the immobilizer is never touched, and on the ABS and the airbag nothing that can leave
+a brake valve open, disable an airbag or erase crash data is ever sent (rule 5).
 
 ## Rule 1: Renault data never enters git
 
@@ -19,8 +20,8 @@ Default-deny, decided on exact payload bytes and the target of the init that act
 (owner-approved tiers, [protocol.md "Safety policy"](protocol.md#safety-policy)):
 
 - **Tier 0 READ**: documented reads only (KWP `21 xx`/`1A xx` exactly 2 bytes, `17`/`18`, `3E`,
-  `10 81`, `10 A0`; Safir `21`, `3350`, `3351`, `3352`, `3354`; Bosch 5.3 ABS (ISO8 at `0x01`)
-  exactly `51` and `58`). The only tier library code paths, `--json`, MCP and tests against a
+  `10 81`, `10 A0` (not on the airbag `0x2C`); Safir `21`, `3350`, `3351`, `3352`, `3354`;
+  Bosch 5.3 ABS (ISO8 at `0x01`, key bytes `DC 83`) exactly `51` and `58`). The only tier library code paths, `--json`, MCP and tests against a
   real port may execute.
 - **Tier 1 SERVICE** (clear DTC `14`, output tests `30`, adaptation reset `11 FF`/`32`, Sirius
   `31A000` injector inhibition, BMT `31C7`/`31C8` remote learning and `31 out` actuators; see "Output control ids" below), **Tier 2 CONFIG WRITE**
@@ -43,8 +44,8 @@ Default-deny, decided on exact payload bytes and the target of the init that act
   warnings (`MayBrickEcu`, `MayLeaveProgrammingSession`, `SecurityAccess`), not forbidden
   (owner decision 2026-11-22, final; on the BMT see rule 3). BMT memory read `23` stays Expert
   (owner decision, step 7).
-- **Airbag ECU.** Requests to the airbag ECU (`0x2C` in the X65 addressing) follow the normal
-  tiers, but every non-read carries the `SafetySystem` warning, an airbag risk text
+- **Airbag ECU.** Requests to the airbag ECU (`0x2C` in the X65 addressing) that rule 5 does
+  not forbid follow the normal tiers, but every non-read carries the `SafetySystem` warning, an airbag risk text
   (`RiskInfo::safety_system`: disabled airbags or pretensioners, airbag lamp, squib on an
   output test) and airbag prerequisites, in addition to the request's own warnings, text and
   prerequisites (none of those is dropped).
@@ -66,19 +67,17 @@ Default-deny, decided on exact payload bytes and the target of the init that act
   Other (non-Sirius, non-BMT) ECUs keep `30 lid` + 1-4 bytes as Tier 1. The S2000 definition (Generic class) lists
   more ids (`87`, `8B`, `8C`, `B5`..): at address `7A` the Sirius allowlist applies to it and those ids are
   Expert; at any other address, with no Sirius definition, it keeps `30 lid` + 1-4 bytes as Tier 1. The A/C text is Sirius-only.
-- **ABS / brake ECU (audit 2026-11-23).** The Bosch 5.3 ABS (target ISO8 at `0x01`, key bytes
-  `DC 83`, car-verified) has only two reads: `51` identification and `58` fault memory, exactly
-  one byte (Tier 0). `45` clears the fault memory (Tier 1, `ErasesFaultMemory`). `41 ..`
-  downloads 80C196 machine code into the ABS RAM and `71 ..` runs it: both Tier 3 Expert, never
-  Tier 0, because the download blocks come from other vehicles' definitions (X24 Master, J64
-  Scenic RX4), call ROM entry points this car's software is not verified to have, and the same
-  `71` bytes read, move valves or write EEPROM depending on the block loaded before
-  (`41` `MayBrickEcu`; bare `71` `UnknownEffect`; 11-byte `71` valve/pump frames
-  `MovesActuator`; other `71` frames `EepromWrite`). Safir `21`/`33` are not reads there. Every
-  non-read carries `SafetySystem` first, a brake text and brake prerequisites (stationary,
-  engine off, handbrake; afterwards ignition cycle, ABS lamp out, firm pedal, brake test at
-  walking speed), like the airbag rule. `kline exec` sends one request per session, so a
-  download followed by its `71` is not possible yet.
+- **ABS / brake ECU (audit 2026-11-23, owner decision 2026-11-23).** The Bosch 5.3 ABS
+  (target ISO8 at `0x01` that answered key bytes `DC 83`, car-verified; another ISO8 unit at
+  `0x01` keeps the generic ISO8 tiers) has only two reads: `51` identification and `58` fault
+  memory, exactly one byte (Tier 0). `45` clears the fault memory (Tier 1, `ErasesFaultMemory`).
+  Every `41` RAM download and `71` routine run is forbidden (rule 5). Safir `21`/`33` are not
+  reads there (Expert). Every non-read carries `SafetySystem` first, a brake text and brake
+  prerequisites (stationary, engine off, handbrake; afterwards ignition cycle, ABS lamp out,
+  firm pedal, brake test at walking speed), like the airbag rule. On the ISO8 unit at `0x01`
+  (any key bytes) `Session` refuses a second approved request in one session
+  (`OneApprovedRequestPerSession`), and `kline exec` refuses a non-read `--stop` there before
+  opening the port: no approved request can follow another one (defence in depth).
 - **BMT actuator `A4`/`A5`** (unnamed "LO"/"LF" lines) are Tier 3 Expert; the other outputs
   `A0`..`B3` stay Tier 1, `A6`/`AB`/`AC` stay forbidden, `B4`+ stays Expert.
 - **BMT actuators.** `31 out param count` stays Tier 1; on the lock motors (`A0`/`A1`) and the
@@ -87,7 +86,8 @@ Default-deny, decided on exact payload bytes and the target of the init that act
 
 ## Rule 3: never touch the immobilizer or transponder
 
-In any tier, including expert. This is the only forbidden class (owner-approved).
+In any tier, including expert (owner-approved). The other forbidden class is rule 5 (ABS and
+airbag).
 
 - **On a BMT/UCH/decoder** (address `0x26`/`0xA6`, or any ECU whose loaded definition is a
   BMT/UCH/decoder: `kline_core::spec::definition_guard`): `3D`, `38`-`3A`, `2C`;
@@ -133,3 +133,74 @@ Writing, learning, resetting or disabling the immobilizer is never implemented.
 ## Rule 4: no network, no telemetry
 
 No network calls at runtime. No telemetry.
+
+## Rule 5: safety systems: ABS fill / bleed / routines and airbag firing lines
+
+In any tier, including expert; no flag, feature or approval unlocks it (owner decision
+2026-11-23). Enforced in `kline-core` (`safety::forbidden`), on the exact bytes and the init
+target, also without a loaded definition. Refusal reasons: `DenyReason::BoschAbsRoutine` and
+`DenyReason::SafetySystemForbidden`; the message names the request and says "permanently
+forbidden".
+
+### ABS / brake ECU (Bosch 5.3, ISO8 at `0x01`, key bytes `DC 83`)
+
+**Why.** `41 04 ..` downloads Intel 80C196 machine code into the ABS RAM and `71 ..` runs it:
+the `71` frames open inlet / outlet valves and run the return pump. A valve or the pump stays
+energized until the matching OFF / FIN frame. kline has no sequence executor that would send
+that frame by itself on an error, a lost reply or Ctrl-C, and **whether the ECU releases its
+outputs when it receives `3F` or when the keep-alive `36` stops is NOT VERIFIED**. A reviewer
+showed that a download followed by a `71` was reachable (`exec 41.. --stop 71..`). So every
+`41` and every `71` is forbidden, and the factory fill and bleed are forbidden by name: they
+need the filling rig or a garage bleeding procedure.
+
+| Name (X24_ABS_Bosch5.3) | Bytes | Purpose | Why forbidden |
+|---|---|---|---|
+| any download | `41 ..` | load 80C196 code into the ABS RAM (DOWNLOAD_*, DL_*) | the code comes from other vehicles' definitions and calls ROM entry points not verified on this ABS software (`51`: `02 49 12`); it prepares a `71` |
+| any routine run | `71 ..` | run the routine loaded last (valves, pump, EEPROM coding, live values) | outputs can stay energized; release on `3F` / keep-alive loss NOT VERIFIED |
+| DOWNLOAD_remplissage_usine | `41 04 00 00 00 00 12 06 00 ..` (131 bytes) | factory fill routine | factory filling rig only: permanently forbidden, use a garage |
+| DOWNLOAD_PURGE | `41 04 00 00 00 00 12 06 00 ..` (134 bytes) | brake bleed routine | brake bleed: permanently forbidden, use a garage |
+| DOWNLOAD_Y265K14311 | `41 04 00 00 BB 07 07 64 07 ..` (113 bytes) | valve / pump driver the bleed frames run | brake bleed: permanently forbidden, use a garage |
+| MES_REMPLISSAGE | `71 B8 0B E8 03 16 00 52 54 22 64` | factory fill, start parameters | factory filling rig only |
+| MES_REMPLISSAGE_Message2..8 | `71 FF 52 FF 54 00 00 FF 40 FF 42`, `71 FF 30 FF 32 00 00 FF 34 FF 36`, `71 FF 38 FF 3A 00 00 FF 3C FF 3E`, `71 00 52 00 54 00 00 00 40 00 42`, `71 00 30 00 32 00 00 00 34 00 36`, `71 00 38 00 3A 00 00 00 3C 00 3E`, `71 00 22 00 62 00 00 FF 64 00 00` | factory fill steps: valve pairs and pump ON / OFF | factory filling rig only |
+| MES_PURGE_GARAGE_{AVG,AVD,ARG,ARD,ASV1,ASV2}_{ON,OFF}, MES_PURGE_GARAGE_FIN | 11 bytes each, e.g. `71 FF 30 FF 32 00 00 00 00 00 00` (ARD_ON), `71 00 30 00 32 00 00 00 00 00 00` (ARD_OFF), `71 00 22 00 62 00 00 FF 64 00 00` (FIN) | garage bleed: opens the valves of one wheel / the ASR valves, then ends | brake bleed: permanently forbidden, use a garage |
+| MES_PURGE_SEC_21/22/23/25, MES_PURGE_ECH_ARG/ARD, MES_PURGE_DESACTIVE_24/25/26/CONDIT, MES_PURGE_CONDITIONS | 11 bytes each, e.g. `71 00 52 FF 54 00 00 00 00 00 00` (SEC_21), `71 FF 38 FF 3A E8 03 00 38 00 3A` (ECH_ARD) | bleed sequence steps (secondary circuit, exchange, deactivate, conditions) | brake bleed: permanently forbidden, use a garage |
+
+The complete 32 frames are `safety::BOSCH_ABS_FILL_BLEED_FRAMES`; the test
+`crates/kline-core/tests/bosch_abs_forbidden.rs` checks them and the download headers against
+the XML both ways (skipped without `ddt-xml/`). Only the 9-byte headers of the downloads are in
+the code, not the Renault routine code (rule 1).
+
+Also on the ISO8 unit at `0x01` (any key bytes): the generic engine forms `11 FF`, `31 A0 00`,
+`32 A0 00` and `30 lid` + 1-4 bytes (no ABS requests), and a second approved request in one
+session.
+
+**Future path, NOT IMPLEMENTED.** A sequence executor that only sends frames pinned by exact
+bytes in the definition's order and sends the OFF / FIN frame automatically on any error, lost
+reply or Ctrl-C, after the output release on `3F` / keep-alive loss has been verified on the
+car. Until then nothing above is reachable, and the factory fill and bleed stay forbidden even
+then.
+
+### Airbag ECU (address `0x2C`, any protocol, with or without a definition)
+
+**Why.** Owner policy: airbag faults are not cleared yet, and nothing touches the firing
+lines or the crash data. Before this rule `3B D0`/`3B D6`/`3B E0` were refused only by
+name-guard false positives ("verrou", "cle"), `30 80` and `14 FF 00` were Tier 1, `10 A0` was
+Tier 0 and `3B D2`/`D3`/`D7`, `10 80` were Expert (command inventory 2026-11-23, AB70_X65 and
+AB80_X65_X90_V1).
+
+| Name (AB70 / AB80) | Bytes | Purpose | Why forbidden |
+|---|---|---|---|
+| Verrouillage / Deverrouillage MAF; Inhibition-Reactivation AB_PSG | `3B D0 ..` (`00` unlock, `FF` lock, `55` / `AA` passenger airbag active / inhibited) | firing line lock state, passenger airbag inhibit | a locked line or an inhibited airbag does not fire, silently |
+| Correction impedances lignes (frontales) | `3B D2 ..` | squib line impedance windows | a broken firing line can look healthy (lamp off, airbag cannot fire) |
+| Correction impedances lignes laterales | `3B D3 ..` | side squib line impedance windows | same |
+| Configuration 2 du systeme | `3B D6 ..` | which airbags, pretensioners, crash output exist | SANS for a present component stops monitoring and firing it |
+| ResetCptRobust | `3B D7 ..` | robustness counter reset | crash-record related, effect unknown |
+| Reset compteur crash / ResetBE | `3B E0 ..` | crash counter reset, supplier mode | erases crash evidence |
+| ClearDiagInfo / Reinitialisation EEPROM | `14 ..` (any) | fault memory clear; on AB80 `14 FF 00` resets the EEPROM | no airbag fault clear yet (owner); EEPROM reset can unconfigure the airbags |
+| Activation sortie crash | `30 ..` (any; AB80 `30 80 00`/`01`/`12`) | drives the crash output line | simulates a crash signal to the other ECUs |
+| StartDiagSession other than `10 81` | `10 80` supplier, `10 A0` BE (engineering), `10 B0` production, `10 C0` after-sales, and any `10` other than exactly `10 81` | privileged sessions | gate of the forbidden writes; `10 A0` is the engineering session on this ECU, not a read |
+| generic engine forms | `11 FF`, `31 A0 00`, `32 A0 00` | adaptation reset / injector inhibition elsewhere | no airbag requests |
+
+Tier 0 on the airbag stays the reads: `21 xx`, `1A xx`, `17`/`18`, `3E`, `10 81`. The dates
+(`3B B0`, `3B C0`) and configuration 1 (`3B D1`) stay Tier 2 with the airbag warnings. The
+name guard is unchanged (it still refuses immobilizer-named requests on every ECU).
