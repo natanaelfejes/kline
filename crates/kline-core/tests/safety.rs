@@ -1171,12 +1171,25 @@ fn bosch_abs_downloads_and_routine_runs_are_forbidden() {
     );
     // One byte more or less is not the named frame, and still forbidden.
     assert!(forbidden(&[0x71, 0xFF, 0x30, 0xFF, 0x32, 0, 0, 0, 0, 0]).is_empty());
-    // Not on other targets: there 41/71 keep the generic (pre-ABS) tiers.
-    let iso8_01_other = Target {
-        keywords: Some((0xC2, 0x85)),
+    // Any ISO8 unit at 0x01 (an ABS variant with other key bytes, or none known): forbidden
+    // too, named the same way (coordinator follow-up 2026-11-23).
+    for keywords in [Some((0xC2, 0x85)), Some((0xDC, 0x84)), None] {
+        let t = Target { keywords, ..ABS };
+        for p in [&pump_on[..], &[0x41], &[0x71]] {
+            assert!(
+                matches!(reason(&t, p), Some(DenyReason::BoschAbsRoutine { .. })),
+                "{t:?} {p:02X?}"
+            );
+        }
+        // The Bosch-specific reads are not reads there.
+        assert_eq!(tier_of(&t, &[0x51]).unwrap(), Tier::Expert, "{t:?}");
+    }
+    // Other targets keep the generic (pre-ABS) tiers: Safir at 7A, KWP at 01.
+    let kwp01 = Target {
+        protocol: Protocol::Kwp,
         ..ABS
     };
-    for t in [iso8_01_other, SAFIR] {
+    for t in [SAFIR, kwp01] {
         assert_eq!(tier_of(&t, &pump_on).unwrap(), Tier::Expert, "{t:?}");
     }
 }

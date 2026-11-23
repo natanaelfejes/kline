@@ -268,11 +268,11 @@ fn exec_download_with_stop_run_is_refused_before_init() {
     assert!(j.writes().is_empty());
 }
 
-/// When the definition does not declare the key bytes, the preview cannot know the unit is the
-/// Bosch 5.3 ABS; kline-core decides on the key bytes the ECU answered (DC 83) and refuses the
-/// download after the init: only the init and the 3F stop go out.
+/// When the definition does not declare the key bytes, the download is still refused before
+/// the port is opened: every `41` / `71` is forbidden on any ISO8 unit at 0x01, whatever key
+/// bytes it answers (an ABS variant with other key bytes must not get them as Expert).
 #[test]
-fn exec_download_is_refused_by_the_session_on_the_answered_key_bytes() {
+fn exec_download_is_refused_without_declared_key_bytes() {
     let src = std::fs::read_to_string(fixture_path("bosch_abs_iso8.xml")).unwrap();
     let nokw = src.replace(r#"<KW1 Value="220"/><KW2 Value="131" Timeout="1500"/>"#, "");
     assert_ne!(nokw, src);
@@ -280,27 +280,23 @@ fn exec_download_is_refused_by_the_session_on_the_answered_key_bytes() {
     let path = dir.join("abs_nokw.xml");
     std::fs::write(&path, nokw).unwrap();
     let path = path.display().to_string();
-    let (r, j) = run_opts(
-        bosch_abs_ecu(),
-        &["--trace", "exec", "--xml", &path, "41040000030000F0"],
-        Opts {
-            interactive: true,
-            human: Human::TypesShownCode,
-            ..Opts::default()
-        },
-    );
-    assert_eq!(r.code, 7, "{}\n{}\n{}", r.stdout, r.stderr, r.screen);
-    assert!(r.opened);
-    assert!(r.stderr.contains("permanently forbidden"), "{}", r.stderr);
-    // ISO8 frames on the wire: only the stop `02 3F 41` after the 5-baud init.
-    let tx: Vec<&str> = r
-        .stderr
-        .lines()
-        .filter_map(|l| l.split_once("] TX ").map(|(_, f)| f))
-        .collect();
-    assert_eq!(tx, ["02 3F 41 (inter-byte 5 ms)"], "{}", r.stderr);
-    assert!(j.writes().is_empty());
-    assert!(!r.screen.contains("APPROVAL REQUIRED"), "{}", r.screen);
+    for req in ["41040000030000F0", "71", "71FF30FF32000000000000"] {
+        let (r, j) = run_opts(
+            bosch_abs_ecu(),
+            &["--trace", "exec", "--xml", &path, req],
+            Opts {
+                interactive: true,
+                human: Human::TypesShownCode,
+                ..Opts::default()
+            },
+        );
+        assert_eq!(r.code, 7, "{req}: {}\n{}\n{}", r.stdout, r.stderr, r.screen);
+        assert!(!r.opened, "{req}");
+        assert!(r.stderr.contains("permanently forbidden"), "{}", r.stderr);
+        assert!(!r.stderr.contains("] TX "), "{}", r.stderr);
+        assert!(j.writes().is_empty());
+        assert!(r.screen.is_empty(), "{}", r.screen);
+    }
 }
 
 /// A lost reply to the ABS fault memory erase `45` points at the fault memory read `58`.

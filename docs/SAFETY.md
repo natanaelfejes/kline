@@ -69,9 +69,11 @@ Default-deny, decided on exact payload bytes and the target of the init that act
   Expert; at any other address, with no Sirius definition, it keeps `30 lid` + 1-4 bytes as Tier 1. The A/C text is Sirius-only.
 - **ABS / brake ECU (audit 2026-11-23, owner decision 2026-11-23).** The Bosch 5.3 ABS
   (target ISO8 at `0x01` that answered key bytes `DC 83`, car-verified; another ISO8 unit at
-  `0x01` keeps the generic ISO8 tiers) has only two reads: `51` identification and `58` fault
+  `0x01` keeps the generic ISO8 tiers, except that `41`/`71` are forbidden there too) has only
+  two reads: `51` identification and `58` fault
   memory, exactly one byte (Tier 0). `45` clears the fault memory (Tier 1, `ErasesFaultMemory`).
-  Every `41` RAM download and `71` routine run is forbidden (rule 5). Safir `21`/`33` are not
+  Every `41` RAM download and `71` routine run is forbidden (rule 5), on any ISO8 unit at
+  `0x01` whatever its key bytes. Safir `21`/`33` are not
   reads there (Expert). Every non-read carries `SafetySystem` first, a brake text and brake
   prerequisites (stationary, engine off, handbrake; afterwards ignition cycle, ABS lamp out,
   firm pedal, brake test at walking speed), like the airbag rule. On the ISO8 unit at `0x01`
@@ -142,7 +144,7 @@ target, also without a loaded definition. Refusal reasons: `DenyReason::BoschAbs
 `DenyReason::SafetySystemForbidden`; the message names the request and says "permanently
 forbidden".
 
-### ABS / brake ECU (Bosch 5.3, ISO8 at `0x01`, key bytes `DC 83`)
+### ABS / brake ECU (ISO8 at `0x01`, any key bytes; the car's Bosch 5.3 answers `DC 83`)
 
 **Why.** `41 04 ..` downloads Intel 80C196 machine code into the ABS RAM and `71 ..` runs it:
 the `71` frames open inlet / outlet valves and run the return pump. A valve or the pump stays
@@ -151,7 +153,10 @@ that frame by itself on an error, a lost reply or Ctrl-C, and **whether the ECU 
 outputs when it receives `3F` or when the keep-alive `36` stops is NOT VERIFIED**. A reviewer
 showed that a download followed by a `71` was reachable (`exec 41.. --stop 71..`). So every
 `41` and every `71` is forbidden, and the factory fill and bleed are forbidden by name: they
-need the filling rig or a garage bleeding procedure.
+need the filling rig or a garage bleeding procedure. The forbid applies to any ISO8 unit at `0x01`, whatever key bytes
+it answers (coordinator follow-up 2026-11-23): an ABS variant with other key bytes must not get
+`41`/`71` as Expert. Only the Bosch-specific Tier 0 (`51`/`58`), `45` and the Bosch risk texts
+need `DC 83`.
 
 | Name (X24_ABS_Bosch5.3) | Bytes | Purpose | Why forbidden |
 |---|---|---|---|

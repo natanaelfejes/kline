@@ -483,8 +483,9 @@ not safety rules:
 
 ### Always forbidden: Bosch 5.3 ABS routines (owner decision 2026-11-23)
 
-`DenyReason::BoschAbsRoutine { service, names }`, on the target ISO8 at 0x01 that answered key
-bytes `DC 83`:
+`DenyReason::BoschAbsRoutine { service, names }`, on any ISO8 target at 0x01 whatever key bytes
+it answered (the car's Bosch 5.3 answers `DC 83`; another ABS variant must not get `41`/`71` as
+Expert either):
 
 - Every `41` (RAM download of 80C196 code) and every `71` (run of the downloaded routine), any
   length. A `71` frame opens inlet / outlet valves or runs the return pump; kline has no

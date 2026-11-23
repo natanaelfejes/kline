@@ -28,7 +28,7 @@ fn code(r: Result<Tier, Denied>) -> u8 {
 /// The 1- and 2-byte payloads the owner decision of 2026-11-23 forbids on a safety-system ECU
 /// (written out here independently of the library): on the airbag ECU 0x2C (any protocol)
 /// every `14` and `30`, every `10` except `10 81`, `11 FF`, and `3B D0`/`D2`/`D3`/`D6`/`D7`/
-/// `E0`; on the ISO8 unit at 0x01 (any key bytes) `11 FF`.
+/// `E0`; on the ISO8 unit at 0x01 (any key bytes) `11 FF` and every `41` / `71`.
 fn owner_forbidden(t: &Target, p: &[u8]) -> bool {
     match t.ecu_address {
         0x2C => {
@@ -38,7 +38,7 @@ fn owner_forbidden(t: &Target, p: &[u8]) -> bool {
                 || (p[0] == 0x3B
                     && matches!(p.get(1), Some(0xD0 | 0xD2 | 0xD3 | 0xD6 | 0xD7 | 0xE0)))
         }
-        0x01 => t.protocol == Protocol::Iso8 && p == [0x11, 0xFF],
+        0x01 => t.protocol == Protocol::Iso8 && (p == [0x11, 0xFF] || matches!(p[0], 0x41 | 0x71)),
         _ => false,
     }
 }
@@ -75,7 +75,7 @@ const ADDRESSES: [u8; 6] = [0x01, 0x26, 0x2C, 0x40, 0x7A, 0xA6];
 /// rules; `Target` had no key bytes then), by an identical test (same [`owner_forbidden`])
 /// run in a checkout of that commit.
 const PRE_BRANCH: [(Protocol, u8, u64); 12] = [
-    (Protocol::Iso8, 0x01, 0xf494b970d0a1fd3a),
+    (Protocol::Iso8, 0x01, 0x984dde3bac9731da),
     (Protocol::Iso8, 0x26, 0x08a6aa874831fd38),
     (Protocol::Iso8, 0x2C, 0xe3dffae212e9b89a),
     (Protocol::Iso8, 0x40, 0x8720e16b0b4c3f36),
@@ -201,7 +201,8 @@ fn bosch_abs_tier_matrix() {
     assert_eq!(reads, [vec![0x51], vec![0x58]]);
 }
 
-/// Every payload of [`owner_forbidden`] is refused as a safety-system request at every key
+/// Every payload of [`owner_forbidden`] is refused as a safety-system request (or a Bosch
+/// 5.3 ABS routine) at every key
 /// bytes; nothing else at those targets is (the digests above cover the rest).
 #[test]
 fn owner_forbidden_payloads_are_refused_as_safety_system_requests() {
@@ -210,7 +211,7 @@ fn owner_forbidden_payloads_are_refused_as_safety_system_requests() {
         for a in 0..=255u8 {
             for p in [vec![a]].into_iter().chain((0..=255u8).map(|b| vec![a, b])) {
                 let got = tier_of(&t, &p);
-                let safety = matches!(&got, Err(d) if matches!(d.reason, DenyReason::SafetySystemForbidden { .. }));
+                let safety = matches!(&got, Err(d) if matches!(d.reason, DenyReason::SafetySystemForbidden { .. } | DenyReason::BoschAbsRoutine { .. }));
                 assert_eq!(safety, owner_forbidden(&t, &p), "{t:?} {p:02X?}: {got:?}");
                 n += usize::from(safety);
             }

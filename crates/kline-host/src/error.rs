@@ -146,7 +146,7 @@ pub fn deny_text(r: &DenyReason) -> String {
             names.join(" / ")
         ),
         DenyReason::BoschAbsRoutine { service, .. } => format!(
-            "Bosch 5.3 ABS {}: permanently forbidden: a routine can leave a valve or the pump energized and kline cannot guarantee the OFF frame (release on 3F / keep-alive loss NOT VERIFIED); use a garage (SAFETY.md \"ABS / brake ECU\")",
+            "ABS (ISO8 unit at 01) {}: permanently forbidden: a routine can leave a valve or the pump energized and kline cannot guarantee the OFF frame (release on 3F / keep-alive loss NOT VERIFIED); use a garage (SAFETY.md \"ABS / brake ECU\")",
             if *service == 0x41 { "41 RAM download" } else { "71 routine run" }
         ),
         DenyReason::SafetySystemForbidden { name } => format!(

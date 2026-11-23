@@ -7,7 +7,7 @@
 //! | [`Tier::Service`] | clear DTC, output tests (Sirius: the 13 listed output ids only), adaptation reset, Sirius `31 A0 00`, BMT remote learning and actuators (not `A4`/`A5`) | a human, one typed `Approval` per request |
 //! | [`Tier::ConfigWrite`] | `3B` config writes | a human `Approval`, after the backup read and (BMT) the `21 80` identification the definition was chosen from |
 //! | [`Tier::Expert`] | any other request that is not forbidden: undocumented services and identifiers, security access `27`, download/upload/transfer `34`-`37` and flash erase/checksum `31 81`/`31 82` (not on a BMT), other `10 xx` sessions, memory/routine-by-address services on non-immobilizer ECUs (with specific warnings such as [`Warning::MayBrickEcu`]) | a human expert `Approval` that shows the risk |
-//! | forbidden | on the airbag ECU (`2C`, any protocol) the firing-line, impedance, configuration 2 and crash/robustness counter writes `3B D0`/`D2`/`D3`/`D6`/`D7`/`E0`, every `14` and `30`, sessions other than `10 81`, and `11 FF`/`31 A0 00`/`32 A0 00`; on the ISO8 unit at `01` those generic forms and `30 lid ..` ([`DenyReason::SafetySystemForbidden`], owner decision 2026-11-23); the Bosch 5.3 ABS (ISO8 `01`, key bytes `DC 83`) RAM download `41` and routine run `71`, all of them, named when they are the factory fill / brake bleed ([`DenyReason::BoschAbsRoutine`], owner decision 2026-11-23); the immobilizer line (owner decision 2026-11-22, final): on a BMT/UCH/decoder (address `26`/`A6` or a BMT/UCH/decoder definition, [`DefinitionGuard`]) `3D`, `38`-`3A`, `2C`, `34`-`37`, `31`-`33` `81`/`82` (flash erase/checksum), `30`-`33` with `C0`-`C9` (except exact `31C7000000`/`31C8000000`) or with the immobilizer outputs `A6`/`AB`/`AC` ([`BMT_IMMOBILIZER_OUTPUTS`]), `2E`/`2F`, `3B` other than `3B D2` and `3B D2 x2` (AP1CLE, also with a high nibble), `21 A4` with extra bytes; on every other ECU routines `31`-`33`/`38`-`3A` on `A0 A3`; on a Sirius (`7A` or a Sirius definition) also `31`-`33 A3 ..` (function 0xA3, reset of the backed-up memory) and writes `2E`/`2F`/`3B` to the frames `A0`/`A2`/`AE`/`BD`; definition requests named like immobilizer/transponder/key ([`DenyReason::ImmobilizerNamed`]) | nobody, never |
+//! | forbidden | on the airbag ECU (`2C`, any protocol) the firing-line, impedance, configuration 2 and crash/robustness counter writes `3B D0`/`D2`/`D3`/`D6`/`D7`/`E0`, every `14` and `30`, sessions other than `10 81`, and `11 FF`/`31 A0 00`/`32 A0 00`; on the ISO8 unit at `01` those generic forms and `30 lid ..` ([`DenyReason::SafetySystemForbidden`], owner decision 2026-11-23); on the ISO8 unit at `01` (the ABS, any key bytes) every RAM download `41` and routine run `71`, named when they are the factory fill / brake bleed ([`DenyReason::BoschAbsRoutine`], owner decision 2026-11-23); the immobilizer line (owner decision 2026-11-22, final): on a BMT/UCH/decoder (address `26`/`A6` or a BMT/UCH/decoder definition, [`DefinitionGuard`]) `3D`, `38`-`3A`, `2C`, `34`-`37`, `31`-`33` `81`/`82` (flash erase/checksum), `30`-`33` with `C0`-`C9` (except exact `31C7000000`/`31C8000000`) or with the immobilizer outputs `A6`/`AB`/`AC` ([`BMT_IMMOBILIZER_OUTPUTS`]), `2E`/`2F`, `3B` other than `3B D2` and `3B D2 x2` (AP1CLE, also with a high nibble), `21 A4` with extra bytes; on every other ECU routines `31`-`33`/`38`-`3A` on `A0 A3`; on a Sirius (`7A` or a Sirius definition) also `31`-`33 A3 ..` (function 0xA3, reset of the backed-up memory) and writes `2E`/`2F`/`3B` to the frames `A0`/`A2`/`AE`/`BD`; definition requests named like immobilizer/transponder/key ([`DenyReason::ImmobilizerNamed`]) | nobody, never |
 //!
 //! Link frames (`81`, `82`, ISO8 `36`/`3F`) are refused as requests ([`DenyReason::ProtocolReserved`]),
 //! not as a safety rule: sent as a request they would desynchronise the session state machine.
@@ -786,8 +786,8 @@ pub enum DenyReason {
     /// A Tier 1-3 request of the loaded definition whose name looks immobilizer / transponder
     /// / key related ([`DefinitionGuard`]). Forbidden always, also in expert mode.
     ImmobilizerNamed { names: Vec<alloc::string::String> },
-    /// Bosch 5.3 ABS (ISO8 at 0x01, key bytes DC 83): every RAM download `41` and routine run
-    /// `71`. Forbidden always, also in expert mode (owner decision 2026-11-23). `names` are the
+    /// ISO8 unit at 0x01 (the ABS; any key bytes, the Bosch 5.3 answers DC 83): every RAM
+    /// download `41` and routine run `71`. Forbidden always, also in expert mode (owner decision 2026-11-23). `names` are the
     /// factory fill / brake bleed requests the bytes are ([`bosch_abs_fill_bleed_names`]),
     /// empty for any other `41`/`71`.
     BoschAbsRoutine {
@@ -1006,9 +1006,13 @@ fn forbidden_bytes(guard: &DefinitionGuard, target: &Target, payload: &[u8]) -> 
             name: "generic service on the ABS (11 FF adaptation reset, 31 A0 00 / 32 A0 00 routine, 30 output control): not an ABS request",
         });
     }
-    // Bosch 5.3 ABS: no RAM download, no routine run, in any tier (owner decision 2026-11-23,
-    // SAFETY.md "ABS / brake ECU").
-    if is_bosch_abs(target) && matches!(service, BOSCH_ABS_DOWNLOAD | BOSCH_ABS_RUN) {
+    // ABS: no RAM download, no routine run, in any tier (owner decision 2026-11-23, SAFETY.md
+    // "ABS / brake ECU"), on any ISO8 unit at 0x01 whatever its key bytes: an ABS variant with
+    // other key bytes must not get them as Expert.
+    if target.protocol == Protocol::Iso8
+        && target.ecu_address == ABS_ADDRESS
+        && matches!(service, BOSCH_ABS_DOWNLOAD | BOSCH_ABS_RUN)
+    {
         return Some(DenyReason::BoschAbsRoutine {
             service,
             names: bosch_abs_fill_bleed_names(payload),

@@ -452,9 +452,8 @@ coding) are **forbidden** in kline-core on the Bosch 5.3 ABS (owner decision 202
 has no sequence executor that sends the OFF / FIN frame by itself, and whether the ECU releases
 its outputs on `3F` or keep-alive loss is NOT VERIFIED. `kline risk` and `exec` refuse them
 before the port is opened (exit 7); the factory fill / bleed bytes are named in the refusal
-("permanently forbidden: factory fill rig / brake bleed; use a garage"). When the definition
-does not declare `DC 83`, kline-core refuses them after the init on the key bytes the ECU
-answered (only init and `3F` go out). `exec --stop` with a non-read stop request is refused
+("permanently forbidden: factory fill rig / brake bleed; use a garage"). They are refused on any
+ISO8 unit at `01`, whatever key bytes the definition declares or the ECU answers. `exec --stop` with a non-read stop request is refused
 on the ISO8 unit at `01` (kline-core allows one approved request per session there).
 `11 FF`, `31 A0 00`, `32 A0 00` and `30 lid ..` are forbidden there too (no ABS requests).
 A lost reply to `45` points at `kline read .. 58`.

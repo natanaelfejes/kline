@@ -443,14 +443,18 @@ fn iso8_abs_allows_one_approved_request_per_session() {
     assert!(one(s.service_challenge(&[0x45])));
     assert!(one(s.expert_challenge(&[0x22])));
     assert!(s.request(&[0x58], 20).is_ok());
-    // Another ISO8 unit at 0x01 (other key bytes: generic tiers, 41/71 Expert there): one
-    // approved download, and the run after it is refused.
+    // Another ISO8 unit at 0x01 (other key bytes: generic tiers; 41/71 forbidden there too):
+    // one approved Expert request, the next one is refused.
     let mut s = iso8_01(0xC2, 0x85);
-    let ch = s.expert_challenge(&[0x41, 0x04, 0x00]).unwrap();
+    assert!(matches!(
+        s.expert_challenge(&[0x41, 0x04, 0x00]),
+        Err(SessionError::Denied(ref d)) if matches!(d.reason, DenyReason::BoschAbsRoutine { .. })
+    ));
+    let ch = s.expert_challenge(&[0x22, 0x01]).unwrap();
     let code = ch.code().to_string();
     let a = Approval::confirm(ch, &code).unwrap();
-    send_iso8(&mut s, &[0x41, 0x04, 0x00], a);
-    assert!(one(s.expert_challenge(&[0x71])));
+    send_iso8(&mut s, &[0x22, 0x01], a);
+    assert!(one(s.expert_challenge(&[0x23])));
     // Elsewhere two approved requests in one session stay possible (BMT remote learning).
     let mut s = bmt();
     let a = approve(&mut s, &ERASE_AND_LEARN_1);
