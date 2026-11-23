@@ -261,6 +261,8 @@ pub struct FaultRule {
     pub on: Option<Vec<u8>>,
     pub fault: ReplyFault,
     pub times: Option<u32>,
+    /// Matching requests answered normally before the rule applies ([`FaultRule::after`]).
+    pub skip: u32,
 }
 
 impl FaultRule {
@@ -269,11 +271,19 @@ impl FaultRule {
             on: Some(prefix.to_vec()),
             fault,
             times: None,
+            skip: 0,
         }
     }
 
     pub fn once(mut self) -> FaultRule {
         self.times = Some(1);
+        self
+    }
+
+    /// Answer the first `n` matching requests normally, then apply the fault (e.g. a read
+    /// that worked a while and then starts failing).
+    pub fn after(mut self, n: u32) -> FaultRule {
+        self.skip = n;
         self
     }
 }
@@ -423,6 +433,10 @@ impl SpecEcu {
             .faults
             .iter_mut()
             .find(|r| r.times != Some(0) && r.on.as_ref().is_none_or(|p| payload.starts_with(p)))?;
+        if rule.skip > 0 {
+            rule.skip -= 1;
+            return None;
+        }
         if let Some(n) = &mut rule.times {
             *n -= 1;
         }
