@@ -526,6 +526,8 @@ impl Bridge {
                     )
                 }
             }
+            // Not while lock-when-moving owes an unlock: it needs the K line at engine stop.
+            Op::YieldKline if self.lwm.locked_by_us() => r(ResultCode::Busy),
             Op::YieldKline => {
                 self.yielded = true;
                 self.fail_jobs(|_| true, ResultCode::Yielded);
@@ -1245,6 +1247,11 @@ impl Bridge {
         let approval = match Approval::confirm(p.challenge, code) {
             Ok(a) => a,
             Err(_) => {
+                // A wrong code in the middle of arming leaves nothing half-armed.
+                #[cfg(feature = "standing-lock")]
+                if p.purpose != Purpose::Send && !self.lwm.is_armed() {
+                    self.standing = None;
+                }
                 self.finish_job(ResultCode::ApprovalMismatch, Vec::new());
                 return JobStart::Nothing;
             }
@@ -1624,7 +1631,9 @@ impl Bridge {
         if self.requested != Profile::Off {
             return self.requested;
         }
-        if self.charging() || self.engine_running(now) {
+        // Lock-when-moving owes an unlock: keep talking to the Sirius to see the engine stop
+        // (a Sirius that no longer answers is the ignition-off signal).
+        if self.charging() || self.engine_running(now) || self.lwm.locked_by_us() {
             return Profile::Drive;
         }
         Profile::Off

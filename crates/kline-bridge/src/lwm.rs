@@ -32,6 +32,10 @@ pub struct LwmConfig {
     pub spacing_ms: u64,
     /// Unlock attempts before giving up. ours.
     pub unlock_attempts: u8,
+    /// After an actuation the Sirius is silent because the bridge itself is on the BMT and
+    /// re-initialising the Sirius (two 5-baud inits, ~5 s); silence counts only from this long
+    /// after the actuation ended. ours: two inits plus margin.
+    pub detour_grace_ms: u64,
 }
 
 impl Default for LwmConfig {
@@ -43,6 +47,7 @@ impl Default for LwmConfig {
             silence_ms: 3_000,
             spacing_ms: 5_000,
             unlock_attempts: 3,
+            detour_grace_ms: 8_000,
         }
     }
 }
@@ -67,6 +72,8 @@ pub struct LockWhenMoving {
     last_intent_ms: Option<u64>,
     in_flight: Option<Intent>,
     unlock_failures: u8,
+    /// Silence is not counted before this (the bridge's own detour to the BMT).
+    quiet_until: Option<u64>,
 }
 
 impl LockWhenMoving {
@@ -82,6 +89,7 @@ impl LockWhenMoving {
             last_intent_ms: None,
             in_flight: None,
             unlock_failures: 0,
+            quiet_until: None,
         }
     }
 
@@ -138,15 +146,9 @@ impl LockWhenMoving {
 
     /// Clock tick without a sample (call it at least once per second).
     pub fn on_tick(&mut self, now_ms: u64) -> Option<Intent> {
-        if self.locked_by_us {
-            let silent = match self.last_sample_ms {
-                Some(t) => now_ms.saturating_sub(t) >= self.cfg.silence_ms,
-                None => true,
-            };
-            if silent {
-                self.moving_since = None;
-                return self.issue(now_ms, Intent::Unlock);
-            }
+        if self.locked_by_us && self.silent(now_ms) {
+            self.moving_since = None;
+            return self.issue(now_ms, Intent::Unlock);
         }
         self.decide(now_ms)
     }
@@ -168,6 +170,16 @@ impl LockWhenMoving {
             return self.issue(now_ms, Intent::Unlock);
         }
         None
+    }
+
+    /// No Sirius sample for `silence_ms`, not counting the time the bridge itself kept the
+    /// Sirius quiet.
+    fn silent(&self, now_ms: u64) -> bool {
+        let from = match (self.last_sample_ms, self.quiet_until) {
+            (Some(a), Some(b)) => a.max(b),
+            (a, b) => a.or(b).unwrap_or(0),
+        };
+        now_ms.saturating_sub(from) >= self.cfg.silence_ms
     }
 
     fn issue(&mut self, now_ms: u64, intent: Intent) -> Option<Intent> {
@@ -202,6 +214,7 @@ impl LockWhenMoving {
         }
         self.in_flight = None;
         self.last_intent_ms = Some(now_ms);
+        self.quiet_until = Some(now_ms + self.cfg.detour_grace_ms);
         match (intent, ok) {
             (Intent::Lock, true) => {}
             // Not retried; the doors are in an unknown state, not "locked by us".
@@ -325,7 +338,32 @@ mod tests {
         // Last sample at 4900; silent from then on.
         assert_eq!(l.on_tick(7_000), None, "silent 2.1 s only");
         assert_eq!(l.on_tick(7_900), None, "spacing: lock done at 3400");
-        assert_eq!(l.on_tick(8_400), Some(Intent::Unlock));
+        assert_eq!(
+            l.on_tick(8_400),
+            None,
+            "detour grace: silence counts from 11400"
+        );
+        assert_eq!(l.on_tick(14_300), None);
+        assert_eq!(l.on_tick(14_400), Some(Intent::Unlock));
+    }
+
+    /// The bridge's own BMT detour (Sirius re-init) is not "Sirius silent": no unlock right
+    /// after the lock, even when the detour takes longer than the spacing.
+    #[test]
+    fn the_lock_detour_is_not_ignition_off() {
+        let mut l = armed();
+        let mut t = 0;
+        while l.on_sample(t, 30, 1500).is_none() {
+            t += 100;
+        }
+        assert_eq!(t, 3_000);
+        // The detour: 7 s without a sample, then the lock is reported done.
+        l.intent_done(10_000, Intent::Lock, true);
+        for t in (10_000..20_900).step_by(100) {
+            assert_eq!(l.on_tick(t), None, "at {t}");
+        }
+        // Still no Sirius after grace + silence: that is ignition off.
+        assert_eq!(l.on_tick(21_000), Some(Intent::Unlock));
     }
 
     #[test]

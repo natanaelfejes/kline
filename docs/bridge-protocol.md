@@ -117,7 +117,7 @@ bridge accepted from this bond ([counters](#roles-pairing-counters-rate-limits))
 | `05` | CONFIRM | challenge id u32, code (1..16 printable ASCII) | owner | send the prepared request |
 | `06` | LOCK | | owner | lock the parked car with the fob output |
 | `07` | UNLOCK | | owner | unlock the parked car with the fob output |
-| `08` | YIELD_KLINE | | owner, agent | Stop the session, switch the transceiver off |
+| `08` | YIELD_KLINE | | owner, agent | Stop the session, switch the transceiver off (`Busy` while lock-when-moving owes an unlock) |
 | `09` | RESUME_KLINE | | owner, agent | take the K line back |
 | `0A` | SET_TIME | Unix seconds u32 | owner, agent | for logs only |
 | `0B` | LWM_ARM | | owner | arm lock-when-moving (two challenges) |
@@ -224,7 +224,11 @@ above 15 km/h for 3 s; lock again only after more than 60 s at speed 0 or after 
 UNLOCK and a new drive-off; unlock when rpm is 0 or the Sirius has been silent for 3 s; 5 s
 between actuations; off by default. Once it has locked, it still unlocks at engine stop after
 a disarm (ours: the unlock is the accident mitigation of 3.1 rule 2). A failed lock is not
-retried; a failed unlock is retried up to 3 times.
+retried; a failed unlock is retried up to 3 times. The bridge's own detour to the BMT (two
+inits, ~5 s) does not count as "Sirius silent": silence counts from 8 s after an actuation.
+While an unlock is owed the bridge keeps the drive profile even without a charging voltage (so
+a Sirius that stops answering is seen) and refuses `YIELD_KLINE` (`Busy`). Below 11.8 V it
+still shuts down at once (P6), unlock or not.
 
 Execution, decision D37 as given for W4 (build feature `standing-lock`, off by default): the
 bridge stops the Sirius session, opens the BMT, sends `31 A0 00 01` (lock) or `31 A1 00 01`

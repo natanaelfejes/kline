@@ -155,3 +155,24 @@ fn disarm_after_the_lock_still_unlocks_at_engine_stop() {
     assert_eq!(w.len(), 2, "{w:?}");
     assert_eq!(w[1].payload, vec![0x31, 0xA1, 0x00, 0x01]);
 }
+
+#[test]
+fn the_k_line_cannot_be_yielded_while_an_unlock_is_owed() {
+    let mut rig = Rig::new(driving_sirius(), bmt_ecu(bmt_scenario(true)));
+    rig.connect(OWNER, Role::Owner);
+    rig.connect(AGENT, Role::Agent);
+    rig.battery(14_100);
+    arm(&mut rig);
+    assert!(rig.run_until_pred(30_000, |r| r.bridge.lwm().locked_by_us()));
+    assert_eq!(
+        rig.call(AGENT, Op::YieldKline, 1_000).result,
+        ResultCode::Busy
+    );
+    rig.run_for(50_000);
+    let w = rig.car.bmt_journal.writes();
+    assert_eq!(w.last().unwrap().payload, vec![0x31, 0xA1, 0x00, 0x01]);
+    assert_eq!(
+        rig.call(AGENT, Op::YieldKline, 1_000).result,
+        ResultCode::Ok
+    );
+}
