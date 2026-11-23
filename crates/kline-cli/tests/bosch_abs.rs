@@ -302,3 +302,29 @@ fn exec_download_is_refused_by_the_session_on_the_answered_key_bytes() {
     assert!(j.writes().is_empty());
     assert!(!r.screen.contains("APPROVAL REQUIRED"), "{}", r.screen);
 }
+
+/// A lost reply to the ABS fault memory erase `45` points at the fault memory read `58`.
+#[test]
+fn a_lost_45_reply_suggests_reading_58() {
+    use kline_sim::ecu::{FaultRule, ReplyFault};
+    let ecu = bosch_abs_ecu().with_fault(FaultRule::on(&[0x45], ReplyFault::NoReply));
+    let (r, j) = run_opts(
+        ecu,
+        &["exec", "--xml", &x(), "45"],
+        Opts {
+            interactive: true,
+            human: Human::TypesShownCode,
+            ..Opts::default()
+        },
+    );
+    assert_eq!(r.code, 13, "{}\n{}", r.stdout, r.stderr);
+    assert!(r.stderr.contains("WAS SENT"), "{}", r.stderr);
+    assert!(
+        r.stderr
+            .contains("first read the state (e.g. kline read --xml")
+            && r.stderr.contains("bosch_abs_iso8.xml 58)"),
+        "{}",
+        r.stderr
+    );
+    assert_eq!(j.writes().len(), 1);
+}

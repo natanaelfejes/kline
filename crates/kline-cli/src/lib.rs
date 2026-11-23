@@ -610,7 +610,9 @@ fn wait_for_code(
                         "no confirmation in time; nothing was sent",
                     ));
                 }
-                // The ECU sleeps after 5 s of silence (P3max): keep the session open.
+                // Keep the session open: `keepalive` sends TesterPresent (KWP `3E`, ISO8 `36`)
+                // when the line has been idle for the definition's TesterPresent delay (`<K>`:
+                // 3000 ms Sirius / Safir, 7000 ms Bosch 5.3 ABS); it does nothing before.
                 o.link.keepalive(&mut o.session).map_err(|e| e.to_cli())?;
             }
         }
@@ -643,6 +645,10 @@ fn state_read_hint(ecu: &Ecu, link: &LinkArgs, payload: &[u8]) -> String {
         [0x31, ..] if bmt => hex(&cmd::REMOTE_LEARNING_WATCH),
         [0x3B, 0xD2, ..] if bmt => hex(&[0x21, 0xA1]),
         [0x3B, lid, ..] => hex(&[0x21, *lid]),
+        // Bosch 5.3 ABS fault memory erase: the fault memory read shows whether it ran.
+        [safety::BOSCH_ABS_CLEAR] if ecu.target().is_ok_and(|t| safety::is_bosch_abs(&t)) => {
+            hex(&[safety::BOSCH_ABS_FAULTS])
+        }
         _ => "<the frame that shows what this request changes>".to_string(),
     };
     let mut words: Vec<String> = vec!["kline".into(), "read".into()];
