@@ -728,9 +728,16 @@ fn bmt_actuator_count_ff_on_lock_and_window_has_a_specific_warning() {
             r.what_can_go_wrong
         );
     }
-    // Another output with FF: not a lock/window motor, no lock/window text.
-    let r = assess(&BMT, &[0x31, 0xA4, 0x00, 0xFF]).unwrap();
+    // Another Tier 1 output with FF (A7): not a lock/window motor, no lock/window text.
+    let r = assess(&BMT, &[0x31, 0xA7, 0x00, 0xFF]).unwrap();
+    assert_eq!(r.tier, Tier::Service);
     assert!(!r.what_can_go_wrong.contains("count FF"));
+    // A4/A5 with FF are Expert, with the generic unknown-effect text.
+    for out in [0xA4, 0xA5] {
+        let r = assess(&BMT, &[0x31, out, 0x00, 0xFF]).unwrap();
+        assert_eq!(r.tier, Tier::Expert, "{out:02X}");
+        assert!(!r.what_can_go_wrong.contains("count FF"));
+    }
 }
 
 const SIRIUS_OUTPUTS: [u8; 13] = [
@@ -738,46 +745,93 @@ const SIRIUS_OUTPUTS: [u8; 13] = [
 ];
 
 /// Audit 2026-11-23: Sirius `30 id cmd cycles` is Tier 1 only for the 13 ids of the definition's
-/// "Output Temporary Control List" and cmd 00/01/11; every other id or shape is Tier 3 Expert.
+/// "Output Temporary Control List"; start needs cycles 1..=10, status/stop need 00 as 4th byte;
+/// every other id, command, cycles or length is Tier 3 Expert.
 #[test]
 fn sirius_output_control_risk_matrix() {
     for id in 0u8..=0xFF {
-        for cmd in [0x00u8, 0x01, 0x11] {
-            let p = [0x30, id, cmd, 0x01];
-            let want = if SIRIUS_OUTPUTS.contains(&id) {
-                Tier::Service
-            } else {
-                Tier::Expert
-            };
-            assert_eq!(tier_of(&SIRIUS, &p).unwrap(), want, "{p:02X?}");
-            assert_eq!(assess(&SIRIUS, &p).unwrap().tier, want, "{p:02X?}");
+        let allowed = SIRIUS_OUTPUTS.contains(&id);
+        for cmd in 0u8..=0xFF {
+            for cc in [0x00u8, 0x01, 0x05, 0x0A, 0x0B, 0x10, 0xFF] {
+                let p = [0x30, id, cmd, cc];
+                let ok = allowed
+                    && match cmd {
+                        0x00 => (1..=10).contains(&cc),
+                        0x01 | 0x11 => cc == 0,
+                        _ => false,
+                    };
+                let want = if ok { Tier::Service } else { Tier::Expert };
+                assert_eq!(tier_of(&SIRIUS, &p).unwrap(), want, "{p:02X?}");
+            }
         }
     }
-    // Command bytes outside 00/01/11, and any length but 4, on an allowed id: Expert.
+    // Lengths other than 4 on an allowed id: Expert.
     for p in [
-        &[0x30, 0x80, 0x02, 0x01][..],
-        &[0x30, 0x80, 0x10, 0x01],
-        &[0x30, 0x80, 0xFF, 0x01],
-        &[0x30, 0x80, 0x00],
+        &[0x30, 0x80, 0x00][..],
         &[0x30, 0x80],
         &[0x30, 0x80, 0x00, 0x01, 0x00],
         &[0x30, 0x80, 0x00, 0x01, 0x00, 0x00],
     ] {
         assert_eq!(tier_of(&SIRIUS, p).unwrap(), Tier::Expert, "{p:02X?}");
+        assert_eq!(assess(&SIRIUS, p).unwrap().tier, Tier::Expert, "{p:02X?}");
     }
-    // The definition's placeholder id D0 and a few plausible other ids are Expert.
+    // The definition's placeholder id D0 and plausible other ids are Expert with UnknownEffect.
     for id in [0xD0u8, 0x00, 0x81, 0x87, 0xB5, 0xA6, 0xAB, 0xC0] {
         let p = [0x30, id, 0x00, 0x0A];
         assert_eq!(tier_of(&SIRIUS, &p).unwrap(), Tier::Expert, "{p:02X?}");
         let r = assess(&SIRIUS, &p).unwrap();
         assert!(r.warnings.contains(&Warning::UnknownEffect), "{p:02X?}");
     }
-    // The allowed ones move an actuator.
     let r = assess(&SIRIUS, &[0x30, 0x9F, 0x00, 0x0A]).unwrap();
+    assert_eq!(r.tier, Tier::Service);
     assert!(r.warnings.contains(&Warning::MovesActuator));
 }
 
-/// This car has no A/C: 0x82 stays Tier 1 but its risk text says so.
+/// Cycle boundaries: 1 and 10 are Tier 1, 0 and 11 (and FF) are Expert with a text that says
+/// long or unlimited actuation.
+#[test]
+fn sirius_output_start_cycles_boundaries() {
+    for (cc, t) in [
+        (0x00u8, Tier::Expert),
+        (0x01, Tier::Service),
+        (0x0A, Tier::Service),
+        (0x0B, Tier::Expert),
+        (0xFF, Tier::Expert),
+    ] {
+        let p = [0x30, 0x80, 0x00, cc];
+        assert_eq!(tier_of(&SIRIUS, &p).unwrap(), t, "{p:02X?}");
+        let r = assess(&SIRIUS, &p).unwrap();
+        assert_eq!(r.tier, t);
+        if t == Tier::Expert {
+            assert!(r.what_it_changes.contains("long or unlimited"), "{r:?}");
+            assert!(r.warnings.contains(&Warning::UnknownEffect));
+            assert!(r.warnings.contains(&Warning::MovesActuator));
+        } else {
+            assert!(!r.what_it_changes.contains("unlimited"), "{r:?}");
+        }
+    }
+}
+
+/// Status and stop are exactly `30 id 01 00` / `30 id 11 00`; their risk text does not say the
+/// output is driven.
+#[test]
+fn sirius_output_status_and_stop_text() {
+    let st = assess(&SIRIUS, &[0x30, 0x80, 0x01, 0x00]).unwrap();
+    assert_eq!(st.tier, Tier::Service);
+    assert!(st.what_it_changes.contains("status"), "{st:?}");
+    assert!(!st.what_it_changes.contains("drives"), "{st:?}");
+    assert!(!st.warnings.contains(&Warning::MovesActuator));
+    let sp = assess(&SIRIUS, &[0x30, 0x80, 0x11, 0x00]).unwrap();
+    assert_eq!(sp.tier, Tier::Service);
+    assert!(sp.what_it_changes.contains("ends"), "{sp:?}");
+    assert!(!sp.what_it_changes.contains("drives"), "{sp:?}");
+    for p in [[0x30, 0x80, 0x01, 0x01], [0x30, 0x80, 0x11, 0x0A]] {
+        assert_eq!(tier_of(&SIRIUS, &p).unwrap(), Tier::Expert, "{p:02X?}");
+    }
+}
+
+/// This car has no A/C: on a Sirius 0x82 start stays Tier 1 but its risk text says so. The text
+/// is Sirius-only: the airbag ECU and a generic ECU get the plain output text.
 #[test]
 fn sirius_ac_output_warns_the_car_has_no_ac() {
     let r = assess(&SIRIUS, &[0x30, 0x82, 0x00, 0x0A]).unwrap();
@@ -790,18 +844,89 @@ fn sirius_ac_output_warns_the_car_has_no_ac() {
     assert!(r.warnings.contains(&Warning::MovesActuator));
     let other = assess(&SIRIUS, &[0x30, 0x80, 0x00, 0x0A]).unwrap();
     assert!(!other.what_it_changes.contains("A/C"), "{other:?}");
+    for addr in [0x2Cu8, 0x40] {
+        let t = Target {
+            protocol: Protocol::Kwp,
+            ecu_address: addr,
+        };
+        let r = assess(&t, &[0x30, 0x82, 0x00, 0x0A]).unwrap();
+        assert_eq!(r.tier, Tier::Service, "{addr:02X}");
+        assert!(!r.what_it_changes.contains("A/C"), "{addr:02X}: {r:?}");
+        assert!(
+            !r.prerequisites.iter().any(|t| t.contains("A/C")),
+            "{addr:02X}"
+        );
+    }
 }
 
-/// Forbidden ids are unchanged: immobilizer-class outputs stay refused on a BMT, and the Sirius
-/// allowlist does not turn them into anything else.
+/// The Sirius allowlist follows `is_sirius_ecu`: a Sirius definition at a non-7A address
+/// restricts, an Iso8 target at 7A has no `30` at all, a Generic (S2000) definition at 7A
+/// restricts, a Generic definition elsewhere keeps `30 lid` + 1-4 bytes Tier 1.
 #[test]
-fn output_control_forbidden_ids_stay_forbidden() {
+fn sirius_allowlist_scope() {
+    use kline_core::safety::{tier_of_in, DefinitionGuard, EcuClass};
+    let at = |a| Target {
+        protocol: Protocol::Kwp,
+        ecu_address: a,
+    };
+    let sirius_def = DefinitionGuard::new(EcuClass::Sirius);
+    let generic = DefinitionGuard::new(EcuClass::Generic);
+    let bad = [0x30, 0xD0, 0x00, 0x0A];
+    let good = [0x30, 0x80, 0x00, 0x0A];
+    // Sirius definition at a non-7A address.
+    assert_eq!(
+        tier_of_in(&sirius_def, &at(0x40), &bad).unwrap(),
+        Tier::Expert
+    );
+    assert_eq!(
+        tier_of_in(&sirius_def, &at(0x40), &good).unwrap(),
+        Tier::Service
+    );
+    let r =
+        kline_core::safety::assess_in(&sirius_def, &at(0x40), &[0x30, 0x82, 0x00, 0x0A]).unwrap();
+    assert!(r.what_it_changes.contains("NO A/C"));
+    // Generic definition (e.g. S2000) at 7A restricts; elsewhere it does not.
+    assert_eq!(tier_of_in(&generic, &at(0x7A), &bad).unwrap(), Tier::Expert);
+    assert_eq!(
+        tier_of_in(&generic, &at(0x40), &bad).unwrap(),
+        Tier::Service
+    );
+    assert_eq!(tier_of(&at(0x40), &bad).unwrap(), Tier::Service);
+    // Iso8 at 7A: no `30` request exists there, Expert (not Tier 1).
+    let iso = Target {
+        protocol: Protocol::Iso8,
+        ecu_address: 0x7A,
+    };
+    assert_eq!(tier_of(&iso, &good).unwrap(), Tier::Expert);
+    assert_eq!(tier_of(&iso, &bad).unwrap(), Tier::Expert);
+    // A BMT definition at 7A is not a Sirius: BMT rules (`30` Expert, A6 forbidden).
+    let bmt_def = DefinitionGuard::new(EcuClass::Immobilizer);
+    assert_eq!(
+        tier_of_in(&bmt_def, &at(0x7A), &good).unwrap(),
+        Tier::Expert
+    );
+}
+
+/// Immobilizer-class outputs are forbidden on a BMT for `30`-`33`; on a Sirius `30 A6/AB/AC`
+/// are other number spaces: Expert (not forbidden) except AC, which is the shift lamp (Tier 1).
+#[test]
+fn output_control_forbidden_ids_vs_sirius() {
     for id in [0xA6u8, 0xAB, 0xAC, 0xC0, 0xC9] {
         for svc in [0x30u8, 0x31, 0x32, 0x33] {
             let p = [svc, id, 0x00, 0x01];
             assert_eq!(reason(&BMT, &p), Some(DenyReason::Immobilizer), "{p:02X?}");
         }
     }
+    for id in [0xA6u8, 0xAB] {
+        assert_eq!(
+            tier_of(&SIRIUS, &[0x30, id, 0x00, 0x01]).unwrap(),
+            Tier::Expert
+        );
+    }
+    assert_eq!(
+        tier_of(&SIRIUS, &[0x30, 0xAC, 0x00, 0x01]).unwrap(),
+        Tier::Service
+    );
 }
 
 /// Audit 2026-11-23: BMT actuators A4/A5 (unnamed "LO"/"LF" lines) are Expert; the named ones in

@@ -124,7 +124,7 @@ fn sirius_immobilizer_lids_and_backup_reset_variants_are_forbidden() {
     // (allowlisted output); BD/A2/AE are not Sirius output ids: Expert (audit 2026-11-23), still
     // not forbidden.
     for (p, t) in [
-        (&[0x30, 0xA0, 0x00, 0x00][..], Tier::Service),
+        (&[0x30, 0xA0, 0x00, 0x01][..], Tier::Service),
         (&[0x30, 0xBD, 0x00, 0x01], Tier::Expert),
         (&[0x30, 0xA2, 0x01, 0x00], Tier::Expert),
         (&[0x30, 0xAE, 0x01, 0x02], Tier::Expert),
@@ -139,7 +139,7 @@ fn sirius_immobilizer_lids_and_backup_reset_variants_are_forbidden() {
         let r = safety::assess(&SIRIUS, p).unwrap();
         assert_eq!(r.tier, t, "{p:02X?}");
     }
-    assert!(safety::assess(&SIRIUS, &[0x30, 0xA0, 0x01, 0x00])
+    assert!(safety::assess(&SIRIUS, &[0x30, 0xA0, 0x00, 0x01])
         .unwrap()
         .warnings
         .contains(&safety::Warning::MovesActuator));

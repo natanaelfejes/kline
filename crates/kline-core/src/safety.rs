@@ -77,6 +77,14 @@ pub const SIRIUS_OUTPUT_AC: u8 = 0x82;
 /// (`30 id 01 00`), 17 = 0x11 "Stop" (`30 id 11 00`) (S2000 definition list; Sirius 32 lists
 /// only 0, its Status/Stop requests are `30D00100` and `30D01100`).
 pub const SIRIUS_OUTPUT_COMMANDS: [u8; 3] = [0x00, 0x01, 0x11];
+/// Output Control command bytes (byte 3): start, status, stop.
+pub const SIRIUS_OUTPUT_START: u8 = 0x00;
+pub const SIRIUS_OUTPUT_STATUS: u8 = 0x01;
+pub const SIRIUS_OUTPUT_STOP: u8 = 0x11;
+/// Sirius `30 id 00 cycles` start: Tier 1 only for 1..=10 cycles (the definition's default is
+/// 0x0A). 0 and above 10 are Tier 3 Expert: the cycle count is not documented, so 0 or a large
+/// count may mean long or unlimited actuation (fuel pump, fans).
+pub const SIRIUS_OUTPUT_CYCLES_MAX: u8 = 0x0A;
 /// BMT actuator outputs `A0`/`A1` (door lock motors) and `A2`/`A3` (window) of `31 out param
 /// count`: a count of `FF` is permanent activation (final critique F07; record BLOCKED.md item 7,
 /// CAR-KNOWLEDGE.md: locks get 1-3 cycles).
@@ -639,9 +647,11 @@ fn forbidden_bytes(guard: &DefinitionGuard, target: &Target, payload: &[u8]) -> 
 /// KWP, Tier 0: `3E [x]`, `10 81`, `10 A0`, `1A xx`, `21 xx` exactly two bytes (any ECU, BMT
 /// `21A4` included; `21 A1 xx` would write CALTERMI on the BMT), `17`/`18` with 1-3 parameter
 /// bytes. ISO8 (Safir), Tier 0: `21` (bare), `33 50`, `33 51`, `33 52`, `33 54`.
-/// KWP, Tier 1: `14 xx xx`; not BMT: `30 lid` + 1-4 bytes, `11 FF`, exactly `32 A0 00` (end of
-/// injector inhibition, the only `32` in the definitions), `31 A0 00`; BMT `31C7000000`, `31C8000000`, actuator `31 out param count` with
-/// `out` in 0xA0..=0xB3. KWP, Tier 2: BMT `3B D2 index 00|01` (index 0..=13, not 2), other
+/// KWP, Tier 1: `14 xx xx`; not BMT: `30 lid` + 1-4 bytes (on a Sirius, [`is_sirius_ecu`]: only
+/// `30 id 00 cc` with `id` in [`SIRIUS_OUTPUT_IDS`] and cc 1..=10, `30 id 01 00`, `30 id 11 00`),
+/// `11 FF`, exactly `32 A0 00` (end of injector inhibition, the only `32` in the definitions),
+/// `31 A0 00`; BMT `31C7000000`, `31C8000000`, actuator `31 out param count` with `out` in
+/// 0xA0..=0xB3 except `A4`/`A5` (Expert) and the forbidden `A6`/`AB`/`AC`. KWP, Tier 2: BMT `3B D2 index 00|01` (index 0..=13, not 2), other
 /// ECUs `3B lid` + 1-4 bytes.
 pub fn classify(target: &Target, payload: &[u8]) -> Result<Tier, Denied> {
     classify_in(&NO_GUARD, target, payload)
@@ -697,7 +707,11 @@ fn classify_bytes(
         // everything else is Expert (audit 2026-11-23).
         (Kwp, 0x30) if !bmt && is_sirius_ecu(guard, target) => (len == 4
             && p1.is_some_and(|b| SIRIUS_OUTPUT_IDS.contains(&b))
-            && SIRIUS_OUTPUT_COMMANDS.contains(&payload[2]))
+            && match payload[2] {
+                SIRIUS_OUTPUT_START => (1..=SIRIUS_OUTPUT_CYCLES_MAX).contains(&payload[3]),
+                SIRIUS_OUTPUT_STATUS | SIRIUS_OUTPUT_STOP => payload[3] == 0x00,
+                _ => false,
+            })
         .then_some(Service),
         (Kwp, 0x30) if !bmt => (3..=6).contains(&len).then_some(Service),
         // Tier 1: Renault "Reinit apprentissages" (adaptation reset), only `11 FF`.
@@ -769,7 +783,12 @@ pub fn assess_in(
     payload: &[u8],
 ) -> Result<RiskInfo, Denied> {
     let tier = tier_of_in(guard, target, payload)?;
-    let info = risk_info(is_immobilizer_ecu(guard, target), payload, tier);
+    let info = risk_info(
+        is_immobilizer_ecu(guard, target),
+        is_sirius_ecu(guard, target),
+        payload,
+        tier,
+    );
     Ok(
         if target.ecu_address == AIRBAG_ADDRESS && tier != Tier::Read {
             airbag_risk(info)
@@ -809,7 +828,7 @@ fn airbag_risk(info: RiskInfo) -> RiskInfo {
 
 const NONE: &[&str] = &[];
 
-fn risk_info(bmt: bool, payload: &[u8], tier: Tier) -> RiskInfo {
+fn risk_info(bmt: bool, sirius: bool, payload: &[u8], tier: Tier) -> RiskInfo {
     let r = |what_it_changes,
              what_can_go_wrong,
              reversible,
@@ -832,7 +851,21 @@ fn risk_info(bmt: bool, payload: &[u8], tier: Tier) -> RiskInfo {
             &["read and save the fault frames first"],
             &[Warning::ErasesFaultMemory],
         ),
-        (Tier::Service, [0x30, SIRIUS_OUTPUT_AC, ..]) => r(
+        (Tier::Service, [0x30, _, SIRIUS_OUTPUT_STATUS, _]) if sirius => r(
+            "reads the status of an output test (nothing is driven)",
+            "none known: it only asks the ECU whether the test is running",
+            true,
+            &["an output test was started in this session"],
+            &[],
+        ),
+        (Tier::Service, [0x30, _, SIRIUS_OUTPUT_STOP, _]) if sirius => r(
+            "ends a running output test (the output returns to ECU control)",
+            "none known; if no test is running the ECU answers negatively",
+            true,
+            NONE,
+            &[],
+        ),
+        (Tier::Service, [0x30, SIRIUS_OUTPUT_AC, ..]) if sirius => r(
             "drives the A/C output (relay) while the test runs; THIS CAR HAS NO A/C, so nothing is connected to it",
             "no useful effect on this car; the ECU may log an output fault or energise an unconnected line",
             true,
@@ -843,6 +876,21 @@ fn risk_info(bmt: bool, payload: &[u8], tier: Tier) -> RiskInfo {
             ],
             &[Warning::MovesActuator],
         ),
+        (Tier::Expert, [0x30, id, SIRIUS_OUTPUT_START, _])
+            if sirius && SIRIUS_OUTPUT_IDS.contains(id) =>
+        {
+            r(
+                "starts an output test with a cycle count of 0 or above 10 (long or unlimited actuation, count semantics NOT VERIFIED)",
+                "the pump, fan, valve or lamp can run for a long time or until stopped; battery drain, overheating, fuel pump running dry",
+                true,
+                &[
+                    "engine off, ignition on",
+                    "send the stop variant (30 id 11 00) straight after",
+                    "prefer 1 to 10 cycles (Tier 1)",
+                ],
+                &[Warning::MovesActuator, Warning::UnknownEffect],
+            )
+        }
         (Tier::Service, [0x30, ..]) => r(
             "drives an output (fuel pump relay, fan, valve, lamp) while the test runs",
             "pump/fan/valve runs in the wrong engine state; battery drain",

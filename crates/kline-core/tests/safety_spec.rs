@@ -241,3 +241,28 @@ fn bmt_code_manuel_routine_template_does_not_block_other_31_requests() {
         }
     }
 }
+
+/// `SIRIUS_OUTPUT_IDS` equals the values of the definition's "Output Temporary Control List"
+/// (skipped without ddt-xml/).
+#[test]
+fn sirius_output_ids_match_the_definition() {
+    let Some(bytes) = common::ddt_file("SIRIUS32___EMS3132___Soft_RE1_maj.xml") else {
+        eprintln!("skipped: ddt-xml/SIRIUS32___EMS3132___Soft_RE1_maj.xml absent");
+        return;
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let start = text
+        .find("<Data Name=\"Output Temporary Control List\">")
+        .expect("list present");
+    let body = &text[start..];
+    let body = &body[..body.find("</Data>").expect("list end")];
+    let mut ids: Vec<u8> = body
+        .split("Value=\"")
+        .skip(1)
+        .map(|t| t.split('"').next().unwrap().parse().unwrap())
+        .collect();
+    ids.sort_unstable();
+    let mut allow = kline_core::safety::SIRIUS_OUTPUT_IDS.to_vec();
+    allow.sort_unstable();
+    assert_eq!(ids, allow);
+}

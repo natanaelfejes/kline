@@ -60,10 +60,11 @@ Default-deny, decided on exact payload bytes and the target of the init that act
   `82` A/C output, `83` idle valve RR, `86` canister purge, `88` upstream O2 heater, `8F` camshaft 1,
   `94` MIL lamp, `9E` coolant temperature warning lamp, `9F` fan low, `A0` fan high, `A7` downstream
   O2 heater, `AA` thermo-plunger relay 1, `AC` shift lamp) and `cmd` is `00` start, `01` status or
-  `11` stop. Any other id, command or length (including the definition's placeholder id `D0`) is
+  `11` stop; a start needs cycles 1..=10 (0 or more than 10 is Expert, "long or unlimited actuation"), status and stop need `00` as the 4th byte. Any other id, command or length (including the definition's placeholder id `D0`) is
   Tier 3 Expert, not forbidden. `82` stays Tier 1 but its `RiskInfo` says this car has no A/C.
-  Other (non-Sirius, non-BMT) ECUs keep `30 lid` + 1-4 bytes as Tier 1. The S2000 definition lists
-  more ids (`87`, `8B`, `8C`, `B5`..); on a `7A` target they are Expert.
+  Other (non-Sirius, non-BMT) ECUs keep `30 lid` + 1-4 bytes as Tier 1. The S2000 definition (Generic class) lists
+  more ids (`87`, `8B`, `8C`, `B5`..): at address `7A` the Sirius allowlist applies to it and those ids are
+  Expert; at any other address, with no Sirius definition, it keeps `30 lid` + 1-4 bytes as Tier 1. The A/C text is Sirius-only.
 - **BMT actuator `A4`/`A5`** (unnamed "LO"/"LF" lines) are Tier 3 Expert; the other outputs
   `A0`..`B3` stay Tier 1, `A6`/`AB`/`AC` stay forbidden, `B4`+ stays Expert.
 - **BMT actuators.** `31 out param count` stays Tier 1; on the lock motors (`A0`/`A1`) and the
