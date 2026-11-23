@@ -6,7 +6,7 @@
 //! less: an agent-role request that the gate let through by mistake would still be refused by
 //! `Session::request` unless it is Tier 0.
 
-use kline_core::safety::{self, DefinitionGuard, EcuClass, Protocol, Target, Tier};
+use kline_core::safety::{self, DefinitionGuard, EcuClass, Target, Tier};
 
 use crate::gatt::ResultCode;
 use crate::profile::EcuId;
@@ -22,22 +22,31 @@ pub enum Role {
     Unbonded,
 }
 
-/// The policy target of `ecu` (KWP, its address).
+/// The policy target of `ecu` before a session: its protocol, address and the key bytes its
+/// definition declares. Inside a session kline-core uses the init's real target.
 pub fn target(ecu: EcuId) -> Target {
     Target {
-        protocol: Protocol::Kwp,
+        protocol: ecu.protocol(),
         ecu_address: ecu.address(),
+        keywords: Some(ecu.keywords()),
     }
 }
 
 /// The definition guard the bridge applies without a definition: the class of the ECU (BMT
-/// rules on the BMT, Sirius rules on the Sirius). The name guard needs the Renault definition
-/// and is not available in the firmware (docs/bridge-protocol.md "Limits").
+/// rules on the BMT, Sirius rules on the Sirius) and the car's name guard as compiled byte
+/// prefixes ([`crate::guard_rules`]).
 pub fn guard(ecu: EcuId) -> DefinitionGuard {
-    DefinitionGuard::new(match ecu {
+    let mut g = DefinitionGuard::new(match ecu {
         EcuId::Sirius => EcuClass::Sirius,
         EcuId::Bmt => EcuClass::Immobilizer,
-    })
+        EcuId::Abs | EcuId::Airbag => EcuClass::Generic,
+    });
+    for (addr, prefix) in crate::guard_rules::NAME_GUARD_PREFIXES {
+        if *addr == ecu.address() {
+            g.flag(prefix.to_vec(), crate::guard_rules::COMPILED_NAME.into());
+        }
+    }
+    g
 }
 
 /// A REQUEST (one-shot read): allowed only for Tier 0, for the owner and the agent.
@@ -53,8 +62,9 @@ pub fn check_request(role: Role, ecu: EcuId, payload: &[u8]) -> Result<(), Resul
     }
 }
 
-/// A PREPARE (approval challenge): owner only, Tier 1 only in protocol v1, battery at or above
-/// the write limit. `battery_ok` is false below 12.0 V or when the voltage is unknown.
+/// A PREPARE (approval challenge): owner only, any non-forbidden tier above Tier 0 (owner
+/// decision 2026-11-23: BLE scope = everything the CLI can do), battery at or above the write
+/// limit. `battery_ok` is false below 12.0 V or when the voltage is unknown.
 pub fn check_prepare(
     role: Role,
     ecu: EcuId,
@@ -68,12 +78,9 @@ pub fn check_prepare(
         Err(_) => Err(ResultCode::Forbidden),
         // A read needs no approval: use REQUEST.
         Ok(Tier::Read) => Err(ResultCode::Unsupported),
-        // Tier 2 needs the identification read and the definition choice; Tier 3 is "unknown
-        // effect". Both stay on the Mac CLI with the cable in v1 (open question for the owner).
-        Ok(Tier::ConfigWrite | Tier::Expert) => Err(ResultCode::Unsupported),
-        Ok(Tier::Service) if !battery_ok => Err(ResultCode::LowBattery),
-        Ok(Tier::Service) if !cfg!(feature = "approvals") => Err(ResultCode::Unsupported),
-        Ok(Tier::Service) => Ok(Tier::Service),
+        Ok(_) if !battery_ok => Err(ResultCode::LowBattery),
+        Ok(_) if !cfg!(feature = "approvals") => Err(ResultCode::Unsupported),
+        Ok(t) => Ok(t),
     }
 }
 
@@ -129,15 +136,22 @@ mod tests {
             check_prepare(Role::Owner, EcuId::Bmt, &[0x31, 0xA0, 0x00, 0x01], false),
             Err(ResultCode::LowBattery)
         );
-        let ok = check_prepare(Role::Owner, EcuId::Bmt, &[0x31, 0xA0, 0x00, 0x01], true);
-        if cfg!(feature = "approvals") {
-            assert_eq!(ok, Ok(Tier::Service));
-        } else {
-            assert_eq!(ok, Err(ResultCode::Unsupported));
+        for (ecu, p, tier) in [
+            (EcuId::Bmt, &[0x31, 0xA0, 0x00, 0x01][..], Tier::Service),
+            (EcuId::Bmt, &[0x3B, 0xD2, 0x00, 0x01][..], Tier::ConfigWrite),
+            (EcuId::Sirius, &[0x27, 0x01][..], Tier::Expert),
+        ] {
+            let ok = check_prepare(Role::Owner, ecu, p, true);
+            if cfg!(feature = "approvals") {
+                assert_eq!(ok, Ok(tier), "{p:02X?}");
+            } else {
+                assert_eq!(ok, Err(ResultCode::Unsupported));
+            }
         }
+        // The compiled name guard: a non-read variant of a flagged BMT read is refused.
         assert_eq!(
-            check_prepare(Role::Owner, EcuId::Bmt, &[0x3B, 0xD2, 0x00, 0x01], true),
-            Err(ResultCode::Unsupported)
+            check_prepare(Role::Owner, EcuId::Bmt, &[0x21, 0xA1, 0x01], true),
+            Err(ResultCode::Forbidden)
         );
     }
 

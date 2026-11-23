@@ -53,6 +53,7 @@ pub trait Watchdog {
 
 /// Low-power entry.
 pub trait Power {
-    /// Sleep until a BLE connection, or `wake_after_ms` if given. Returns on wake-up.
-    fn sleep(&mut self, wake_after_ms: Option<u64>);
+    /// Sleep until a BLE connection, or `wake_after_ms` if given. Returns on wake-up. Must not
+    /// busy-wait: light sleep (or deep sleep) in bounded slices that feed the watchdog.
+    fn sleep(&mut self, wake_after_ms: Option<u64>, reason: crate::bridge::SleepReason);
 }

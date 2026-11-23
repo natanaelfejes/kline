@@ -5,7 +5,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use kline_bridge::bridge::{Bridge, BridgeConfig};
+use kline_bridge::bridge::{Bridge, BridgeConfig, SleepReason};
 use kline_bridge::fob::{FobDriver, FobTiming};
 use kline_bridge::gate::Role;
 use kline_bridge::gatt::{Channel, Command, Op, Response, ResultCode};
@@ -57,6 +57,8 @@ pub fn bmt_scenario(unlocked: bool) -> Scenario {
         .number("Supply raw", 164.0)
         .number("Status raw", 16.0)
         .number("Output state", 2.0)
+        .text("Part number", "BMT001")
+        .number("Option bits", 29.0)
 }
 
 pub fn sirius_ecu(s: Scenario) -> SpecEcu {
@@ -67,34 +69,60 @@ pub fn bmt_ecu(s: Scenario) -> SpecEcu {
     SpecEcu::new(EcuProfile::bmt(), fixture("bridge_bmt.xml"), s).unwrap()
 }
 
-/// Both ECUs on one K line. Each ignores wake-ups for other addresses and bytes while asleep
-/// (kline-sim `SpecEcu`), so the composite only routes timers.
-pub struct TwoEcus {
-    pub sirius: SpecEcu,
-    pub bmt: SpecEcu,
+/// The Bosch 5.3 ABS of kline-sim's hand-written fixture (ISO8 0x01, DC 83).
+pub fn abs_ecu() -> SpecEcu {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../kline-sim/tests/fixtures/bosch_abs_iso8.xml");
+    let def = EcuDef::from_xml_bytes(&std::fs::read(&path).unwrap()).unwrap();
+    let profile = EcuProfile::from_def(&def).unwrap();
+    let s = Scenario::new()
+        .text("ECU type", "ABS")
+        .text("Supplier", "Bosch")
+        .set("After-sales id", Value::Hex("16".into()))
+        .set("Part number", Value::Hex("7701046407".into()))
+        .set("Part index", Value::Text(" ".into()))
+        .set("Software", Value::Hex("024912".into()))
+        .set("Supplier part number", Value::Hex("0265216703".into()))
+        .text("Fault code 1", "front left sensor signal")
+        .number("Reference speed 1", 16.0)
+        .number("Voltage 1", 13.561)
+        .number("Counter 1", 1.0);
+    SpecEcu::new(profile, def, s).unwrap()
 }
 
-impl Responder for TwoEcus {
+/// The hand-written airbag fixture at 0x2C.
+pub fn airbag_ecu() -> SpecEcu {
+    let def = fixture("bridge_airbag.xml");
+    let profile = EcuProfile::from_def(&def).unwrap();
+    let s = Scenario::new()
+        .text("Part number", "AB0001")
+        .number("Lamp state", 0.0);
+    SpecEcu::new(profile, def, s).unwrap()
+}
+
+/// Several ECUs on one K line. Each ignores wake-ups for other addresses and bytes while
+/// asleep (kline-sim `SpecEcu`), so the composite only routes timers.
+pub struct Ecus(pub Vec<SpecEcu>);
+
+impl Responder for Ecus {
     fn on_wake(&mut self, wake: Wake, out: &mut Out) {
-        self.sirius.on_wake(wake, out);
-        self.bmt.on_wake(wake, out);
+        for e in &mut self.0 {
+            e.on_wake(wake, out);
+        }
     }
     fn on_byte(&mut self, t: u64, b: u8, out: &mut Out) {
-        self.sirius.on_byte(t, b, out);
-        self.bmt.on_byte(t, b, out);
+        for e in &mut self.0 {
+            e.on_byte(t, b, out);
+        }
     }
     fn next_timer(&self) -> Option<u64> {
-        match (self.sirius.next_timer(), self.bmt.next_timer()) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        self.0.iter().filter_map(|e| e.next_timer()).min()
     }
     fn on_timer(&mut self, t: u64, out: &mut Out) {
-        if self.sirius.next_timer().is_some_and(|n| n <= t) {
-            self.sirius.on_timer(t, out);
-        }
-        if self.bmt.next_timer().is_some_and(|n| n <= t) {
-            self.bmt.on_timer(t, out);
+        for e in &mut self.0 {
+            if e.next_timer().is_some_and(|n| n <= t) {
+                e.on_timer(t, out);
+            }
         }
     }
 }
@@ -111,11 +139,13 @@ pub struct Car {
     pub line: Rc<RefCell<VirtualLine>>,
     pub sirius_journal: Journal,
     pub bmt_journal: Journal,
+    /// Journals of the other ECUs (ABS, airbag) when present.
+    pub other_journals: Vec<Journal>,
     pub power: bool,
     pub power_log: Vec<(u64, bool)>,
     pub writes: Vec<Written>,
     pub notes: Vec<(u64, Option<ClientId>, Channel, Vec<u8>)>,
-    pub sleeps: Vec<(u64, Option<u64>)>,
+    pub sleeps: Vec<(u64, Option<u64>, SleepReason)>,
     pub watchdog_feeds: u64,
     /// While false, every K-line action fails as if the transceiver were not powered.
     pub cable_ok: bool,
@@ -123,19 +153,22 @@ pub struct Car {
 
 impl Car {
     pub fn new(sirius: SpecEcu, bmt: SpecEcu) -> Car {
+        Car::with_others(sirius, bmt, Vec::new())
+    }
+
+    pub fn with_others(sirius: SpecEcu, bmt: SpecEcu, others: Vec<SpecEcu>) -> Car {
         let sj = sirius.journal();
         let bj = bmt.journal();
+        let oj = others.iter().map(|e| e.journal()).collect();
         let tol = sirius.profile().tolerance;
-        let line = VirtualLine::new(
-            TwoEcus { sirius, bmt },
-            BusConfig::default(),
-            tol,
-            sj.clone(),
-        );
+        let mut all = vec![sirius, bmt];
+        all.extend(others);
+        let line = VirtualLine::new(Ecus(all), BusConfig::default(), tol, sj.clone());
         Car {
             line: Rc::new(RefCell::new(line)),
             sirius_journal: sj,
             bmt_journal: bj,
+            other_journals: oj,
             power: false,
             power_log: Vec::new(),
             writes: Vec::new(),
@@ -176,12 +209,18 @@ impl Car {
 
     /// Payloads of the written KWP frames (`[fmt][tgt][src][payload][cs]`), with the target.
     /// One-byte writes (the ~KW2 handshake) are skipped.
+    /// ISO8 frames (`[N][data][cs]`, only the ABS here) are reported with target 0x01.
     pub fn written_payloads(&self) -> Vec<(u8, Vec<u8>)> {
         self.writes
             .iter()
             .filter(|w| w.bytes.len() > 1)
             .map(|w| {
                 let b = &w.bytes;
+                if b[0] & 0x80 == 0 {
+                    let n = b[0] as usize;
+                    assert_eq!(b.len(), n + 1, "ISO8 frame {b:02X?}");
+                    return (0x01, b[1..n].to_vec());
+                }
                 let n = (b[0] & 0x3F) as usize;
                 assert!(n > 0, "length byte format not expected here: {b:02X?}");
                 assert_eq!(b.len(), 3 + n + 1, "frame {b:02X?}");
@@ -244,9 +283,9 @@ impl Watchdog for Car {
 }
 
 impl Power for Car {
-    fn sleep(&mut self, wake_after_ms: Option<u64>) {
+    fn sleep(&mut self, wake_after_ms: Option<u64>, reason: SleepReason) {
         let t = self.now();
-        self.sleeps.push((t, wake_after_ms));
+        self.sleeps.push((t, wake_after_ms, reason));
         self.wait_until(t + wake_after_ms.unwrap_or(1_000));
     }
 }
@@ -284,7 +323,20 @@ impl Rig {
     }
 
     pub fn with_config(sirius: SpecEcu, bmt: SpecEcu, cfg: BridgeConfig) -> Rig {
-        let car = Car::new(sirius, bmt);
+        Rig::from_car(Car::new(sirius, bmt), cfg)
+    }
+
+    /// Sirius idling, BMT unlocked, plus the ABS and the airbag.
+    pub fn full_car() -> Rig {
+        let car = Car::with_others(
+            sirius_ecu(sirius_scenario()),
+            bmt_ecu(bmt_scenario(true)),
+            vec![abs_ecu(), airbag_ecu()],
+        );
+        Rig::from_car(car, BridgeConfig::default())
+    }
+
+    pub fn from_car(car: Car, cfg: BridgeConfig) -> Rig {
         let pin_log = Rc::new(RefCell::new(Vec::new()));
         let pin = RecPin {
             line: car.line.clone(),
@@ -418,7 +470,9 @@ impl Rig {
             let t = kline_bridge::gate::target(ecu);
             let g = kline_bridge::gate::guard(ecu);
             assert!(
-                p == [0x82] || safety::tier_of_in(&g, &t, &p) == Ok(Tier::Read),
+                p == [0x82]
+                    || (tgt == 0x01 && (p == [0x36] || p == [0x3F]))
+                    || safety::tier_of_in(&g, &t, &p) == Ok(Tier::Read),
                 "non-read frame on the wire to {tgt:#04x}: {p:02X?}"
             );
         }

@@ -38,6 +38,12 @@ impl Counters {
     pub fn restore(&mut self, client: ClientId, last: u32) {
         self.last.insert(client, last);
     }
+
+    /// Forget `client`'s counter (a new bond): its next counter starts afresh. A bond at
+    /// `u32::MAX` can accept nothing more until it bonds again.
+    pub fn forget(&mut self, client: ClientId) {
+        self.last.remove(&client);
+    }
 }
 
 /// At most `max` events per sliding `window_ms`, and at least `min_interval_ms` between two.
@@ -97,6 +103,10 @@ mod tests {
         assert!(c.accept(2, 1));
         c.restore(3, 100);
         assert!(!c.accept(3, 100));
+        assert!(c.accept(4, u32::MAX));
+        assert!(!c.accept(4, u32::MAX), "MAX: locked until a new bond");
+        c.forget(4);
+        assert!(c.accept(4, 1));
     }
 
     #[test]

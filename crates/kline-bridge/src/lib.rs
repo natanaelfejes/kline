@@ -24,6 +24,7 @@ pub mod crc;
 pub mod fob;
 pub mod gate;
 pub mod gatt;
+pub mod guard_rules;
 pub mod hal;
 pub mod live;
 pub mod lwm;

@@ -52,9 +52,12 @@ pub fn step<IO: BridgeIo, P: OutputPin>(
             bridge.on_fob_done(r, io.now_ms());
             Stepped::Fob
         }
-        Output::Sleep { wake_after_ms } => {
+        Output::Sleep {
+            wake_after_ms,
+            reason,
+        } => {
             io.set_power(false);
-            io.sleep(wake_after_ms);
+            io.sleep(wake_after_ms, reason);
             bridge.on_wake(io.now_ms());
             Stepped::Slept
         }

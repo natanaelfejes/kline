@@ -3,6 +3,7 @@
 mod common;
 
 use common::*;
+use kline_bridge::bridge::SleepReason;
 use kline_bridge::gate::Role;
 use kline_bridge::gatt::{BridgeState, Channel, LiveSample, LockState, Op, ResultCode, Status};
 use kline_bridge::hal::Clock;
@@ -225,23 +226,6 @@ fn forbidden_and_unapproved_requests_never_reach_the_wire() {
             },
             ResultCode::Forbidden,
         ),
-        // Tier 2 and 3 stay on the cable CLI in v1.
-        (
-            OWNER,
-            Op::Prepare {
-                ecu: EcuId::Bmt,
-                payload: vec![0x3B, 0xD2, 0x00, 0x01],
-            },
-            ResultCode::Unsupported,
-        ),
-        (
-            OWNER,
-            Op::Prepare {
-                ecu: EcuId::Sirius,
-                payload: vec![0x27, 0x01],
-            },
-            ResultCode::Unsupported,
-        ),
         // LOCK/UNLOCK: owner only.
         (AGENT, Op::Lock, ResultCode::NotAllowedForRole),
         (AGENT, Op::LwmArm, ResultCode::NotAllowedForRole),
@@ -385,9 +369,36 @@ fn sleeps_below_twelve_volts_with_the_engine_off() {
     rig.connect(OWNER, Role::Owner);
     rig.battery(11_900);
     rig.send(OWNER, Op::StartLive(Profile::Parked));
-    rig.run_for(2_000);
-    assert_eq!(rig.car.sleeps.first().map(|s| s.1), Some(Some(3_600_000)));
-    assert!(rig.car.writes.is_empty(), "no session started below 12.0 V");
+    rig.run_for(9_000);
+    assert!(
+        rig.car.sleeps.is_empty(),
+        "debounced: not before 10 s below 12.0 V"
+    );
+    rig.run_for(3_000);
+    assert_eq!(
+        rig.car.sleeps.first().map(|s| (s.1, s.2)),
+        Some((Some(3_600_000), SleepReason::LowBattery))
+    );
+    assert!(!rig.car.power);
+}
+
+/// Review M3: one low sample (cranking dip, ADC noise) while driving never sleeps.
+#[test]
+fn a_low_sample_while_driving_does_not_sleep() {
+    let mut rig = Rig::default_car();
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(14_100);
+    rig.run_for(5_000);
+    assert!(rig.bridge.session_ecu().is_some());
+    rig.battery(11_700);
+    rig.run_for(200);
+    rig.battery(14_100);
+    rig.run_for(20_000);
+    assert!(rig.car.sleeps.is_empty(), "{:?}", rig.car.sleeps);
+    // Even a long low reading while the engine runs: the engine wins (a measurement fault).
+    rig.battery(11_700);
+    rig.run_for(30_000);
+    assert!(rig.car.sleeps.is_empty(), "{:?}", rig.car.sleeps);
 }
 
 #[test]
@@ -397,7 +408,10 @@ fn sleeps_when_idle_and_nobody_is_connected() {
     rig.run_until(119_000);
     assert!(rig.car.sleeps.is_empty());
     rig.run_until(121_000);
-    assert_eq!(rig.car.sleeps.first().map(|s| s.1), Some(Some(60_000)));
+    assert_eq!(
+        rig.car.sleeps.first().map(|s| (s.1, s.2)),
+        Some((Some(60_000), SleepReason::Idle))
+    );
     assert!(rig.car.writes.is_empty());
 }
 
@@ -410,10 +424,20 @@ fn critical_battery_stops_the_session() {
     rig.run_for(5_000);
     assert_eq!(last_status(&rig).state, BridgeState::Session);
     rig.battery(11_700);
+    rig.run_for(4_000);
+    assert_eq!(
+        last_status(&rig).state,
+        BridgeState::Session,
+        "debounced 5 s"
+    );
     rig.run_for(2_000);
     let last = rig.car.written_payloads().pop().unwrap();
     assert_eq!(last, (0x26, vec![0x82]));
     assert!(!rig.car.power);
+    assert_eq!(
+        rig.car.sleeps.first().map(|s| s.2),
+        Some(SleepReason::CriticalBattery)
+    );
 }
 
 #[test]
@@ -539,4 +563,208 @@ fn runner_feeds_the_watchdog_every_step() {
         steps += 1;
     }
     assert_eq!(rig.car.watchdog_feeds, steps);
+}
+
+/// Review M1: the fresh `21 A3` of the LOCK job gets a negative reply; an older positive read
+/// said "unlocked". The bridge must not pulse on the stale value.
+#[test]
+fn fob_never_pulses_on_a_stale_lock_state() {
+    let bmt = bmt_ecu(bmt_scenario(true)).with_fault(
+        kline_sim::ecu::FaultRule::on(
+            &[0x21, 0xA3],
+            kline_sim::ecu::ReplyFault::Negative { nrc: 0x22 },
+        )
+        .after(3),
+    );
+    let mut rig = Rig::new(sirius_ecu(sirius_scenario()), bmt);
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(12_600);
+    rig.send(OWNER, Op::StartLive(Profile::Parked));
+    rig.run_for(5_000);
+    assert_eq!(
+        rig.bridge.status().lock,
+        LockState::Unlocked,
+        "the early reads"
+    );
+    rig.send(OWNER, Op::StopLive);
+    rig.run_for(1_000);
+    let r = rig.call(OWNER, Op::Lock, 20_000);
+    assert_eq!(r.result, ResultCode::LockNotConfirmed);
+    assert!(rig.pin_highs().is_empty(), "pulsed on a stale state");
+}
+
+/// Review M6: the yield is a lease. Only the client that yielded (or an owner) resumes; YIELD
+/// is answered Ok only after the session is stopped and the transceiver is off.
+#[test]
+fn yield_is_a_lease_answered_after_the_line_is_released() {
+    let other_agent = 5;
+    let mut rig = Rig::default_car();
+    rig.connect(OWNER, Role::Owner);
+    rig.connect(AGENT, Role::Agent);
+    rig.connect(other_agent, Role::Agent);
+    rig.battery(14_100);
+    rig.run_for(6_000);
+    let c = rig.send(AGENT, Op::YieldKline);
+    rig.run_for(10);
+    assert_eq!(
+        rig.car.responses_for(AGENT, c)[0].result,
+        ResultCode::Accepted
+    );
+    assert!(rig.run_until_pred(2_000, |r| r
+        .car
+        .responses_for(AGENT, c)
+        .iter()
+        .any(|x| x.result == ResultCode::Ok)));
+    let ok_t = rig
+        .car
+        .notes
+        .iter()
+        .rfind(|(_, to, ch, f)| {
+            *to == Some(AGENT)
+                && *ch == Channel::Response
+                && kline_bridge::gatt::Response::decode(f).unwrap().counter == c
+        })
+        .unwrap()
+        .0;
+    let off_t = rig.car.power_log.iter().rfind(|(_, on)| !on).unwrap().0;
+    assert!(off_t <= ok_t, "Ok at {ok_t} before power off at {off_t}");
+    assert_eq!(rig.bridge.yield_holder(), Some(AGENT));
+    assert_eq!(
+        rig.call(other_agent, Op::ResumeKline, 1_000).result,
+        ResultCode::NotAllowedForRole
+    );
+    assert!(rig.bridge.is_yielded());
+    assert_eq!(
+        rig.call(OWNER, Op::ResumeKline, 1_000).result,
+        ResultCode::Ok
+    );
+    assert!(!rig.bridge.is_yielded());
+}
+
+/// Review M6: after a reset with a yield saved, the bridge stays off the line even with the
+/// engine running.
+#[test]
+fn a_restored_yield_keeps_the_line_free_after_reset() {
+    let mut rig = Rig::default_car();
+    rig.bridge.restore_yield(AGENT);
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(14_100);
+    rig.run_for(30_000);
+    assert!(rig.car.writes.is_empty());
+    assert!(!rig.car.power);
+    rig.connect(AGENT, Role::Agent);
+    assert_eq!(
+        rig.call(AGENT, Op::ResumeKline, 1_000).result,
+        ResultCode::Ok
+    );
+    rig.run_for(6_000);
+    assert!(!rig.car.writes.is_empty());
+}
+
+/// Review minor: after a session ended without a clean Stop, the next init waits P3max (5 s)
+/// so the old ECU has timed out first.
+#[test]
+fn an_unclean_session_end_waits_p3max_before_the_next_init() {
+    let mut rig = Rig::default_car();
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(12_600);
+    rig.send(OWNER, Op::StartLive(Profile::Parked));
+    rig.run_for(5_000);
+    rig.car.cable_ok = false;
+    let t_fail = rig.now();
+    rig.run_for(300);
+    rig.car.cable_ok = true;
+    let n = rig.car.writes.len();
+    rig.run_until(t_fail + 4_900);
+    assert_eq!(rig.car.writes.len(), n, "an init started before P3max");
+    rig.run_for(8_000);
+    assert!(rig.car.writes.len() > n);
+}
+
+#[test]
+fn unbonded_peers_get_no_notifications() {
+    let mut rig = Rig::default_car();
+    rig.connect(STRANGER, Role::Unbonded);
+    rig.battery(12_600);
+    rig.run_for(5_000);
+    assert!(rig.car.notes.is_empty(), "{:?}", rig.car.notes.len());
+    rig.run_until(121_000);
+    assert_eq!(rig.car.sleeps.first().map(|s| s.2), Some(SleepReason::Idle));
+}
+
+#[test]
+fn abs_and_airbag_reads_over_ble() {
+    let mut rig = Rig::full_car();
+    rig.connect(OWNER, Role::Owner);
+    rig.connect(AGENT, Role::Agent);
+    rig.battery(12_600);
+    let r = rig.call(
+        AGENT,
+        Op::Request {
+            ecu: EcuId::Abs,
+            payload: vec![0x58],
+        },
+        30_000,
+    );
+    assert_eq!(r.result, ResultCode::Ok, "{r:?}");
+    assert_eq!(r.data[0], 0x58, "Bosch 5.3 echoes the SID");
+    let r = rig.call(
+        AGENT,
+        Op::Request {
+            ecu: EcuId::Airbag,
+            payload: vec![0x21, 0x80],
+        },
+        30_000,
+    );
+    assert_eq!(r.result, ResultCode::Ok, "{r:?}");
+    assert_eq!(&r.data[..2], &[0x61, 0x80]);
+    for (ecu, p) in [
+        (EcuId::Abs, vec![0x41, 0x00]),
+        (EcuId::Abs, vec![0x71, 0x00]),
+        (EcuId::Airbag, vec![0x14, 0xFF, 0x00]),
+        (EcuId::Airbag, vec![0x3B, 0xD0, 0x00]),
+        (EcuId::Airbag, vec![0x30, 0x80, 0x00]),
+    ] {
+        let r = rig.call(
+            OWNER,
+            Op::Prepare {
+                ecu,
+                payload: p.clone(),
+            },
+            5_000,
+        );
+        assert_eq!(r.result, ResultCode::Forbidden, "{ecu:?} {p:02X?}");
+    }
+    rig.assert_wire_tier0_except(&[]);
+    for j in &rig.car.other_journals {
+        j.assert_no_writes();
+    }
+}
+
+/// Review minor (survivor N7): after an unclean end of the BMT session, switching to the
+/// Sirius also waits P3max before its init.
+#[test]
+fn switching_ecu_after_an_unclean_end_waits_p3max() {
+    let mut rig = Rig::default_car();
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(12_600);
+    rig.send(OWNER, Op::StartLive(Profile::Parked));
+    rig.run_for(5_000);
+    rig.car.cable_ok = false;
+    let t_fail = rig.now();
+    rig.run_for(300);
+    rig.car.cable_ok = true;
+    rig.send(OWNER, Op::StopLive);
+    rig.send(
+        OWNER,
+        Op::Request {
+            ecu: EcuId::Sirius,
+            payload: vec![0x21, 0xA9],
+        },
+    );
+    let n = rig.car.writes.len();
+    rig.run_until(t_fail + 4_900);
+    assert_eq!(rig.car.writes.len(), n, "an init started before P3max");
+    rig.run_for(8_000);
+    assert!(rig.car.written_payloads().iter().any(|(t, _)| *t == 0x7A));
 }

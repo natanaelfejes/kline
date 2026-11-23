@@ -11,7 +11,12 @@ use kline_bridge::profile::{EcuId, Profile};
 use proptest::prelude::*;
 
 fn ecu() -> impl Strategy<Value = EcuId> {
-    prop_oneof![Just(EcuId::Sirius), Just(EcuId::Bmt)]
+    prop_oneof![
+        Just(EcuId::Sirius),
+        Just(EcuId::Bmt),
+        Just(EcuId::Abs),
+        Just(EcuId::Airbag)
+    ]
 }
 
 /// Payloads biased toward the interesting services (writes, routines, immobilizer, protocol
@@ -32,6 +37,10 @@ fn payload() -> impl Strategy<Value = Vec<u8>> {
         Just(0x3E),
         Just(0x81),
         Just(0x82),
+        Just(0x41),
+        Just(0x71),
+        Just(0x45),
+        Just(0x58),
         any::<u8>(),
     ];
     (service, proptest::collection::vec(any::<u8>(), 0..6)).prop_map(|(s, mut rest)| {
@@ -118,7 +127,7 @@ proptest! {
 
     #[test]
     fn ble_commands_never_put_a_non_read_on_the_wire(inputs in proptest::collection::vec(input(), 1..40)) {
-        let mut rig = Rig::default_car();
+        let mut rig = Rig::full_car();
         rig.connect(OWNER, Role::Owner);
         rig.connect(AGENT, Role::Agent);
         rig.battery(12_600);
@@ -141,6 +150,9 @@ proptest! {
         rig.assert_wire_tier0_except(&[]);
         prop_assert!(rig.car.sirius_journal.writes().is_empty(), "{:?}", rig.car.sirius_journal.writes());
         prop_assert!(rig.car.bmt_journal.writes().is_empty(), "{:?}", rig.car.bmt_journal.writes());
+        for j in &rig.car.other_journals {
+            prop_assert!(j.writes().is_empty(), "{:?}", j.writes());
+        }
     }
 
     #[test]

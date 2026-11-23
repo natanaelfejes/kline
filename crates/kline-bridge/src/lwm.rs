@@ -1,20 +1,27 @@
 //! Lock-when-moving as a pure automaton (MASTER-PLAN-v2 3.1 "Logika", decision D37).
 //!
-//! Inputs are Sirius samples (speed from `21 A9`, rpm), a clock tick (for "Sirius silent") and
-//! owner events. Output is at most one [`Intent`] at a time; the bridge carries it out and
-//! reports back with [`LockWhenMoving::intent_done`].
+//! Inputs are Sirius samples (speed from `21 A9`, rpm), Sirius failures (the bridge tried the
+//! Sirius and it did not answer), a clock tick and owner events. Output is at most one
+//! [`Intent`] at a time; the bridge carries it out and reports back with
+//! [`LockWhenMoving::intent_done`].
 //!
 //! Rules (all from MASTER-PLAN-v2 3.1 unless marked ours):
-//! - Lock once when speed > 15 km/h for at least 3 s.
+//! - Lock once when speed > 15 km/h for at least 3 s, from fresh samples only (ours: a gap of
+//!   more than [`LwmConfig::sample_gap_ms`] between samples restarts the 3 s).
 //! - Lock again only after a standstill (speed 0) longer than 60 s, or after the owner unlocked
 //!   and the car drove off again; no repeated pulses at traffic lights.
-//! - Unlock when rpm = 0 or the Sirius has been silent (ignition off, engine stalled).
+//! - Unlock when rpm = 0 or the Sirius stopped answering (ignition off, engine stalled).
+//!   ours: "stopped answering" means the bridge *tried* the Sirius and failed for
+//!   [`LwmConfig::silence_ms`] with no sample in between ([`LockWhenMoving::on_sirius_failure`]).
+//!   Mere absence of samples (the bridge on the BMT, a profile switch) is not silence.
 //! - 5 s pause after every actuation.
-//! - Off by default; arming is an owner action.
-//! - ours: once the bridge has locked, the unlock on engine stop happens even if the owner
-//!   disarms in the meantime (the unlock is the accident mitigation of 3.1 rule 2).
-//! - ours: a failed lock is not retried (no repeated attempts while driving); a failed unlock
-//!   is retried after the pause, at most [`LwmConfig::unlock_attempts`] times.
+//! - Off by default; arming is an owner action; it lasts until the owner disarms (owner
+//!   decision 2026-11-23).
+//! - ours: once the bridge has (possibly) locked, the unlock on engine stop happens even if the
+//!   owner disarms in the meantime (the unlock is the accident mitigation of 3.1 rule 2).
+//! - ours: a lock that was refused before or by the ECU is not retried; a lock that may have
+//!   been executed (reply lost after the write) keeps the unlock duty. A failed unlock is retried
+//!   after the pause, at most [`LwmConfig::unlock_attempts`] times.
 
 /// Parameters, defaults from MASTER-PLAN-v2 3.1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,17 +32,16 @@ pub struct LwmConfig {
     pub hold_ms: u64,
     /// Standstill (speed 0) after which a new lock is allowed. 3.1: 60 s.
     pub rearm_standstill_ms: u64,
-    /// The Sirius counts as silent (ignition off) after this long without a sample. ours:
-    /// 3 s, about 30 missed `21 AA` polls at the measured rate.
+    /// The Sirius counts as gone (ignition off) when the bridge's attempts to reach it have
+    /// failed for this long. ours: 3 s.
     pub silence_ms: u64,
+    /// Two samples further apart than this do not prove continuous movement. ours: 1.5 s, about
+    /// seven `21 A9` periods of the drive profile.
+    pub sample_gap_ms: u64,
     /// Minimum time between two actuations. 3.1: "Impulz 300 ms, potom 5 s pauza".
     pub spacing_ms: u64,
     /// Unlock attempts before giving up. ours.
     pub unlock_attempts: u8,
-    /// After an actuation the Sirius is silent because the bridge itself is on the BMT and
-    /// re-initialising the Sirius (two 5-baud inits, ~5 s); silence counts only from this long
-    /// after the actuation ended. ours: two inits plus margin.
-    pub detour_grace_ms: u64,
 }
 
 impl Default for LwmConfig {
@@ -45,9 +51,9 @@ impl Default for LwmConfig {
             hold_ms: 3_000,
             rearm_standstill_ms: 60_000,
             silence_ms: 3_000,
+            sample_gap_ms: 1_500,
             spacing_ms: 5_000,
             unlock_attempts: 3,
-            detour_grace_ms: 8_000,
         }
     }
 }
@@ -57,6 +63,17 @@ impl Default for LwmConfig {
 pub enum Intent {
     Lock,
     Unlock,
+}
+
+/// How an intent ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// The ECU accepted it (positive reply).
+    Done,
+    /// Nothing was written, or the ECU refused it (negative reply).
+    NotExecuted,
+    /// Written, but the reply is missing: it may have been executed.
+    MaybeExecuted,
 }
 
 /// The automaton. Starts disarmed.
@@ -69,11 +86,13 @@ pub struct LockWhenMoving {
     moving_since: Option<u64>,
     stopped_since: Option<u64>,
     last_sample_ms: Option<u64>,
+    /// First Sirius failure since the last sample.
+    fail_since: Option<u64>,
+    /// The failures have lasted `silence_ms`: the Sirius is gone.
+    sirius_gone: bool,
     last_intent_ms: Option<u64>,
     in_flight: Option<Intent>,
     unlock_failures: u8,
-    /// Silence is not counted before this (the bridge's own detour to the BMT).
-    quiet_until: Option<u64>,
 }
 
 impl LockWhenMoving {
@@ -86,10 +105,11 @@ impl LockWhenMoving {
             moving_since: None,
             stopped_since: None,
             last_sample_ms: None,
+            fail_since: None,
+            sirius_gone: false,
             last_intent_ms: None,
             in_flight: None,
             unlock_failures: 0,
-            quiet_until: None,
         }
     }
 
@@ -101,7 +121,7 @@ impl LockWhenMoving {
         self.armed
     }
 
-    /// True while the doors are locked by this automaton and not yet unlocked by it.
+    /// True while the doors are (possibly) locked by this automaton and not yet unlocked by it.
     pub fn locked_by_us(&self) -> bool {
         self.locked_by_us
     }
@@ -121,9 +141,18 @@ impl LockWhenMoving {
         self.relock_allowed = true;
     }
 
-    /// A decoded Sirius sample at `now_ms`.
+    /// A decoded Sirius sample at `now_ms`. Locks are decided here only, on fresh evidence.
     pub fn on_sample(&mut self, now_ms: u64, speed_kmh: u8, rpm: u16) -> Option<Intent> {
+        let fresh = self
+            .last_sample_ms
+            .is_some_and(|t| now_ms.saturating_sub(t) <= self.cfg.sample_gap_ms);
+        if !fresh {
+            self.moving_since = None;
+            self.stopped_since = None;
+        }
         self.last_sample_ms = Some(now_ms);
+        self.fail_since = None;
+        self.sirius_gone = false;
         if speed_kmh > self.cfg.speed_kmh {
             self.moving_since.get_or_insert(now_ms);
             self.stopped_since = None;
@@ -141,19 +170,6 @@ impl LockWhenMoving {
         if rpm == 0 && self.locked_by_us {
             return self.issue(now_ms, Intent::Unlock);
         }
-        self.decide(now_ms)
-    }
-
-    /// Clock tick without a sample (call it at least once per second).
-    pub fn on_tick(&mut self, now_ms: u64) -> Option<Intent> {
-        if self.locked_by_us && self.silent(now_ms) {
-            self.moving_since = None;
-            return self.issue(now_ms, Intent::Unlock);
-        }
-        self.decide(now_ms)
-    }
-
-    fn decide(&mut self, now_ms: u64) -> Option<Intent> {
         if self.armed && self.relock_allowed {
             if let Some(since) = self.moving_since {
                 if now_ms.saturating_sub(since) >= self.cfg.hold_ms {
@@ -161,25 +177,25 @@ impl LockWhenMoving {
                 }
             }
         }
-        if self.locked_by_us
-            && self.unlock_failures > 0
-            && self
-                .last_sample_ms
-                .is_none_or(|t| now_ms.saturating_sub(t) >= self.cfg.silence_ms)
-        {
-            return self.issue(now_ms, Intent::Unlock);
-        }
         None
     }
 
-    /// No Sirius sample for `silence_ms`, not counting the time the bridge itself kept the
-    /// Sirius quiet.
-    fn silent(&self, now_ms: u64) -> bool {
-        let from = match (self.last_sample_ms, self.quiet_until) {
-            (Some(a), Some(b)) => a.max(b),
-            (a, b) => a.or(b).unwrap_or(0),
-        };
-        now_ms.saturating_sub(from) >= self.cfg.silence_ms
+    /// The bridge tried the Sirius (init or request) and got no answer.
+    pub fn on_sirius_failure(&mut self, now_ms: u64) -> Option<Intent> {
+        let since = *self.fail_since.get_or_insert(now_ms);
+        self.moving_since = None;
+        if now_ms.saturating_sub(since) >= self.cfg.silence_ms {
+            self.sirius_gone = true;
+        }
+        self.on_tick(now_ms)
+    }
+
+    /// Clock tick (call it at least once per second): retries an owed unlock after the pause.
+    pub fn on_tick(&mut self, now_ms: u64) -> Option<Intent> {
+        if self.locked_by_us && self.sirius_gone {
+            return self.issue(now_ms, Intent::Unlock);
+        }
+        None
     }
 
     fn issue(&mut self, now_ms: u64, intent: Intent) -> Option<Intent> {
@@ -197,38 +213,38 @@ impl LockWhenMoving {
         }
         self.last_intent_ms = Some(now_ms);
         self.in_flight = Some(intent);
-        match intent {
-            Intent::Lock => {
-                self.locked_by_us = true;
-                self.relock_allowed = false;
-            }
-            Intent::Unlock => {}
+        if intent == Intent::Lock {
+            self.locked_by_us = true;
+            self.relock_allowed = false;
         }
         Some(intent)
     }
 
-    /// The bridge finished `intent` at `now_ms`; `ok` = the ECU accepted it.
-    pub fn intent_done(&mut self, now_ms: u64, intent: Intent, ok: bool) {
+    /// The bridge finished `intent` at `now_ms`.
+    pub fn intent_done(&mut self, now_ms: u64, intent: Intent, outcome: Outcome) {
         if self.in_flight != Some(intent) {
             return;
         }
         self.in_flight = None;
         self.last_intent_ms = Some(now_ms);
-        self.quiet_until = Some(now_ms + self.cfg.detour_grace_ms);
-        match (intent, ok) {
-            (Intent::Lock, true) => {}
-            // Not retried; the doors are in an unknown state, not "locked by us".
-            (Intent::Lock, false) => self.locked_by_us = false,
-            (Intent::Unlock, true) => {
+        match (intent, outcome) {
+            // Executed, or maybe executed: the doors may be locked, the unlock duty stays.
+            (Intent::Lock, Outcome::Done | Outcome::MaybeExecuted) => {}
+            // Not executed: not retried; nothing owed.
+            (Intent::Lock, Outcome::NotExecuted) => self.locked_by_us = false,
+            (Intent::Unlock, Outcome::Done) => {
                 self.locked_by_us = false;
                 self.relock_allowed = true;
                 self.unlock_failures = 0;
             }
-            (Intent::Unlock, false) => {
+            (Intent::Unlock, Outcome::NotExecuted | Outcome::MaybeExecuted) => {
                 self.unlock_failures = self.unlock_failures.saturating_add(1);
                 if self.unlock_failures >= self.cfg.unlock_attempts {
                     // Give up; report it, do not keep trying forever.
                     self.locked_by_us = false;
+                } else {
+                    // Retry on the next tick after the pause, whatever the Sirius does.
+                    self.sirius_gone = true;
                 }
             }
         }
@@ -252,7 +268,8 @@ mod tests {
         l
     }
 
-    /// Drive at `speed` from `from` to `to` in 100 ms samples; collect intents.
+    /// Drive at `speed` from `from` to `to` in 100 ms samples; collect intents (each done OK
+    /// 400 ms later).
     fn drive(
         l: &mut LockWhenMoving,
         from: u64,
@@ -265,9 +282,23 @@ mod tests {
         while t < to {
             if let Some(i) = l.on_sample(t, speed, rpm) {
                 v.push((t, i));
-                l.intent_done(t + 400, i, true);
+                l.intent_done(t + 400, i, Outcome::Done);
             }
             t += 100;
+        }
+        v
+    }
+
+    /// The bridge fails to reach the Sirius every `every` ms from `from` to `to`.
+    fn fail(l: &mut LockWhenMoving, from: u64, to: u64, every: u64) -> Vec<(u64, Intent)> {
+        let mut v = Vec::new();
+        let mut t = from;
+        while t < to {
+            if let Some(i) = l.on_sirius_failure(t) {
+                v.push((t, i));
+                l.intent_done(t + 400, i, Outcome::Done);
+            }
+            t += every;
         }
         v
     }
@@ -298,6 +329,29 @@ mod tests {
         assert_eq!(v, vec![(6_000, Intent::Lock)]);
     }
 
+    /// Review M5: one sample above 15 km/h and then nothing (link trouble) must not lock; a
+    /// gap in the samples restarts the hold.
+    #[test]
+    fn stale_speed_never_locks() {
+        let mut l = armed();
+        assert_eq!(l.on_sample(0, 40, 1500), None);
+        for t in (100..10_000).step_by(100) {
+            assert_eq!(l.on_tick(t), None);
+        }
+        // A sample 10 s later at speed: the 3 s count starts again here.
+        assert_eq!(l.on_sample(10_000, 40, 1500), None);
+        assert_eq!(
+            l.on_sample(12_900, 40, 1500),
+            None,
+            "gap of 2.9 s: not continuous"
+        );
+        assert!(drive(&mut l, 13_000, 15_900, 40, 1500).is_empty());
+        assert_eq!(
+            drive(&mut l, 15_900, 16_000, 40, 1500),
+            vec![(15_900, Intent::Lock)]
+        );
+    }
+
     #[test]
     fn no_relock_at_traffic_lights_only_after_long_standstill() {
         let mut l = armed();
@@ -322,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    fn unlocks_on_engine_stop_and_on_silence() {
+    fn unlocks_on_engine_stop() {
         let mut l = armed();
         assert_eq!(drive(&mut l, 0, 5_000, 30, 1500).len(), 1);
         let v = drive(&mut l, 5_000, 12_000, 0, 0);
@@ -332,38 +386,53 @@ mod tests {
             "5 s spacing after the lock done at 3400"
         );
         assert!(!l.locked_by_us());
-
-        let mut l = armed();
-        assert_eq!(drive(&mut l, 0, 5_000, 30, 1500).len(), 1);
-        // Last sample at 4900; silent from then on.
-        assert_eq!(l.on_tick(7_000), None, "silent 2.1 s only");
-        assert_eq!(l.on_tick(7_900), None, "spacing: lock done at 3400");
-        assert_eq!(
-            l.on_tick(8_400),
-            None,
-            "detour grace: silence counts from 11400"
-        );
-        assert_eq!(l.on_tick(14_300), None);
-        assert_eq!(l.on_tick(14_400), Some(Intent::Unlock));
     }
 
-    /// The bridge's own BMT detour (Sirius re-init) is not "Sirius silent": no unlock right
-    /// after the lock, even when the detour takes longer than the spacing.
+    /// Review B1: samples simply stopping (the bridge on the BMT, a profile switch) is not
+    /// ignition off; only failed attempts for 3 s are.
     #[test]
-    fn the_lock_detour_is_not_ignition_off() {
+    fn only_failed_attempts_count_as_silence() {
+        let mut l = armed();
+        assert_eq!(drive(&mut l, 0, 5_000, 30, 1500).len(), 1);
+        for t in (5_000..60_000).step_by(100) {
+            assert_eq!(l.on_tick(t), None, "no attempts, no silence, at {t}");
+        }
+        // Attempts failing for 2.9 s, then a sample: still nothing.
+        assert!(fail(&mut l, 60_000, 63_000, 500).is_empty());
+        assert!(drive(&mut l, 63_000, 63_100, 30, 1500).is_empty());
+        // Failing for 3 s: unlock.
+        assert_eq!(
+            fail(&mut l, 64_000, 68_000, 500),
+            vec![(67_000, Intent::Unlock)]
+        );
+    }
+
+    /// Review M4: a lock written but not acknowledged keeps the unlock duty.
+    #[test]
+    fn a_maybe_executed_lock_keeps_the_unlock_duty() {
         let mut l = armed();
         let mut t = 0;
-        while l.on_sample(t, 30, 1500).is_none() {
+        let i = loop {
+            if let Some(i) = l.on_sample(t, 40, 2000) {
+                break i;
+            }
+            t += 100;
+        };
+        assert_eq!(i, Intent::Lock);
+        l.intent_done(t + 500, Intent::Lock, Outcome::MaybeExecuted);
+        assert!(l.locked_by_us());
+        assert_eq!(
+            drive(&mut l, 9_000, 9_100, 0, 0),
+            vec![(9_000, Intent::Unlock)]
+        );
+
+        let mut l = armed();
+        let mut t = 0;
+        while l.on_sample(t, 40, 2000).is_none() {
             t += 100;
         }
-        assert_eq!(t, 3_000);
-        // The detour: 7 s without a sample, then the lock is reported done.
-        l.intent_done(10_000, Intent::Lock, true);
-        for t in (10_000..20_900).step_by(100) {
-            assert_eq!(l.on_tick(t), None, "at {t}");
-        }
-        // Still no Sirius after grace + silence: that is ignition off.
-        assert_eq!(l.on_tick(21_000), Some(Intent::Unlock));
+        l.intent_done(t + 500, Intent::Lock, Outcome::NotExecuted);
+        assert!(!l.locked_by_us());
     }
 
     #[test]
@@ -385,13 +454,14 @@ mod tests {
     fn failed_unlock_is_retried_then_given_up() {
         let mut l = armed();
         assert_eq!(drive(&mut l, 0, 5_000, 30, 1500).len(), 1);
-        let mut t = 10_000;
         let mut n = 0;
+        let mut t = 10_000;
         while t < 60_000 {
-            if let Some(i) = l.on_tick(t) {
+            let i = l.on_sirius_failure(t);
+            if let Some(i) = i {
                 assert_eq!(i, Intent::Unlock);
                 n += 1;
-                l.intent_done(t, i, false);
+                l.intent_done(t, i, Outcome::NotExecuted);
             }
             t += 500;
         }
@@ -408,7 +478,7 @@ mod tests {
             if let Some(i) = l.on_sample(t, 40, 2000) {
                 assert_eq!(i, Intent::Lock);
                 locks += 1;
-                l.intent_done(t, i, false);
+                l.intent_done(t, i, Outcome::NotExecuted);
             }
             t += 100;
         }

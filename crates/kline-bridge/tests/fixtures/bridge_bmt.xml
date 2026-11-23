@@ -25,6 +25,10 @@
 <Data Name="Output parameter"><Bits><Scaled/></Bits></Data>
 <Data Name="Output count"><Bits><Scaled/></Bits></Data>
 <Data Name="Output state"><Bits><Scaled/></Bits></Data>
+<Data Name="Part number"><Bytes count="6" ascii="1"/></Data>
+<Data Name="Option bits"><Bits><Scaled/></Bits></Data>
+<Data Name="Option index"><Bits><Scaled/></Bits></Data>
+<Data Name="Option value"><Bits><Scaled/></Bits></Data>
 </Datas>
 <Requests Endian="Big">
 <Request Name="Lock frame">
@@ -50,6 +54,21 @@
 <DataItem Name="Output count" FirstByte="4"/>
 </Sent>
 <Received MinBytes="3"><DataItem Name="Output state" Ref="1" FirstByte="3"/></Received>
+</Request>
+<Request Name="Identification">
+<Sent><SentBytes>2180</SentBytes></Sent>
+<Received MinBytes="9"><DataItem Name="Part number" Ref="1" FirstByte="3"/></Received>
+</Request>
+<Request Name="Options frame">
+<Sent><SentBytes>21A1</SentBytes></Sent>
+<Received MinBytes="4"><DataItem Name="Option bits" Ref="1" FirstByte="3"/></Received>
+</Request>
+<Request Name="Option write">
+<Sent><SentBytes>3BD20000</SentBytes>
+<DataItem Name="Option index" FirstByte="3"/>
+<DataItem Name="Option value" FirstByte="4"/>
+</Sent>
+<Received MinBytes="2"></Received>
 </Request>
 <Request Name="Clear faults">
 <Sent><SentBytes>14FF00</SentBytes></Sent>

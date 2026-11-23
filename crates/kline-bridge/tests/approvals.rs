@@ -224,3 +224,161 @@ fn bmt_actuator_with_code_goes_to_the_bmt() {
     assert_eq!(w[0].payload, vec![0x31, 0xA0, 0x00, 0x01]);
     rig.assert_wire_tier0_except(&[(0x26, vec![0x31, 0xA0, 0x00, 0x01])]);
 }
+
+/// Review M2 (surviving mutation): another owner bond cannot answer this owner's challenge.
+#[test]
+fn only_the_client_that_prepared_may_confirm() {
+    let second_owner = 3;
+    let mut rig = rig();
+    rig.connect(second_owner, Role::Owner);
+    let (id, code) = challenge(&rig.call(OWNER, clear_dtc(), 15_000));
+    let r = rig.call(
+        second_owner,
+        Op::Confirm {
+            challenge: id,
+            code,
+        },
+        5_000,
+    );
+    assert_eq!(r.result, ResultCode::ApprovalMismatch);
+    rig.run_for(3_000);
+    rig.car.sirius_journal.assert_no_writes();
+}
+
+/// Owner scope v1 = everything: Tier 2 with the identification and backup reads of the same
+/// session, like the CLI.
+#[test]
+fn tier2_config_write_needs_identification_and_backup_in_the_session() {
+    let mut rig = rig();
+    let write = Op::Prepare {
+        ecu: EcuId::Bmt,
+        payload: vec![0x3B, 0xD2, 0x00, 0x01],
+    };
+    // Without 21 80 and 21 A1 in this session: kline-core refuses the challenge.
+    assert_eq!(
+        rig.call(OWNER, write.clone(), 15_000).result,
+        ResultCode::ApprovalMismatch
+    );
+    for p in [vec![0x21, 0x80], vec![0x21, 0xA1]] {
+        let r = rig.call(
+            OWNER,
+            Op::Request {
+                ecu: EcuId::Bmt,
+                payload: p,
+            },
+            15_000,
+        );
+        assert_eq!(r.result, ResultCode::Ok);
+    }
+    let r = rig.call(OWNER, write, 15_000);
+    assert_eq!(r.data[4], kline_core::safety::Tier::ConfigWrite as u8);
+    let id = u32::from_le_bytes(r.data[..4].try_into().unwrap());
+    let code = String::from_utf8(r.data[5..].to_vec()).unwrap();
+    let r = rig.call(
+        OWNER,
+        Op::Confirm {
+            challenge: id,
+            code,
+        },
+        10_000,
+    );
+    assert_eq!(r.result, ResultCode::Ok, "{r:?}");
+    let w = rig.car.bmt_journal.writes();
+    assert_eq!(w.len(), 1);
+    assert_eq!(w[0].payload, vec![0x3B, 0xD2, 0x00, 0x01]);
+}
+
+/// Expert (Tier 3) gets the 10-character code, like the CLI.
+#[test]
+fn expert_requests_use_the_long_code() {
+    let mut rig = rig();
+    let r = rig.call(
+        OWNER,
+        Op::Prepare {
+            ecu: EcuId::Sirius,
+            payload: vec![0x27, 0x01],
+        },
+        15_000,
+    );
+    assert_eq!(r.result, ResultCode::Challenge);
+    assert_eq!(r.data[4], kline_core::safety::Tier::Expert as u8);
+    assert_eq!(r.data.len() - 5, 10);
+    let id = u32::from_le_bytes(r.data[..4].try_into().unwrap());
+    let code = String::from_utf8(r.data[5..].to_vec()).unwrap();
+    let r = rig.call(
+        OWNER,
+        Op::Confirm {
+            challenge: id,
+            code,
+        },
+        10_000,
+    );
+    assert_eq!(
+        r.result,
+        ResultCode::NegativeReply,
+        "the fixture does not know 27"
+    );
+    assert_eq!(rig.car.sirius_journal.writes()[0].payload, vec![0x27, 0x01]);
+}
+
+/// Review minor: no Sirius non-read while the car moves (injector inhibition, fuel pump...).
+#[test]
+fn non_reads_are_refused_while_moving() {
+    use kline_bridge::profile::Profile;
+    let sirius = sirius_ecu(sirius_scenario()).with_change_after(
+        &[0x21, 0xA9],
+        1_000,
+        "Vehicle speed",
+        kline_spec::Value::Number(40.0),
+    );
+    let mut rig = Rig::new(sirius, bmt_ecu(bmt_scenario(true)));
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(14_100);
+    rig.send(OWNER, Op::StartLive(Profile::Drive));
+    rig.run_for(8_000);
+    for p in [
+        vec![0x31, 0xA0, 0x00],
+        vec![0x30, 0x80, 0x00, 0x01],
+        vec![0x14, 0x00, 0x00],
+    ] {
+        let r = rig.call(
+            OWNER,
+            Op::Prepare {
+                ecu: EcuId::Sirius,
+                payload: p.clone(),
+            },
+            5_000,
+        );
+        assert_eq!(r.result, ResultCode::VehicleMoving, "{p:02X?}");
+    }
+    rig.car.sirius_journal.assert_no_writes();
+}
+
+#[test]
+fn standing_still_with_the_engine_running_is_allowed() {
+    let mut rig = rig();
+    rig.battery(14_100);
+    rig.run_for(6_000);
+    let r = rig.call(OWNER, clear_dtc(), 15_000);
+    assert_eq!(r.result, ResultCode::Challenge);
+}
+
+/// Review minor (survivor N12): engine running and no fresh speed (21A9 not answered): no
+/// Sirius non-read, since nothing proves the car stands; the ABS is not affected.
+#[test]
+fn sirius_non_reads_need_a_known_standstill_with_the_engine_running() {
+    let sirius = sirius_ecu(sirius_scenario()).with_fault(kline_sim::ecu::FaultRule::on(
+        &[0x21, 0xA9],
+        kline_sim::ecu::ReplyFault::Negative { nrc: 0x12 },
+    ));
+    let mut rig = Rig::from_car(
+        Car::with_others(sirius, bmt_ecu(bmt_scenario(true)), vec![abs_ecu()]),
+        Default::default(),
+    );
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(12_600);
+    rig.send(OWNER, Op::StartLive(kline_bridge::profile::Profile::Drive));
+    rig.run_for(6_000);
+    let r = rig.call(OWNER, clear_dtc(), 5_000);
+    assert_eq!(r.result, ResultCode::VehicleMoving);
+}

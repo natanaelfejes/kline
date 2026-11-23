@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Hand-written kline-bridge fixture (not derived from any Renault file). An airbag ECU at
+     0x2C, KWP 5-baud, KW D0 8F (docs/protocol.md). Names, positions and values are invented;
+     only the request bytes are protocol facts (21 80 identification, 21 xx reads, 17 faults). -->
+<Target Name="Bridge fixture airbag" xmlns="http://www-diag.renault.com/2002/ECU">
+<Function Name="Restraint" Address="44"/>
+<K BaudRate="10400">
+<KWP Multipoint="1">
+<ISO8><KW1 Value="208"/><KW2 Value="143" Timeout="300"/><FirstRequest Delay="20"/></ISO8>
+<KW2_ Delay="25"/>
+</KWP>
+<InterByte Delay="3"/>
+<ReplyToRequest Delay="20"/>
+<RequestToReply Timeout="300"/>
+<TesterPresent Delay="3000"/>
+<OnError Delay="300"/>
+</K>
+<Datas>
+<Data Name="Part number"><Bytes count="6" ascii="1"/></Data>
+<Data Name="Lamp state"><Bits><Scaled/></Bits></Data>
+</Datas>
+<Requests Endian="Big">
+<Request Name="Identification">
+<Sent><SentBytes>2180</SentBytes></Sent>
+<Received MinBytes="9"><DataItem Name="Part number" Ref="1" FirstByte="3"/></Received>
+</Request>
+<Request Name="Lamp frame">
+<Sent><SentBytes>2181</SentBytes></Sent>
+<Received MinBytes="3"><DataItem Name="Lamp state" Ref="1" FirstByte="3"/></Received>
+</Request>
+</Requests>
+</Target>

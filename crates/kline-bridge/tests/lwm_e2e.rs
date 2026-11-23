@@ -8,6 +8,8 @@ mod common;
 use common::*;
 use kline_bridge::gate::Role;
 use kline_bridge::gatt::{live_flags, Channel, LiveSample, Op, Response, ResultCode};
+use kline_bridge::profile::{EcuId, Profile};
+use kline_sim::ecu::{FaultRule, ReplyFault};
 use kline_spec::Value;
 
 fn challenge(r: &Response) -> (u32, String) {
@@ -166,7 +168,7 @@ fn the_k_line_cannot_be_yielded_while_an_unlock_is_owed() {
     assert!(rig.run_until_pred(30_000, |r| r.bridge.lwm().locked_by_us()));
     assert_eq!(
         rig.call(AGENT, Op::YieldKline, 1_000).result,
-        ResultCode::Busy
+        ResultCode::LwmActive
     );
     rig.run_for(50_000);
     let w = rig.car.bmt_journal.writes();
@@ -175,4 +177,128 @@ fn the_k_line_cannot_be_yielded_while_an_unlock_is_owed() {
         rig.call(AGENT, Op::YieldKline, 1_000).result,
         ResultCode::Ok
     );
+}
+
+/// Driving at 40 km/h for good (no engine stop).
+fn cruising_sirius() -> kline_sim::ecu::SpecEcu {
+    sirius_ecu(sirius_scenario())
+        .with_change_after(&[0x21, 0xA9], 1_000, "Vehicle speed", Value::Number(40.0))
+        .with_change_after(&[0x21, 0xA9], 1_000, "Engine speed", Value::Number(2_200.0))
+}
+
+/// Review B1: neither role can move the bridge off the Sirius while lock-when-moving needs it,
+/// so nobody can make it unlock and relock the car while driving.
+#[test]
+fn clients_cannot_toggle_the_locks_while_driving() {
+    let mut rig = Rig::new(cruising_sirius(), bmt_ecu(bmt_scenario(true)));
+    rig.connect(OWNER, Role::Owner);
+    rig.connect(AGENT, Role::Agent);
+    rig.battery(14_100);
+    arm(&mut rig);
+    assert!(rig.run_until_pred(30_000, |r| r.bridge.lwm().locked_by_us()));
+    rig.run_for(10_000);
+    for _ in 0..4 {
+        for client in [AGENT, OWNER] {
+            let r = rig.call(client, Op::StartLive(Profile::Parked), 1_000);
+            assert_eq!(r.result, ResultCode::LwmActive);
+            let r = rig.call(
+                client,
+                Op::Request {
+                    ecu: EcuId::Bmt,
+                    payload: vec![0x21, 0xA3],
+                },
+                1_000,
+            );
+            assert_eq!(r.result, ResultCode::LwmActive);
+            assert_eq!(
+                rig.call(client, Op::YieldKline, 1_000).result,
+                ResultCode::LwmActive
+            );
+        }
+        rig.run_for(12_000);
+    }
+    let w = rig.car.bmt_journal.writes();
+    assert_eq!(w.len(), 1, "only the one lock: {w:?}");
+    assert!(rig.bridge.lwm().locked_by_us());
+}
+
+/// Review M4: the lock is written but its reply is lost: the unlock at engine stop still
+/// comes.
+#[test]
+fn a_lost_lock_reply_still_unlocks_at_engine_stop() {
+    let bmt =
+        bmt_ecu(bmt_scenario(true)).with_fault(FaultRule::on(&[0x31, 0xA0], ReplyFault::NoReply));
+    let mut rig = Rig::new(driving_sirius(), bmt);
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(14_100);
+    arm(&mut rig);
+    rig.run_for(60_000);
+    let w: Vec<Vec<u8>> = rig
+        .car
+        .bmt_journal
+        .writes()
+        .into_iter()
+        .map(|w| w.payload)
+        .collect();
+    assert_eq!(w.first(), Some(&vec![0x31, 0xA0, 0x00, 0x01]));
+    assert!(w.contains(&vec![0x31, 0xA1, 0x00, 0x01]), "{w:02X?}");
+}
+
+/// Review M9 and B1: no charging voltage (12.6 V with the engine running), and after the lock
+/// the Sirius stops answering (ignition off): the bridge keeps trying the Sirius, sees it gone
+/// after 3 s of failed attempts, and unlocks.
+#[test]
+fn the_sirius_going_silent_unlocks_without_a_charging_voltage() {
+    // About 10 reads per second: the first 21-requests are answered, later ones get nothing.
+    let sirius =
+        cruising_sirius().with_fault(FaultRule::on(&[0x21], ReplyFault::NoReply).after(400));
+    let mut rig = Rig::new(sirius, bmt_ecu(bmt_scenario(true)));
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(14_100);
+    arm(&mut rig);
+    assert!(rig.run_until_pred(60_000, |r| !r.car.bmt_journal.writes().is_empty()));
+    rig.battery(12_600);
+    rig.run_for(120_000);
+    let w: Vec<Vec<u8>> = rig
+        .car
+        .bmt_journal
+        .writes()
+        .into_iter()
+        .map(|w| w.payload)
+        .collect();
+    assert_eq!(
+        w,
+        vec![vec![0x31, 0xA0, 0x00, 0x01], vec![0x31, 0xA1, 0x00, 0x01]]
+    );
+    assert!(rig.car.sleeps.is_empty() || !rig.bridge.lwm().locked_by_us());
+}
+
+/// Review M5 (surviving mutation): below 12.0 V with the engine stopped, the owed unlock is
+/// sent before the bridge sleeps.
+#[test]
+fn a_low_battery_never_sleeps_over_an_owed_unlock() {
+    let sirius =
+        cruising_sirius().with_fault(FaultRule::on(&[0x21], ReplyFault::NoReply).after(400));
+    let mut rig = Rig::new(sirius, bmt_ecu(bmt_scenario(true)));
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(14_100);
+    arm(&mut rig);
+    assert!(rig.run_until_pred(60_000, |r| !r.car.bmt_journal.writes().is_empty()));
+    rig.battery(11_900);
+    rig.run_for(120_000);
+    let w: Vec<Vec<u8>> = rig
+        .car
+        .bmt_journal
+        .writes()
+        .into_iter()
+        .map(|w| w.payload)
+        .collect();
+    assert_eq!(w.last(), Some(&vec![0x31, 0xA1, 0x00, 0x01]), "{w:02X?}");
+    let unlock_t = rig.car.bmt_journal.writes().last().unwrap().t_ms;
+    assert!(
+        rig.car.sleeps.iter().all(|s| s.0 > unlock_t),
+        "{:?}",
+        rig.car.sleeps
+    );
+    assert!(!rig.car.sleeps.is_empty(), "then it sleeps");
 }

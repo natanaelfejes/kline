@@ -26,6 +26,8 @@ use core::mem;
 
 use kline_core::frame::Reply;
 use kline_core::init::FiveBaudInit;
+#[cfg(feature = "approvals")]
+use kline_core::safety::Tier;
 use kline_core::session::{Session, SessionError, SessionOutcome};
 use kline_core::{Action, Event, LinkError, Step};
 
@@ -36,7 +38,7 @@ use crate::gatt::{
     RawFrame, Response, ResultCode, Status,
 };
 use crate::live::{self, BmtFrame};
-use crate::lwm::{Intent, LockWhenMoving, LwmConfig};
+use crate::lwm::{Intent, LockWhenMoving, LwmConfig, Outcome};
 use crate::profile::{EcuId, Profile};
 use crate::ratelimit::{ClientId, Counters, RateLimiter};
 
@@ -44,6 +46,8 @@ use crate::ratelimit::{ClientId, Counters, RateLimiter};
 pub const BMT_LOCK: [u8; 4] = [0x31, 0xA0, 0x00, 0x01];
 /// BMT actuator "unlock all doors", 1 command: `31 A1 00 01`.
 pub const BMT_UNLOCK: [u8; 4] = [0x31, 0xA1, 0x00, 0x01];
+/// MASTER-PLAN-v2 P6: below 11.8 V switch off.
+const CRITICAL_BATTERY_MV: u16 = 11_800;
 /// BMT lock-state read (`21 A3`, DCODCOND in data byte 0 bit 7).
 const BMT_LOCK_READ: [u8; 2] = [0x21, 0xA3];
 
@@ -94,6 +98,14 @@ pub struct BridgeConfig {
     /// 10 min (MASTER-PLAN-v2 3.1 rule 4 "limit frekvencie").
     pub lock_rate_max: usize,
     pub lock_rate_window_ms: u64,
+    /// Battery below the write limit continuously for this long before the bridge stops and
+    /// sleeps; cranking dips and ADC noise are shorter. ours: 10 s.
+    pub low_battery_debounce_ms: u64,
+    /// Below 11.8 V (MASTER-PLAN-v2 P6 "okamžite vypnúť") continuously for this long. ours: 5 s,
+    /// longer than a start (cranking dips last about 1-2 s).
+    pub critical_battery_debounce_ms: u64,
+    /// A Sirius speed sample older than this is not "the car's speed now". ours: 2 s.
+    pub speed_fresh_ms: u64,
     pub lwm: LwmConfig,
     pub fob: FobTiming,
 }
@@ -123,6 +135,9 @@ impl Default for BridgeConfig {
             command_rate_window_ms: 1_000,
             lock_rate_max: 6,
             lock_rate_window_ms: 600_000,
+            low_battery_debounce_ms: 10_000,
+            critical_battery_debounce_ms: 5_000,
+            speed_fresh_ms: 2_000,
             lwm: LwmConfig::default(),
             fob: FobTiming::default(),
         }
@@ -145,20 +160,34 @@ pub enum Output {
     /// Pulse the fob output once, then [`Bridge::on_fob_done`].
     FobPulse,
     /// Enter low power, then [`Bridge::on_wake`].
-    Sleep { wake_after_ms: Option<u64> },
+    Sleep {
+        wake_after_ms: Option<u64>,
+        reason: SleepReason,
+    },
     /// Nothing to do until then (or the next input).
     Idle { until_ms: u64 },
 }
 
+/// Why the bridge sleeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SleepReason {
+    /// Below 12.0 V for the debounce time, engine off (MASTER-PLAN-v2 P6).
+    LowBattery,
+    /// Below 11.8 V for the debounce time (P6: switch off at once).
+    CriticalBattery,
+    /// No client, no profile, nothing to do.
+    Idle,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FobPhase {
-    /// Read `21 A3` (a value read after the command was accepted).
+    /// Read `21 A3`. Only a positive reply of this job decides (review M1).
     ReadState,
     /// The state differs from the target: pulse next.
     NeedPulse,
     /// The pulse was handed out; waiting for `on_fob_done`.
     Pulsing,
-    /// Re-reading `21 A3` until it shows the target state.
+    /// Re-reading `21 A3` until a positive reply of this job shows the target state.
     Verify { deadline: u64 },
 }
 
@@ -195,6 +224,8 @@ enum JobKind {
     Fob {
         lock: bool,
         phase: FobPhase,
+        /// The lock state of the last positive `21 A3` reply received by this job.
+        seen: Option<LockState>,
     },
     #[cfg(feature = "standing-lock")]
     Standing(Intent),
@@ -298,8 +329,22 @@ pub struct Bridge {
     live: LiveSample,
     parked: Parked,
     last_engine_sample: Option<(u64, u16)>,
+    /// Latest Sirius speed and when it was read.
+    last_speed: Option<(u64, u8)>,
+    /// Since when the battery reads below the write limit / the critical limit.
+    low_since: Option<u64>,
+    critical_since: Option<u64>,
+    /// A session ended without a clean Stop (link errors) at this time: the next init waits
+    /// P3max so the old ECU has timed out (one master on the line).
+    unclean_end: Option<u64>,
+    /// The job exchange in progress wrote its request (a lost reply may mean it executed).
+    job_written: bool,
     poll_index: usize,
     yielded: bool,
+    /// Who yielded the line (the lease): only that client or an owner may resume it.
+    yield_holder: Option<ClientId>,
+    /// YIELD command waiting for the session to stop and the transceiver to go off.
+    yield_reply: Option<(ClientId, u32)>,
     asleep: bool,
     raw: bool,
     last_activity_ms: u64,
@@ -341,8 +386,15 @@ impl Bridge {
             live: LiveSample::default(),
             parked: Parked::default(),
             last_engine_sample: None,
+            last_speed: None,
+            low_since: None,
+            critical_since: None,
+            unclean_end: None,
+            job_written: false,
             poll_index: 0,
             yielded: false,
+            yield_holder: None,
+            yield_reply: None,
             asleep: false,
             raw: false,
             last_activity_ms: now_ms,
@@ -366,6 +418,29 @@ impl Bridge {
 
     pub fn lwm(&self) -> &LockWhenMoving {
         &self.lwm
+    }
+
+    /// The client holding the K-line yield, if yielded. The firmware saves it to NVS on change
+    /// and gives it back with [`Bridge::restore_yield`] after a reset, so a reset never takes
+    /// the line from another tester (review M6).
+    pub fn yield_holder(&self) -> Option<ClientId> {
+        self.yield_holder
+    }
+
+    pub fn is_yielded(&self) -> bool {
+        self.yielded
+    }
+
+    /// At boot: the line was yielded by `holder` before the reset.
+    pub fn restore_yield(&mut self, holder: ClientId) {
+        self.yielded = true;
+        self.yield_holder = Some(holder);
+    }
+
+    /// A peer (re)bonded: forget its old counter, so a bond whose counter reached `u32::MAX`
+    /// is not locked out forever (review nit).
+    pub fn on_bond(&mut self, client: ClientId) {
+        self.counters.forget(client);
     }
 
     pub fn is_asleep(&self) -> bool {
@@ -440,9 +515,13 @@ impl Bridge {
     // Inputs
 
     /// A bonded client connected with `role` (from the bond table, set at pairing).
+    /// Unbonded peers are not clients: no notifications go to them, and their commands are
+    /// refused.
     pub fn on_connect(&mut self, client: ClientId, role: Role, now_ms: u64) {
         self.now_ms = now_ms;
-        self.clients.insert(client, role);
+        if role != Role::Unbonded {
+            self.clients.insert(client, role);
+        }
         self.last_activity_ms = now_ms;
     }
 
@@ -456,6 +535,16 @@ impl Bridge {
     pub fn on_battery_mv(&mut self, mv: u16, now_ms: u64) {
         self.now_ms = now_ms;
         self.battery_mv = Some(mv);
+        if mv < self.cfg.low_battery_mv {
+            self.low_since.get_or_insert(now_ms);
+        } else {
+            self.low_since = None;
+        }
+        if mv < CRITICAL_BATTERY_MV {
+            self.critical_since.get_or_insert(now_ms);
+        } else {
+            self.critical_since = None;
+        }
     }
 
     /// Woke up from [`Output::Sleep`].
@@ -491,6 +580,9 @@ impl Bridge {
         self.last_activity_ms = now_ms;
         let r = |c| Err::<(), ResultCode>(c);
         let result: Result<(), ResultCode> = match cmd.op {
+            Op::StartLive(p) if p != Profile::Drive && self.lwm_holds_sirius(now_ms) => {
+                r(ResultCode::LwmActive)
+            }
             Op::StartLive(p) => {
                 self.requested = p;
                 Ok(())
@@ -498,6 +590,11 @@ impl Bridge {
             Op::StopLive => {
                 self.requested = Profile::Off;
                 Ok(())
+            }
+            Op::Request { ecu, .. } | Op::Prepare { ecu, .. }
+                if ecu != EcuId::Sirius && self.lwm_holds_sirius(now_ms) =>
+            {
+                r(ResultCode::LwmActive)
             }
             Op::Request { ecu, payload } => gate::check_request(role, ecu, &payload)
                 .and_then(|()| self.enqueue(client, counter, JobKind::Request { ecu, payload })),
@@ -522,19 +619,33 @@ impl Bridge {
                         JobKind::Fob {
                             lock,
                             phase: FobPhase::ReadState,
+                            seen: None,
                         },
                     )
                 }
             }
-            // Not while lock-when-moving owes an unlock: it needs the K line at engine stop.
-            Op::YieldKline if self.lwm.locked_by_us() => r(ResultCode::Busy),
+            // Not while lock-when-moving needs the Sirius (an unlock owed, or armed and driving).
+            Op::YieldKline if self.lwm_holds_sirius(now_ms) => r(ResultCode::LwmActive),
+            Op::YieldKline if self.yielded => r(ResultCode::Yielded),
             Op::YieldKline => {
                 self.yielded = true;
+                self.yield_holder = Some(client);
                 self.fail_jobs(|_| true, ResultCode::Yielded);
-                Ok(())
+                // Answered Ok only once the session is stopped and the transceiver is off.
+                self.yield_reply = Some((client, counter));
+                self.respond(Some(client), counter, ResultCode::Accepted, Vec::new());
+                return;
+            }
+            // The lease: only the client that yielded, or an owner, takes the line back.
+            Op::ResumeKline
+                if self.yielded && self.yield_holder != Some(client) && role != Role::Owner =>
+            {
+                r(ResultCode::NotAllowedForRole)
             }
             Op::ResumeKline => {
                 self.yielded = false;
+                self.yield_holder = None;
+                self.yield_reply = None;
                 Ok(())
             }
             Op::SetTime(t) => {
@@ -604,6 +715,9 @@ impl Bridge {
         payload: Vec<u8>,
     ) -> Result<(), ResultCode> {
         gate::check_prepare(role, ecu, &payload, self.battery_ok())?;
+        if self.moving_for(ecu, self.now_ms) {
+            return Err(ResultCode::VehicleMoving);
+        }
         if self.pending_live() {
             return Err(ResultCode::Busy);
         }
@@ -641,6 +755,12 @@ impl Bridge {
     ) -> Result<(), ResultCode> {
         if role != Role::Owner {
             return Err(ResultCode::NotAllowedForRole);
+        }
+        if let Some(p) = &self.pending {
+            if self.moving_for(p.ecu, self.now_ms) && p.purpose == Purpose::Send {
+                self.pending = None;
+                return Err(ResultCode::VehicleMoving);
+            }
         }
         match &self.pending {
             Some(p) if p.client == client && p.id == challenge && self.now_ms < p.expires_ms => {}
@@ -737,9 +857,15 @@ impl Bridge {
                     let mut s = Session::new(outcome, now_ms);
                     s.set_definition_guard(gate::guard(ecu));
                     self.poll_index = 0;
+                    self.unclean_end = None;
                     self.link = Link::Ready { ecu, s, errors: 0 };
                 }
-                Step::Failed(e) => self.init_failed(ecu, failures + 1, &e),
+                Step::Failed(e) => {
+                    self.init_failed(ecu, failures + 1, &e);
+                    if ecu == EcuId::Sirius {
+                        self.sirius_failed();
+                    }
+                }
             },
             Link::Busy {
                 ecu,
@@ -761,9 +887,14 @@ impl Bridge {
                 }
                 Step::Failed(e) => {
                     let errors = errors + 1;
+                    if ecu == EcuId::Sirius && matches!(op, Exch::Poll(_) | Exch::TesterPresent) {
+                        self.sirius_failed();
+                    }
                     if op == Exch::Stop || s.is_closed() {
+                        self.unclean_end = Some(now_ms);
                         self.link = Link::Off;
                     } else if errors >= self.cfg.exchange_failures_before_reinit {
+                        self.unclean_end = Some(now_ms);
                         // The line is not trustworthy: drop the session, re-init after a pause
                         // (the ECU sleeps after P3max of silence anyway).
                         self.link = Link::Backoff {
@@ -796,6 +927,9 @@ impl Bridge {
             Link::Off => None,
         };
         let busy_job = matches!(self.link, Link::Busy { op: Exch::Job, .. });
+        if matches!(self.link, Link::Ready { .. } | Link::Busy { .. }) {
+            self.unclean_end = Some(now_ms);
+        }
         self.link = match ecu {
             Some(ecu) => Link::Backoff {
                 ecu,
@@ -819,8 +953,10 @@ impl Bridge {
         let Some(job) = self.jobs.front_mut() else {
             return;
         };
-        if let JobKind::Fob { phase, .. } = &mut job.kind {
+        if let JobKind::Fob { phase, seen, .. } = &mut job.kind {
             if *phase == FobPhase::Pulsing {
+                // Only reads after the pulse count for the verification.
+                *seen = None;
                 match result {
                     Ok(()) => {
                         *phase = FobPhase::Verify {
@@ -871,6 +1007,11 @@ impl Bridge {
 
     fn hand_out(&mut self, a: Action) -> Output {
         self.awaiting = true;
+        if matches!(a, Action::Write { .. })
+            && matches!(self.link, Link::Busy { op: Exch::Job, .. })
+        {
+            self.job_written = true;
+        }
         if self.raw {
             if let Action::Write { frame, .. } = &a {
                 self.raw_frame(RawDir::Tx, frame.bytes().to_vec());
@@ -906,6 +1047,13 @@ impl Bridge {
                 self.lwm_intent(intent);
             }
         }
+        // YIELD answered once the line is released.
+        if let Some((c, counter)) = self.yield_reply {
+            if matches!(self.link, Link::Off) && !self.power && self.yielded && !self.awaiting {
+                self.yield_reply = None;
+                self.respond(Some(c), counter, ResultCode::Ok, Vec::new());
+            }
+        }
         // Status notification on change or every interval.
         let st = self.status();
         let due = self
@@ -936,6 +1084,14 @@ impl Bridge {
                     if !self.battery_allows_session() {
                         return Some(self.idle(now));
                     }
+                    // After a session that ended without a clean Stop, wait P3max before any
+                    // init, so the old ECU has timed out (never two talking at once).
+                    if let Some(t) = self.unclean_end {
+                        let until = t + self.cfg.answered_wait_ms;
+                        if now < until {
+                            return Some(Output::Idle { until_ms: until });
+                        }
+                    }
                     Some(self.start_init(ecu, 0))
                 }
                 None => {
@@ -943,7 +1099,7 @@ impl Bridge {
                         self.power = false;
                         return Some(Output::Power(false));
                     }
-                    if let Some(wake) = self.should_sleep(now) {
+                    if let Some((wake, reason)) = self.should_sleep(now) {
                         self.fail_jobs(|_| true, ResultCode::LowBattery);
                         self.asleep = true;
                         let st = self.status();
@@ -957,6 +1113,7 @@ impl Bridge {
                         }
                         self.out.push_back(Output::Sleep {
                             wake_after_ms: Some(wake),
+                            reason,
                         });
                         return None;
                     }
@@ -972,6 +1129,11 @@ impl Bridge {
                     self.link = Link::Off;
                     return None;
                 }
+                // After an unclean end, never before P3max (one master on the line).
+                let until = match self.unclean_end {
+                    Some(t) => until.max(t + self.cfg.answered_wait_ms),
+                    None => until,
+                };
                 if now >= until {
                     return Some(self.start_init(ecu, failures));
                 }
@@ -1059,6 +1221,7 @@ impl Bridge {
             .front()
             .is_some_and(|j| self.job_ecu(&j.kind) == Some(ecu))
         {
+            self.job_written = false;
             return match self.start_job(ecu, &mut s, now) {
                 JobStart::Exchange(a) => {
                     self.link = Link::Busy {
@@ -1146,8 +1309,9 @@ impl Bridge {
                 let (challenge, code) = (*challenge, code.clone());
                 self.confirm_now(s, challenge, &code, now)
             }
-            JobKind::Fob { lock, phase } => {
+            JobKind::Fob { lock, phase, seen } => {
                 let lock = *lock;
+                let seen = *seen;
                 match *phase {
                     FobPhase::ReadState => match s.request(&BMT_LOCK_READ, now) {
                         Ok(a) => JobStart::Exchange(a),
@@ -1167,7 +1331,7 @@ impl Bridge {
                         } else {
                             LockState::Unlocked
                         };
-                        if self.parked.lock == target {
+                        if seen == Some(target) {
                             if !lock {
                                 self.lwm.on_manual_unlock();
                             }
@@ -1206,7 +1370,24 @@ impl Bridge {
         if !self.battery_ok() {
             return self.finish_job(ResultCode::LowBattery, Vec::new());
         }
-        match s.service_challenge(&payload) {
+        // The tier on the session's real target (key bytes of the init that ran).
+        let made = match kline_core::safety::tier_of_in(s.definition_guard(), &s.target(), &payload)
+        {
+            Ok(Tier::Service) => s.service_challenge(&payload),
+            Ok(Tier::ConfigWrite) => {
+                // The identification is the session's latest `21 80` reply: the app reads it
+                // (REQUEST 21 80) and chooses its definition from it, like the CLI.
+                let ident = s
+                    .config_read(kline_core::safety::IDENTIFICATION_READ[1])
+                    .map(<[u8]>::to_vec)
+                    .unwrap_or_default();
+                s.config_write_challenge(&payload, &ident)
+            }
+            Ok(Tier::Expert) => s.expert_challenge(&payload),
+            Ok(Tier::Read) => return self.finish_job(ResultCode::Unsupported, Vec::new()),
+            Err(d) => Err(SessionError::Denied(d)),
+        };
+        match made {
             Ok(ch) => {
                 let id = self.next_challenge_id;
                 self.next_challenge_id = self.next_challenge_id.wrapping_add(1).max(1);
@@ -1260,6 +1441,10 @@ impl Bridge {
             Purpose::Send => {
                 if !self.battery_ok() {
                     self.finish_job(ResultCode::LowBattery, Vec::new());
+                    return JobStart::Nothing;
+                }
+                if self.moving_for(p.ecu, now) {
+                    self.finish_job(ResultCode::VehicleMoving, Vec::new());
                     return JobStart::Nothing;
                 }
                 match s.request_approved(&p.payload, approval, now) {
@@ -1317,21 +1502,19 @@ impl Bridge {
                 }),
             ) => (BMT_UNLOCK, r),
             _ => {
-                self.lwm.intent_done(now, intent, false);
+                self.lwm.intent_done(now, intent, Outcome::NotExecuted);
                 self.jobs.pop_front();
                 return JobStart::Nothing;
             }
         };
         if intent == Intent::Lock && !self.battery_ok() {
-            self.lwm.intent_done(now, intent, false);
+            self.lwm.intent_done(now, intent, Outcome::NotExecuted);
             self.jobs.pop_front();
             return JobStart::Nothing;
         }
         let ok = match s.service_challenge(&payload) {
             Ok(ch)
-                if ch.payload() == payload
-                    && ch.target() == gate::target(EcuId::Bmt)
-                    && *ch.risk() == armed_risk =>
+                if standing_allows(&payload, ch.payload(), ch.target(), ch.risk(), &armed_risk) =>
             {
                 let code = String::from(ch.code());
                 Approval::confirm(ch, &code)
@@ -1343,7 +1526,7 @@ impl Bridge {
         match ok {
             Some(a) => JobStart::Exchange(a),
             None => {
-                self.lwm.intent_done(now, intent, false);
+                self.lwm.intent_done(now, intent, Outcome::NotExecuted);
                 self.jobs.pop_front();
                 JobStart::Nothing
             }
@@ -1363,7 +1546,8 @@ impl Bridge {
         #[cfg(not(feature = "standing-lock"))]
         {
             // Not reachable: the automaton is never armed without the feature.
-            self.lwm.intent_done(self.now_ms, intent, false);
+            self.lwm
+                .intent_done(self.now_ms, intent, Outcome::NotExecuted);
         }
     }
 
@@ -1400,7 +1584,13 @@ impl Bridge {
         }) = self.jobs.front()
         {
             let i = *i;
-            self.lwm.intent_done(self.now_ms, i, code == ResultCode::Ok);
+            let outcome = match code {
+                ResultCode::Ok => Outcome::Done,
+                // Written, reply lost: it may have executed (review M4).
+                ResultCode::LinkError if self.job_written => Outcome::MaybeExecuted,
+                _ => Outcome::NotExecuted,
+            };
+            self.lwm.intent_done(self.now_ms, i, outcome);
             self.jobs.pop_front();
             self.drop_standing_if_done();
             return;
@@ -1426,21 +1616,31 @@ impl Bridge {
         let Some(job) = self.jobs.front_mut() else {
             return;
         };
-        if let JobKind::Fob { lock, phase } = &mut job.kind {
+        if let JobKind::Fob { lock, phase, seen } = &mut job.kind {
             let target = if *lock {
                 LockState::Locked
             } else {
                 LockState::Unlocked
             };
+            // Only a positive `61 A3` of this job counts; a negative reply or anything else
+            // leaves the state unknown (review M1: never decide on a stale value).
+            let fresh = match &reply {
+                Reply::Positive(p) => match live::bmt(p) {
+                    Some(BmtFrame::Lock(l)) if l != LockState::Unknown => Some(l),
+                    _ => None,
+                },
+                _ => None,
+            };
+            *seen = fresh;
             if *phase == FobPhase::ReadState {
-                match self.parked.lock {
-                    LockState::Unknown => {
+                match fresh {
+                    None => {
                         self.finish_job(ResultCode::LockNotConfirmed, Vec::new());
                     }
-                    s if s == target => {
+                    Some(s) if s == target => {
                         self.finish_job(ResultCode::Ok, Vec::new());
                     }
-                    _ => *phase = FobPhase::NeedPulse,
+                    Some(_) => *phase = FobPhase::NeedPulse,
                 }
             }
             // Verify: decided in start_job on the next pass.
@@ -1501,7 +1701,7 @@ impl Bridge {
     fn job_failed(&mut self, job: Job, code: ResultCode) {
         #[cfg(feature = "standing-lock")]
         if let JobKind::Standing(i) = job.kind {
-            self.lwm.intent_done(self.now_ms, i, false);
+            self.lwm.intent_done(self.now_ms, i, Outcome::NotExecuted);
             return;
         }
         self.last_error = code as u8;
@@ -1549,6 +1749,7 @@ impl Bridge {
                     self.live.iat_c = v.iat_c;
                     self.live.flags |= live_flags::A9_VALID;
                     self.last_engine_sample = Some((now, v.rpm));
+                    self.last_speed = Some((now, v.speed_kmh));
                     changed = true;
                     if let Some(intent) = self.lwm.on_sample(now, v.speed_kmh, v.rpm) {
                         self.lwm_intent(intent);
@@ -1577,6 +1778,7 @@ impl Bridge {
                     }
                 }
             }
+            EcuId::Abs | EcuId::Airbag => {}
             EcuId::Bmt => match live::bmt(p) {
                 Some(BmtFrame::Lock(l)) => {
                     self.parked.lock = l;
@@ -1608,7 +1810,9 @@ impl Bridge {
 
     /// The ECU the bridge should have a session with now, if any.
     fn desired_ecu(&self, now: u64) -> Option<EcuId> {
-        if self.yielded || self.asleep || self.critical_battery() || self.low_battery_sleep(now) {
+        // A yield always wins: also against a running engine (review M6).
+        if self.yielded || self.asleep || self.critical_battery(now) || self.low_battery_sleep(now)
+        {
             return None;
         }
         if let Some(j) = self.jobs.front() {
@@ -1628,15 +1832,46 @@ impl Bridge {
     /// The requested profile, or Drive on its own when the engine runs (so lock-when-moving
     /// and the dashboard work without a command).
     fn effective_profile(&self, now: u64) -> Profile {
+        // Lock-when-moving needs the Sirius: to see the engine stop, and a Sirius that no
+        // longer answers is the ignition-off signal (review M9).
+        if self.lwm_holds_sirius(now) {
+            return Profile::Drive;
+        }
         if self.requested != Profile::Off {
             return self.requested;
         }
-        // Lock-when-moving owes an unlock: keep talking to the Sirius to see the engine stop
-        // (a Sirius that no longer answers is the ignition-off signal).
-        if self.charging() || self.engine_running(now) || self.lwm.locked_by_us() {
+        if self.charging() || self.engine_running(now) {
             return Profile::Drive;
         }
         Profile::Off
+    }
+
+    /// Lock-when-moving needs the Sirius session now: an unlock is owed, or it is armed and the
+    /// engine runs. Then no profile switch, no other ECU and no yield (review B1).
+    fn lwm_holds_sirius(&self, now: u64) -> bool {
+        self.lwm.locked_by_us() || (self.lwm.is_armed() && self.engine_running(now))
+    }
+
+    /// The bridge tried the Sirius and it did not answer.
+    fn sirius_failed(&mut self) {
+        if let Some(intent) = self.lwm.on_sirius_failure(self.now_ms) {
+            self.lwm_intent(intent);
+        }
+    }
+
+    /// A non-read to `ecu` is refused now: the car moves (a fresh Sirius speed above 0), or,
+    /// for the Sirius, the engine runs and no fresh speed says the car stands (review: Sirius
+    /// `31 A0 00` injector inhibition, `30 80` fuel pump and the like while driving).
+    #[cfg_attr(not(feature = "approvals"), allow(dead_code))]
+    fn moving_for(&self, ecu: EcuId, now: u64) -> bool {
+        let fresh_speed = self
+            .last_speed
+            .filter(|(t, _)| now.saturating_sub(*t) <= self.cfg.speed_fresh_ms)
+            .map(|(_, v)| v);
+        match fresh_speed {
+            Some(v) => v > 0,
+            None => ecu == EcuId::Sirius && self.engine_running(now),
+        }
     }
 
     fn charging(&self) -> bool {
@@ -1654,38 +1889,45 @@ impl Bridge {
         self.engine_running(now) || self.charging()
     }
 
-    /// At or above the write limit (an unknown voltage counts as low: no writes blind).
+    /// At or above the write limit now (an unknown voltage counts as low: no writes blind).
+    /// Refusing a write on one low sample is the safe side, so this is not debounced.
     fn battery_ok(&self) -> bool {
         self.battery_mv
             .is_some_and(|mv| mv >= self.cfg.low_battery_mv)
     }
 
-    /// MASTER-PLAN-v2 P6: below 11.8 V switch off at once.
-    fn critical_battery(&self) -> bool {
-        self.battery_mv.is_some_and(|mv| mv < 11_800)
-    }
-
-    /// Sessions (reads) are allowed down to the critical limit; writes need `battery_ok`.
-    fn battery_allows_session(&self) -> bool {
-        !self.critical_battery()
-    }
-
-    /// Below the write limit with the engine off: stop and sleep (MASTER-PLAN-v2 P6, task
-    /// W4). The engine running wins: the voltage then is a measurement problem, not a flat
-    /// battery, and lock-when-moving must keep its Sirius session.
-    /// Not while lock-when-moving still owes the unlock: unlocking is the safe direction and
-    /// goes first (MASTER-PLAN-v2 3.1 rule 2).
-    fn low_battery_sleep(&self, now: u64) -> bool {
-        self.battery_mv
-            .is_some_and(|mv| mv < self.cfg.low_battery_mv)
+    /// MASTER-PLAN-v2 P6: below 11.8 V switch off, after the debounce (review M3), and never
+    /// with the engine running or an unlock owed.
+    fn critical_battery(&self, now: u64) -> bool {
+        self.critical_since
+            .is_some_and(|t| now.saturating_sub(t) >= self.cfg.critical_battery_debounce_ms)
             && !self.engine_running(now)
             && !self.lwm.locked_by_us()
     }
 
-    /// `Some(wake_after_ms)` when the bridge should sleep now (link already off).
-    fn should_sleep(&self, now: u64) -> Option<u64> {
-        if self.low_battery_sleep(now) || self.critical_battery() {
-            return Some(self.cfg.low_battery_wake_ms);
+    /// Sessions (reads) are allowed down to the critical limit; writes need `battery_ok`.
+    fn battery_allows_session(&self) -> bool {
+        !self.critical_battery(self.now_ms)
+    }
+
+    /// Below the write limit for the debounce time with the engine off: stop and sleep
+    /// (MASTER-PLAN-v2 P6). Not with the engine running (then the reading is a dip or a
+    /// measurement problem) and not while lock-when-moving owes an unlock (unlocking is the safe
+    /// direction and goes first, 3.1 rule 2).
+    fn low_battery_sleep(&self, now: u64) -> bool {
+        self.low_since
+            .is_some_and(|t| now.saturating_sub(t) >= self.cfg.low_battery_debounce_ms)
+            && !self.engine_running(now)
+            && !self.lwm.locked_by_us()
+    }
+
+    /// When the bridge should sleep now (link already off), how long and why.
+    fn should_sleep(&self, now: u64) -> Option<(u64, SleepReason)> {
+        if self.critical_battery(now) {
+            return Some((self.cfg.low_battery_wake_ms, SleepReason::CriticalBattery));
+        }
+        if self.low_battery_sleep(now) {
+            return Some((self.cfg.low_battery_wake_ms, SleepReason::LowBattery));
         }
         if !self.jobs.is_empty() || self.lwm.locked_by_us() || self.engine_running(now) {
             return None;
@@ -1694,7 +1936,7 @@ impl Bridge {
             && self.effective_profile(now) == Profile::Off
             && now.saturating_sub(self.last_activity_ms) >= self.cfg.idle_sleep_ms
         {
-            return Some(self.cfg.idle_wake_ms);
+            return Some((self.cfg.idle_wake_ms, SleepReason::Idle));
         }
         None
     }
@@ -1703,12 +1945,23 @@ impl Bridge {
     // Notifications
 
     fn respond(&mut self, to: Option<ClientId>, counter: u32, result: ResultCode, data: Vec<u8>) {
-        let frame = Response {
+        let frame = match (Response {
             counter,
             result,
             data,
-        }
-        .encode();
+        })
+        .encode()
+        {
+            Ok(f) => f,
+            // Never truncated: the client gets the code that says the reply did not fit.
+            Err(_) => Response {
+                counter,
+                result: ResultCode::ReplyTooLong,
+                data: Vec::new(),
+            }
+            .encode()
+            .expect("empty data fits"),
+        };
         self.out.push_back(Output::Notify {
             to,
             channel: Channel::Response,
@@ -1716,6 +1969,7 @@ impl Bridge {
         });
     }
 
+    /// Raw notifications, split into frames of at most [`crate::gatt::MAX_RAW_BYTES`].
     fn raw_frame(&mut self, dir: RawDir, bytes: Vec<u8>) {
         let ecu = match &self.link {
             Link::Init { ecu, .. } | Link::Ready { ecu, .. } | Link::Busy { ecu, .. } => {
@@ -1723,18 +1977,39 @@ impl Bridge {
             }
             _ => 0,
         };
-        let f = RawFrame {
-            t_ms: self.now_ms as u32,
-            dir,
-            ecu,
-            bytes,
-        };
-        self.out.push_back(Output::Notify {
-            to: None,
-            channel: Channel::Raw,
-            frame: f.encode(),
-        });
+        for chunk in bytes.chunks(crate::gatt::MAX_RAW_BYTES) {
+            let f = RawFrame {
+                t_ms: self.now_ms as u32,
+                dir,
+                ecu,
+                bytes: chunk.to_vec(),
+            };
+            if let Ok(frame) = f.encode() {
+                self.out.push_back(Output::Notify {
+                    to: None,
+                    channel: Channel::Raw,
+                    frame,
+                });
+            }
+        }
     }
+}
+
+/// The standing self-approval of D37 answers kline-core's challenge only when it is for
+/// exactly one of the two armed BMT payloads, on the BMT, with the risk the owner confirmed.
+#[cfg(feature = "standing-lock")]
+fn standing_allows(
+    wanted: &[u8],
+    challenge_payload: &[u8],
+    challenge_target: kline_core::safety::Target,
+    challenge_risk: &kline_core::safety::RiskInfo,
+    armed_risk: &kline_core::safety::RiskInfo,
+) -> bool {
+    (wanted == BMT_LOCK || wanted == BMT_UNLOCK)
+        && challenge_payload == wanted
+        && challenge_target.ecu_address == EcuId::Bmt.address()
+        && challenge_target.protocol == EcuId::Bmt.protocol()
+        && challenge_risk == armed_risk
 }
 
 enum JobStart {
@@ -1794,4 +2069,42 @@ fn ecu_answered(e: &LinkError) -> bool {
 /// Status changes worth a notification (uptime alone is not one).
 fn same_status(a: &Status, b: &Status) -> bool {
     Status { uptime_s: 0, ..*a } == Status { uptime_s: 0, ..*b }
+}
+
+#[cfg(all(test, feature = "standing-lock"))]
+mod tests {
+    use super::*;
+    use kline_core::safety::{assess, Protocol, Target};
+
+    fn bmt() -> Target {
+        Target {
+            protocol: Protocol::Kwp,
+            ecu_address: 0x26,
+            keywords: Some((0xD0, 0x8F)),
+        }
+    }
+
+    /// Review M6 (surviving mutation): the risk the owner confirmed must equal the challenge's.
+    #[test]
+    fn standing_self_approval_needs_the_exact_armed_risk_payload_and_target() {
+        let risk = assess(&bmt(), &BMT_LOCK).unwrap();
+        assert!(standing_allows(&BMT_LOCK, &BMT_LOCK, bmt(), &risk, &risk));
+        let mut other = risk;
+        other.what_can_go_wrong = "something else";
+        assert!(!standing_allows(&BMT_LOCK, &BMT_LOCK, bmt(), &risk, &other));
+        assert!(!standing_allows(
+            &BMT_LOCK,
+            &BMT_UNLOCK,
+            bmt(),
+            &risk,
+            &risk
+        ));
+        let wrong = [0x31, 0xA2, 0x00, 0x01];
+        assert!(!standing_allows(&wrong, &wrong, bmt(), &risk, &risk));
+        let sirius = Target {
+            ecu_address: 0x7A,
+            ..bmt()
+        };
+        assert!(!standing_allows(&BMT_LOCK, &BMT_LOCK, sirius, &risk, &risk));
+    }
 }

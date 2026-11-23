@@ -51,6 +51,10 @@ fn boot_drives_the_output_low_before_anything_else() {
     assert_eq!(*pin.0.borrow(), vec![false]);
 }
 
+/// On the host a panic unwinds and `FobDriver`'s Drop drives the pin low; that is what this test
+/// shows. On the target a panic does NOT unwind and no Drop runs: there the panic handler drives
+/// the fob GPIO low first (`firmware/esp32c3/src/main.rs`) and the hardware pull-down holds it
+/// during the reset (docs/bridge-hardware.md "Panic and reset").
 #[test]
 fn a_reset_in_the_middle_of_a_pulse_leaves_the_output_low() {
     let pin = Pin::default();

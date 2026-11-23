@@ -608,6 +608,14 @@ pub enum ResultCode {
     Challenge = 0x10,
     /// Ignition on / engine running: the fob path cannot work (the BMT ignores RF then).
     IgnitionOn = 0x11,
+    /// A non-read while the car moves (fresh speed above 0, or the Sirius with the engine
+    /// running and no fresh speed).
+    VehicleMoving = 0x12,
+    /// Lock-when-moving needs the Sirius now (armed with the engine running, or an unlock
+    /// owed): no profile switch, no other ECU, no yield.
+    LwmActive = 0x13,
+    /// The ECU's reply does not fit one Response frame; it was received but is not returned.
+    ReplyTooLong = 0x14,
 }
 
 impl ResultCode {
@@ -632,6 +640,9 @@ impl ResultCode {
             0x0F => Unsupported,
             0x10 => Challenge,
             0x11 => IgnitionOn,
+            0x12 => VehicleMoving,
+            0x13 => LwmActive,
+            0x14 => ReplyTooLong,
             _ => return None,
         })
     }
@@ -646,14 +657,19 @@ pub struct Response {
     pub data: Vec<u8>,
 }
 
+/// Largest `data` of a [`Response`].
+pub const MAX_RESPONSE_DATA: usize = MAX_BODY - 5;
+/// Largest `bytes` of a [`RawFrame`].
+pub const MAX_RAW_BYTES: usize = MAX_BODY - 6;
+
 impl Response {
-    pub fn encode(&self) -> Vec<u8> {
+    /// The frame, or `BodyTooLong` when `data` exceeds [`MAX_RESPONSE_DATA`] (never truncated).
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
         let mut b = Vec::with_capacity(5 + self.data.len());
         b.extend_from_slice(&self.counter.to_le_bytes());
         b.push(self.result as u8);
-        let room = MAX_BODY - 5;
-        b.extend_from_slice(&self.data[..self.data.len().min(room)]);
-        encode_frame(Channel::Response, &b).expect("bounded body")
+        b.extend_from_slice(&self.data);
+        encode_frame(Channel::Response, &b)
     }
 
     pub fn decode(frame: &[u8]) -> Result<Response, CodecError> {
@@ -691,14 +707,15 @@ pub struct RawFrame {
 }
 
 impl RawFrame {
-    pub fn encode(&self) -> Vec<u8> {
+    /// The frame, or `BodyTooLong` when `bytes` exceeds [`MAX_RAW_BYTES`] (never truncated;
+    /// the bridge splits longer reads into several frames).
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
         let mut b = Vec::with_capacity(6 + self.bytes.len());
         b.extend_from_slice(&self.t_ms.to_le_bytes());
         b.push(self.dir as u8);
         b.push(self.ecu);
-        let room = MAX_BODY - 6;
-        b.extend_from_slice(&self.bytes[..self.bytes.len().min(room)]);
-        encode_frame(Channel::Raw, &b).expect("bounded body")
+        b.extend_from_slice(&self.bytes);
+        encode_frame(Channel::Raw, &b)
     }
 
     pub fn decode(frame: &[u8]) -> Result<RawFrame, CodecError> {

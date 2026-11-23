@@ -99,7 +99,7 @@ impl Watchdog for Io {
 }
 
 impl Power for Io {
-    fn sleep(&mut self, wake_after_ms: Option<u64>) {
+    fn sleep(&mut self, wake_after_ms: Option<u64>, _reason: kline_bridge::bridge::SleepReason) {
         let t = self.now_ms() + wake_after_ms.unwrap_or(1_000);
         self.wait_until(t);
     }

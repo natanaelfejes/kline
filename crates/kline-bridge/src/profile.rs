@@ -1,5 +1,6 @@
 //! The two ECUs the bridge talks to, their link settings, and the polling profiles.
 
+use kline_core::safety::Protocol;
 use kline_core::{InitKind, KTiming, LinkConfig};
 
 /// ECUs reachable over BLE in protocol v1. Anything else is refused by the codec.
@@ -9,37 +10,85 @@ pub enum EcuId {
     Sirius,
     /// BMT body computer (also the immobilizer decoder), 0x26.
     Bmt,
+    /// Bosch 5.3 ABS, ISO8 at 0x01, key bytes `DC 83` (docs/protocol.md, car 2026-11-23).
+    Abs,
+    /// Airbag, 0x2C (AB70 / AB80 definitions; which one fits this car is NOT VERIFIED).
+    Airbag,
 }
+
+/// Every ECU the bridge knows, for tables and tests.
+pub const ALL_ECUS: [EcuId; 4] = [EcuId::Sirius, EcuId::Bmt, EcuId::Abs, EcuId::Airbag];
 
 impl EcuId {
     pub fn address(self) -> u8 {
         match self {
             EcuId::Sirius => kline_core::safety::SIRIUS_ADDRESS,
             EcuId::Bmt => kline_core::safety::BMT_ADDRESS,
+            EcuId::Abs => kline_core::safety::ABS_ADDRESS,
+            EcuId::Airbag => kline_core::safety::AIRBAG_ADDRESS,
         }
     }
 
     pub fn from_address(a: u8) -> Option<EcuId> {
-        match a {
-            a if a == kline_core::safety::SIRIUS_ADDRESS => Some(EcuId::Sirius),
-            a if a == kline_core::safety::BMT_ADDRESS => Some(EcuId::Bmt),
-            _ => None,
+        ALL_ECUS.into_iter().find(|e| e.address() == a)
+    }
+
+    /// Framing of the init the bridge runs for this ECU.
+    pub fn protocol(self) -> Protocol {
+        match self {
+            EcuId::Abs => Protocol::Iso8,
+            _ => Protocol::Kwp,
         }
     }
 
-    /// Link settings without a definition (the firmware has no XML): the `<K>` values of both
-    /// definitions (docs/protocol.md "The Clio II ECUs" and "Timing values": KWP 5-baud with
-    /// Multipoint declared, KW `D0 8F`, FirstRequest 20, InterByte 0, ReplyToRequest 5,
-    /// RequestToReply 300, TesterPresent 3000, OnError 300) and the plain-address
-    /// [`kline_core::InitVariant::SingleEcu`] init that worked on the car on 2026-11-22
-    /// (PROGRESS.md 19:55 and 19:57: 5-baud 7A and 26 OK, fast init no reply).
+    /// Key bytes the definition declares (`<K>` KW1/KW2): `D0 8F` for the KWP ECUs, `DC 83`
+    /// for the Bosch 5.3 ABS (kline-core `BOSCH_ABS_KEYWORDS`). The policy decides on the key
+    /// bytes the init actually received; these are only for the checks before a session.
+    pub fn keywords(self) -> (u8, u8) {
+        match self {
+            EcuId::Abs => kline_core::safety::BOSCH_ABS_KEYWORDS,
+            _ => (0xD0, 0x8F),
+        }
+    }
+
+    /// Link settings without a definition (the firmware has no XML), the `<K>` values of the
+    /// car's definitions (listed by kline-core's `spec::link_config`, checked by
+    /// `tests/definition_parity.rs` when `ddt-xml/` is present):
+    /// - Sirius, BMT: KWP 5-baud, Multipoint declared, KW `D0 8F`, FirstRequest 20,
+    ///   InterByte 0, ReplyToRequest 5, RequestToReply 300, TesterPresent 3000, OnError 300,
+    ///   KW2 timeout 300. Plain-address `SingleEcu` init, which worked on the car on
+    ///   2026-11-22 (PROGRESS.md 19:55 and 19:57: 5-baud 7A and 26 OK, fast init no reply).
+    /// - Airbag: the same KWP class, with AB70's InterByte 3 and ReplyToRequest 20 (the slower
+    ///   of the two airbag definitions; AB80 has 0 and 5).
+    /// - ABS: ISO8 5-baud, KW `DC 83`, FirstRequest 100, InterByte 5, ReplyToRequest 300,
+    ///   RequestToReply 9300, TesterPresent 7000, OnError 300, KW2 timeout 1500
+    ///   (X24_ABS_Bosch5.3.xml).
     pub fn link_config(self) -> LinkConfig {
-        let timing = KTiming {
-            init: InitKind::KwpFiveBaud { multipoint: true },
-            ..KTiming::default()
+        let timing = match self {
+            EcuId::Sirius | EcuId::Bmt => KTiming {
+                init: InitKind::KwpFiveBaud { multipoint: true },
+                ..KTiming::default()
+            },
+            EcuId::Airbag => KTiming {
+                init: InitKind::KwpFiveBaud { multipoint: true },
+                inter_byte_ms: 3,
+                reply_to_request_ms: 20,
+                ..KTiming::default()
+            },
+            EcuId::Abs => KTiming {
+                init: InitKind::Iso8FiveBaud,
+                first_request_ms: 100,
+                inter_byte_ms: 5,
+                reply_to_request_ms: 300,
+                request_to_reply_timeout_ms: 9_300,
+                tester_present_ms: 7_000,
+                on_error_ms: 300,
+                kw2_timeout_ms: 1_500,
+                ..KTiming::default()
+            },
         };
         let mut cfg = LinkConfig::new(self.address(), timing);
-        cfg.expected_keywords = Some((0xD0, 0x8F));
+        cfg.expected_keywords = Some(self.keywords());
         cfg
     }
 }

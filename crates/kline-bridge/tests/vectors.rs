@@ -71,8 +71,11 @@ fn notification_vectors() {
         result: ResultCode::Ok,
         data: vec![0x61, 0xA9, 0x04, 0x35],
     };
-    assert_eq!(r.encode(), hex("01 04 09 02 00 00 00 00 61 A9 04 35 FB 93"));
-    assert_eq!(Response::decode(&r.encode()), Ok(r));
+    assert_eq!(
+        r.encode().unwrap(),
+        hex("01 04 09 02 00 00 00 00 61 A9 04 35 FB 93")
+    );
+    assert_eq!(Response::decode(&r.encode().unwrap()), Ok(r));
 
     let mut data = 7u32.to_le_bytes().to_vec();
     data.push(1);
@@ -83,7 +86,7 @@ fn notification_vectors() {
         data,
     };
     assert_eq!(
-        r.encode(),
+        r.encode().unwrap(),
         hex("01 04 10 03 00 00 00 10 07 00 00 00 01 41 43 44 45 46 47 6A D0")
     );
 
@@ -131,10 +134,10 @@ fn notification_vectors() {
         bytes: vec![0x82, 0x7A, 0xF1, 0x21, 0xA9, 0xB7],
     };
     assert_eq!(
-        raw.encode(),
+        raw.encode().unwrap(),
         hex("01 05 0C C4 09 00 00 00 7A 82 7A F1 21 A9 B7 4C 33")
     );
-    assert_eq!(RawFrame::decode(&raw.encode()), Ok(raw));
+    assert_eq!(RawFrame::decode(&raw.encode().unwrap()), Ok(raw));
 }
 
 #[test]
@@ -156,7 +159,32 @@ fn malformed_vectors() {
     assert_eq!(Command::decode(&f), Err(CodecError::BadOpcode(0x7F)));
     let f = encode_frame(Channel::Command, &[1, 0, 0, 0, 0x06, 0x00]).unwrap();
     assert_eq!(Command::decode(&f), Err(CodecError::BadArgs));
-    // A request for an ECU other than 0x7A / 0x26 does not decode.
-    let f = encode_frame(Channel::Command, &[1, 0, 0, 0, 0x03, 0x2C, 0x21, 0x80]).unwrap();
+    // A request for an ECU other than 0x7A / 0x26 / 0x01 / 0x2C does not decode.
+    let f = encode_frame(Channel::Command, &[1, 0, 0, 0, 0x03, 0x10, 0x21, 0x80]).unwrap();
     assert_eq!(Command::decode(&f), Err(CodecError::BadArgs));
+}
+
+#[test]
+fn long_data_is_refused_not_truncated() {
+    let r = Response {
+        counter: 1,
+        result: ResultCode::Ok,
+        data: vec![0; MAX_RESPONSE_DATA + 1],
+    };
+    assert_eq!(r.encode(), Err(CodecError::BodyTooLong));
+    let r = Response {
+        data: vec![0; MAX_RESPONSE_DATA],
+        ..r
+    };
+    assert_eq!(
+        Response::decode(&r.encode().unwrap()).unwrap().data.len(),
+        MAX_RESPONSE_DATA
+    );
+    let raw = RawFrame {
+        t_ms: 0,
+        dir: RawDir::Rx,
+        ecu: 0x7A,
+        bytes: vec![0; MAX_RAW_BYTES + 1],
+    };
+    assert_eq!(raw.encode(), Err(CodecError::BodyTooLong));
 }
