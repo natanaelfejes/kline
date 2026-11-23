@@ -65,6 +65,23 @@ fn command_vectors() {
 }
 
 #[test]
+fn prepare_write_vector() {
+    // PREPARE_WRITE BMT, identification 61 80 41 42, payload 3B D2 00 01.
+    let c = Command {
+        counter: 6,
+        op: Op::PrepareWrite {
+            ecu: EcuId::Bmt,
+            identification: vec![0x61, 0x80, 0x41, 0x42],
+            payload: vec![0x3B, 0xD2, 0x00, 0x01],
+        },
+    };
+    cmd(
+        "01 03 0F 06 00 00 00 0F 26 04 61 80 41 42 3B D2 00 01 49 44",
+        c,
+    );
+}
+
+#[test]
 fn notification_vectors() {
     let r = Response {
         counter: 2,

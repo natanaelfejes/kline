@@ -72,6 +72,16 @@ fn op() -> impl Strategy<Value = Op> {
         tier1(),
         (ecu(), payload()).prop_map(|(ecu, payload)| Op::Request { ecu, payload }),
         (ecu(), payload()).prop_map(|(ecu, payload)| Op::Prepare { ecu, payload }),
+        (
+            ecu(),
+            proptest::collection::vec(any::<u8>(), 1..12),
+            payload()
+        )
+            .prop_map(|(ecu, identification, payload)| Op::PrepareWrite {
+                ecu,
+                identification,
+                payload
+            }),
         (any::<u32>(), "[A-Z0-9]{6,10}")
             .prop_map(|(challenge, code)| Op::Confirm { challenge, code }),
         (1u32..4).prop_map(|c| Op::Confirm {

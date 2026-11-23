@@ -215,6 +215,8 @@ enum JobKind {
         ecu: EcuId,
         payload: Vec<u8>,
         purpose: Purpose,
+        /// Tier 2: the `21 80` reply the app chose its definition from.
+        identification: Vec<u8>,
     },
     #[cfg(feature = "approvals")]
     Confirm {
@@ -248,6 +250,8 @@ struct Pending {
     purpose: Purpose,
     challenge: kline_core::safety::ApprovalChallenge,
     expires_ms: u64,
+    /// The session the challenge was made on ([`Bridge::session_gen`]).
+    session_gen: u32,
 }
 
 /// The owner armed lock-when-moving: the risks he confirmed for the two requests.
@@ -324,6 +328,11 @@ pub struct Bridge {
     next_challenge_id: u32,
     #[cfg(feature = "standing-lock")]
     standing: Option<Standing>,
+    /// The lock risk confirmed in the first step of an arming, until the second step.
+    #[cfg(feature = "standing-lock")]
+    arming_lock: Option<kline_core::safety::RiskInfo>,
+    /// Counts the sessions; a challenge belongs to the session it was made on.
+    session_gen: u32,
     lwm: LockWhenMoving,
     last_lwm_tick: u64,
     live: LiveSample,
@@ -382,6 +391,9 @@ impl Bridge {
             next_challenge_id: 1,
             #[cfg(feature = "standing-lock")]
             standing: None,
+            #[cfg(feature = "standing-lock")]
+            arming_lock: None,
+            session_gen: 0,
             last_lwm_tick: now_ms,
             live: LiveSample::default(),
             parked: Parked::default(),
@@ -591,14 +603,19 @@ impl Bridge {
                 self.requested = Profile::Off;
                 Ok(())
             }
-            Op::Request { ecu, .. } | Op::Prepare { ecu, .. }
+            Op::Request { ecu, .. } | Op::Prepare { ecu, .. } | Op::PrepareWrite { ecu, .. }
                 if ecu != EcuId::Sirius && self.lwm_holds_sirius(now_ms) =>
             {
                 r(ResultCode::LwmActive)
             }
             Op::Request { ecu, payload } => gate::check_request(role, ecu, &payload)
                 .and_then(|()| self.enqueue(client, counter, JobKind::Request { ecu, payload })),
-            Op::Prepare { ecu, payload } => self.prepare(client, counter, role, ecu, payload),
+            Op::Prepare { ecu, payload } => self.prepare(client, counter, role, ecu, payload, None),
+            Op::PrepareWrite {
+                ecu,
+                identification,
+                payload,
+            } => self.prepare(client, counter, role, ecu, payload, Some(identification)),
             Op::Confirm { challenge, code } => self.confirm(client, counter, role, challenge, code),
             Op::Lock | Op::Unlock => {
                 let lock = cmd.op == Op::Lock;
@@ -713,8 +730,16 @@ impl Bridge {
         role: Role,
         ecu: EcuId,
         payload: Vec<u8>,
+        identification: Option<Vec<u8>>,
     ) -> Result<(), ResultCode> {
-        gate::check_prepare(role, ecu, &payload, self.battery_ok())?;
+        let tier = gate::check_prepare(role, ecu, &payload, self.battery_ok())?;
+        // Tier 2 needs the identification the app chose its definition from (review m-1); it
+        // is not accepted for the other tiers.
+        match (tier, &identification) {
+            (Tier::ConfigWrite, None) => return Err(ResultCode::IdentificationRequired),
+            (Tier::ConfigWrite, Some(_)) | (_, None) => {}
+            (_, Some(_)) => return Err(ResultCode::BadFrame),
+        }
         if self.moving_for(ecu, self.now_ms) {
             return Err(ResultCode::VehicleMoving);
         }
@@ -728,6 +753,7 @@ impl Bridge {
                 ecu,
                 payload,
                 purpose: Purpose::Send,
+                identification: identification.unwrap_or_default(),
             },
         )
     }
@@ -740,6 +766,7 @@ impl Bridge {
         role: Role,
         ecu: EcuId,
         payload: Vec<u8>,
+        _identification: Option<Vec<u8>>,
     ) -> Result<(), ResultCode> {
         gate::check_prepare(role, ecu, &payload, self.battery_ok()).map(|_| ())
     }
@@ -755,12 +782,6 @@ impl Bridge {
     ) -> Result<(), ResultCode> {
         if role != Role::Owner {
             return Err(ResultCode::NotAllowedForRole);
-        }
-        if let Some(p) = &self.pending {
-            if self.moving_for(p.ecu, self.now_ms) && p.purpose == Purpose::Send {
-                self.pending = None;
-                return Err(ResultCode::VehicleMoving);
-            }
         }
         match &self.pending {
             Some(p) if p.client == client && p.id == challenge && self.now_ms < p.expires_ms => {}
@@ -793,6 +814,15 @@ impl Bridge {
         if role != Role::Owner {
             return Err(ResultCode::NotAllowedForRole);
         }
+        // Review B-1/B-2: never while armed or while an unlock is owed (re-arming would replace
+        // the risks the unlock duty relies on, and the BMT challenge would take the bridge off
+        // the Sirius); disarm first. Never while the car may move.
+        if self.lwm.is_armed() || self.lwm.locked_by_us() || self.lwm_holds_sirius(self.now_ms) {
+            return Err(ResultCode::LwmActive);
+        }
+        if self.moving_for(EcuId::Bmt, self.now_ms) {
+            return Err(ResultCode::VehicleMoving);
+        }
         if !self.battery_ok() {
             return Err(ResultCode::LowBattery);
         }
@@ -806,6 +836,7 @@ impl Bridge {
                 ecu: EcuId::Bmt,
                 payload: BMT_LOCK.to_vec(),
                 purpose: Purpose::ArmLock,
+                identification: Vec::new(),
             },
         )
     }
@@ -856,6 +887,7 @@ impl Bridge {
                 Step::Done(outcome) => {
                     let mut s = Session::new(outcome, now_ms);
                     s.set_definition_guard(gate::guard(ecu));
+                    self.session_gen = self.session_gen.wrapping_add(1);
                     self.poll_index = 0;
                     self.unclean_end = None;
                     self.link = Link::Ready { ecu, s, errors: 0 };
@@ -1298,10 +1330,13 @@ impl Bridge {
             }
             #[cfg(feature = "approvals")]
             JobKind::Prepare {
-                payload, purpose, ..
+                payload,
+                purpose,
+                identification,
+                ..
             } => {
-                let (payload, purpose) = (payload.clone(), *purpose);
-                self.make_challenge(ecu, s, payload, purpose);
+                let (payload, purpose, ident) = (payload.clone(), *purpose, identification.clone());
+                self.make_challenge(ecu, s, payload, purpose, &ident);
                 JobStart::Nothing
             }
             #[cfg(feature = "approvals")]
@@ -1361,7 +1396,14 @@ impl Bridge {
     }
 
     #[cfg(feature = "approvals")]
-    fn make_challenge(&mut self, ecu: EcuId, s: &mut Session, payload: Vec<u8>, purpose: Purpose) {
+    fn make_challenge(
+        &mut self,
+        ecu: EcuId,
+        s: &mut Session,
+        payload: Vec<u8>,
+        purpose: Purpose,
+        identification: &[u8],
+    ) {
         let Some(job) = self.jobs.front() else {
             return;
         };
@@ -1374,15 +1416,9 @@ impl Bridge {
         let made = match kline_core::safety::tier_of_in(s.definition_guard(), &s.target(), &payload)
         {
             Ok(Tier::Service) => s.service_challenge(&payload),
-            Ok(Tier::ConfigWrite) => {
-                // The identification is the session's latest `21 80` reply: the app reads it
-                // (REQUEST 21 80) and chooses its definition from it, like the CLI.
-                let ident = s
-                    .config_read(kline_core::safety::IDENTIFICATION_READ[1])
-                    .map(<[u8]>::to_vec)
-                    .unwrap_or_default();
-                s.config_write_challenge(&payload, &ident)
-            }
+            // The identification the app chose its definition from; kline-core refuses unless
+            // it equals this session's latest positive `21 80` reply (like the CLI).
+            Ok(Tier::ConfigWrite) => s.config_write_challenge(&payload, identification),
             Ok(Tier::Expert) => s.expert_challenge(&payload),
             Ok(Tier::Read) => return self.finish_job(ResultCode::Unsupported, Vec::new()),
             Err(d) => Err(SessionError::Denied(d)),
@@ -1403,6 +1439,7 @@ impl Bridge {
                     purpose,
                     challenge: ch,
                     expires_ms: self.now_ms + self.cfg.challenge_ttl_ms,
+                    session_gen: self.session_gen,
                 });
                 self.jobs.pop_front();
                 if let Some(c) = client {
@@ -1425,13 +1462,20 @@ impl Bridge {
             self.finish_job(ResultCode::ApprovalMismatch, Vec::new());
             return JobStart::Nothing;
         }
+        // The session the challenge was made on ended (keep-alive lost, line error): never
+        // write into a fresh session; the owner prepares again (review m-2).
+        if p.session_gen != self.session_gen {
+            self.finish_job(ResultCode::SessionLost, Vec::new());
+            return JobStart::Nothing;
+        }
         let approval = match Approval::confirm(p.challenge, code) {
             Ok(a) => a,
             Err(_) => {
-                // A wrong code in the middle of arming leaves nothing half-armed.
+                // A wrong code in the middle of arming leaves nothing half-armed; the armed
+                // risks (`standing`) are not touched.
                 #[cfg(feature = "standing-lock")]
-                if p.purpose != Purpose::Send && !self.lwm.is_armed() {
-                    self.standing = None;
+                if p.purpose != Purpose::Send {
+                    self.arming_lock = None;
                 }
                 self.finish_job(ResultCode::ApprovalMismatch, Vec::new());
                 return JobStart::Nothing;
@@ -1461,27 +1505,26 @@ impl Bridge {
                 // unlock request's code next, on the same session.
                 let risk = *approval.risk();
                 drop(approval);
-                self.standing = Some(Standing {
-                    lock: Some(risk),
-                    unlock: None,
-                });
-                self.make_challenge(EcuId::Bmt, s, BMT_UNLOCK.to_vec(), Purpose::ArmUnlock);
+                // Kept apart from `standing` until both codes are confirmed (review B-1).
+                self.arming_lock = Some(risk);
+                self.make_challenge(EcuId::Bmt, s, BMT_UNLOCK.to_vec(), Purpose::ArmUnlock, &[]);
                 JobStart::Nothing
             }
             #[cfg(feature = "standing-lock")]
             Purpose::ArmUnlock => {
                 let risk = *approval.risk();
                 drop(approval);
-                match &mut self.standing {
-                    Some(st) if st.lock.is_some() => {
-                        st.unlock = Some(risk);
+                match self.arming_lock.take() {
+                    // `arm` refuses while an unlock is owed, so nothing relies on the old risks.
+                    Some(lock) if !self.lwm.locked_by_us() => {
+                        self.standing = Some(Standing {
+                            lock: Some(lock),
+                            unlock: Some(risk),
+                        });
                         self.lwm.arm();
                         self.finish_job(ResultCode::Ok, Vec::new());
                     }
-                    _ => {
-                        self.standing = None;
-                        self.finish_job(ResultCode::ApprovalMismatch, Vec::new());
-                    }
+                    _ => self.finish_job(ResultCode::ApprovalMismatch, Vec::new()),
                 }
                 JobStart::Nothing
             }
@@ -1859,19 +1902,30 @@ impl Bridge {
         }
     }
 
-    /// A non-read to `ecu` is refused now: the car moves (a fresh Sirius speed above 0), or,
-    /// for the Sirius, the engine runs and no fresh speed says the car stands (review: Sirius
-    /// `31 A0 00` injector inhibition, `30 80` fuel pump and the like while driving).
+    /// A non-read to `ecu` is refused now (review M-1): a fresh (2 s) Sirius speed above 0, or
+    /// no fresh speed while the engine may be running, for every ECU. "May be running": a
+    /// charging voltage, or an rpm above 0 in a Sirius frame of the last `challenge_ttl_ms`
+    /// (so a sample from before a PREPARE still counts at its CONFIRM, while the bridge sits on
+    /// another ECU and sees no speed).
     #[cfg_attr(not(feature = "approvals"), allow(dead_code))]
-    fn moving_for(&self, ecu: EcuId, now: u64) -> bool {
+    fn moving_for(&self, _ecu: EcuId, now: u64) -> bool {
         let fresh_speed = self
             .last_speed
             .filter(|(t, _)| now.saturating_sub(*t) <= self.cfg.speed_fresh_ms)
             .map(|(_, v)| v);
         match fresh_speed {
             Some(v) => v > 0,
-            None => ecu == EcuId::Sirius && self.engine_running(now),
+            None => self.engine_may_run(now),
         }
+    }
+
+    /// Charging voltage, or rpm above 0 seen within the challenge lifetime.
+    #[cfg_attr(not(feature = "approvals"), allow(dead_code))]
+    fn engine_may_run(&self, now: u64) -> bool {
+        self.charging()
+            || self.last_engine_sample.is_some_and(|(t, rpm)| {
+                rpm > 0 && now.saturating_sub(t) <= self.cfg.challenge_ttl_ms
+            })
     }
 
     fn charging(&self) -> bool {

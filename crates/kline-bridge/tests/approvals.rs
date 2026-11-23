@@ -250,13 +250,25 @@ fn only_the_client_that_prepared_may_confirm() {
 #[test]
 fn tier2_config_write_needs_identification_and_backup_in_the_session() {
     let mut rig = rig();
-    let write = Op::Prepare {
+    let payload = vec![0x3B, 0xD2, 0x00, 0x01];
+    // A plain PREPARE of a Tier 2 write needs the identification (review m-1).
+    let r = rig.call(
+        OWNER,
+        Op::Prepare {
+            ecu: EcuId::Bmt,
+            payload: payload.clone(),
+        },
+        15_000,
+    );
+    assert_eq!(r.result, ResultCode::IdentificationRequired);
+    let ident = |id: Vec<u8>| Op::PrepareWrite {
         ecu: EcuId::Bmt,
-        payload: vec![0x3B, 0xD2, 0x00, 0x01],
+        identification: id,
+        payload: payload.clone(),
     };
     // Without 21 80 and 21 A1 in this session: kline-core refuses the challenge.
     assert_eq!(
-        rig.call(OWNER, write.clone(), 15_000).result,
+        rig.call(OWNER, ident(vec![0x61, 0x80]), 15_000).result,
         ResultCode::ApprovalMismatch
     );
     for p in [vec![0x21, 0x80], vec![0x21, 0xA1]] {
@@ -270,7 +282,23 @@ fn tier2_config_write_needs_identification_and_backup_in_the_session() {
         );
         assert_eq!(r.result, ResultCode::Ok);
     }
-    let r = rig.call(OWNER, write, 15_000);
+    let r = rig.call(
+        OWNER,
+        Op::Request {
+            ecu: EcuId::Bmt,
+            payload: vec![0x21, 0x80],
+        },
+        15_000,
+    );
+    let id80 = r.data.clone();
+    // Another identification than the session's latest 21 80 reply: refused by kline-core.
+    let mut other = id80.clone();
+    *other.last_mut().unwrap() ^= 0xFF;
+    assert_eq!(
+        rig.call(OWNER, ident(other), 15_000).result,
+        ResultCode::ApprovalMismatch
+    );
+    let r = rig.call(OWNER, ident(id80), 15_000);
     assert_eq!(r.data[4], kline_core::safety::Tier::ConfigWrite as u8);
     let id = u32::from_le_bytes(r.data[..4].try_into().unwrap());
     let code = String::from_utf8(r.data[5..].to_vec()).unwrap();
@@ -381,4 +409,123 @@ fn sirius_non_reads_need_a_known_standstill_with_the_engine_running() {
     rig.run_for(6_000);
     let r = rig.call(OWNER, clear_dtc(), 5_000);
     assert_eq!(r.result, ResultCode::VehicleMoving);
+}
+
+fn prepare_abs_clear() -> Op {
+    Op::Prepare {
+        ecu: EcuId::Abs,
+        payload: vec![0x45],
+    }
+}
+
+fn code_of(r: &Response) -> (u32, String) {
+    assert_eq!(r.result, ResultCode::Challenge, "{r:?}");
+    let id = u32::from_le_bytes(r.data[..4].try_into().unwrap());
+    (id, String::from_utf8(r.data[5..].to_vec()).unwrap())
+}
+
+/// Review M-1: prepared at a standstill, the car drives off while the bridge sits on the ABS
+/// (no fresh speed): CONFIRM is refused, nothing is written.
+#[test]
+fn r2_abs_approval_confirmed_while_driving() {
+    let sirius = sirius_ecu(sirius_scenario())
+        .with_change_after(
+            &[0x21, 0xA9],
+            8_000,
+            "Vehicle speed",
+            kline_spec::Value::Number(40.0),
+        )
+        .with_change_after(
+            &[0x21, 0xA9],
+            8_000,
+            "Engine speed",
+            kline_spec::Value::Number(2_500.0),
+        );
+    let car = Car::with_others(sirius, bmt_ecu(bmt_scenario(true)), vec![abs_ecu()]);
+    let mut rig = Rig::from_car(car, Default::default());
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(14_100);
+    rig.send(OWNER, Op::StartLive(kline_bridge::profile::Profile::Drive));
+    rig.run_for(5_000);
+    let (id, code) = code_of(&rig.call(OWNER, prepare_abs_clear(), 30_000));
+    rig.run_for(6_000);
+    let r = rig.call(
+        OWNER,
+        Op::Confirm {
+            challenge: id,
+            code,
+        },
+        30_000,
+    );
+    assert_eq!(r.result, ResultCode::VehicleMoving);
+    rig.car.other_journals[0].assert_no_writes();
+}
+
+/// Review M-1: engine running (14.1 V) and no speed from the Sirius: the ABS is refused too.
+#[test]
+fn r2_abs_non_read_with_engine_running_and_unknown_speed() {
+    let sirius = sirius_ecu(sirius_scenario()).with_fault(kline_sim::ecu::FaultRule::on(
+        &[0x21, 0xA9],
+        kline_sim::ecu::ReplyFault::Negative { nrc: 0x12 },
+    ));
+    let car = Car::with_others(sirius, bmt_ecu(bmt_scenario(true)), vec![abs_ecu()]);
+    let mut rig = Rig::from_car(car, Default::default());
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(14_100);
+    rig.send(OWNER, Op::StartLive(kline_bridge::profile::Profile::Drive));
+    rig.run_for(6_000);
+    assert_eq!(
+        rig.call(OWNER, prepare_abs_clear(), 30_000).result,
+        ResultCode::VehicleMoving
+    );
+}
+
+/// Review m-2: parked, the ABS clear goes through: the ABS session survives its 7000 ms
+/// keep-alive while the owner types (as on the car).
+#[test]
+fn r2_abs_clear_parked_works() {
+    let car = Car::with_others(
+        sirius_ecu(sirius_scenario()),
+        bmt_ecu(bmt_scenario(true)),
+        vec![abs_ecu()],
+    );
+    let mut rig = Rig::from_car(car, Default::default());
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(12_600);
+    let (id, code) = code_of(&rig.call(OWNER, prepare_abs_clear(), 30_000));
+    rig.run_for(20_000);
+    let r = rig.call(
+        OWNER,
+        Op::Confirm {
+            challenge: id,
+            code,
+        },
+        30_000,
+    );
+    assert_eq!(r.result, ResultCode::Ok, "{r:?}");
+    assert_eq!(rig.car.other_journals[0].writes().len(), 1);
+    rig.car.other_journals[0].assert_no_violations();
+}
+
+/// Review m-2: the session the challenge was made on ends; CONFIRM never writes into the new
+/// session.
+#[test]
+fn a_challenge_dies_with_its_session() {
+    let mut rig = rig();
+    let (id, code) = code_of(&rig.call(OWNER, clear_dtc(), 15_000));
+    rig.car.cable_ok = false;
+    rig.run_for(500);
+    rig.car.cable_ok = true;
+    rig.run_for(10_000);
+    let r = rig.call(
+        OWNER,
+        Op::Confirm {
+            challenge: id,
+            code,
+        },
+        15_000,
+    );
+    assert_eq!(r.result, ResultCode::SessionLost);
+    rig.run_for(3_000);
+    rig.car.sirius_journal.assert_no_writes();
 }

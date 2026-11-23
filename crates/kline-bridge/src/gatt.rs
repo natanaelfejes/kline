@@ -36,6 +36,10 @@ pub const MIN_ATT_MTU: u16 = MAX_FRAME as u16 + 3;
 /// Longest K-line request payload a Command may carry. ours: the longest documented Tier 0/1
 /// request is 5 bytes (`31 C7 00 00 00`); 32 leaves room without allowing block transfers.
 pub const MAX_REQUEST: usize = 32;
+/// Longest identification (`21 80` reply payload) a PREPARE_WRITE may carry. ours: a KWP
+/// reply is at most 255 bytes, but every Renault `21 80` of this car is far shorter; 64 keeps
+/// the frame within [`MAX_FRAME`].
+pub const MAX_IDENTIFICATION: usize = 64;
 /// Longest approval code a Confirm may carry (kline-core codes are 6 or 10 characters).
 pub const MAX_CODE: usize = 16;
 
@@ -412,6 +416,7 @@ pub mod opcode {
     pub const LWM_DISARM: u8 = 0x0C;
     pub const RAW_STREAM: u8 = 0x0D;
     pub const GET_STATUS: u8 = 0x0E;
+    pub const PREPARE_WRITE: u8 = 0x0F;
 }
 
 /// What a Command asks for.
@@ -423,8 +428,17 @@ pub enum Op {
     StopLive,
     /// One request; it must be Tier 0 (any role).
     Request { ecu: EcuId, payload: Vec<u8> },
-    /// Ask for an approval challenge for one Tier 1 request (owner only, feature `approvals`).
+    /// Ask for an approval challenge for one Tier 1 or Tier 3 request (owner only, feature
+    /// `approvals`).
     Prepare { ecu: EcuId, payload: Vec<u8> },
+    /// Ask for an approval challenge for one Tier 2 config write, with the exact `21 80` reply
+    /// the app chose its ECU definition from (kline-core compares it with the session's latest
+    /// `21 80` reply, like the CLI).
+    PrepareWrite {
+        ecu: EcuId,
+        identification: Vec<u8>,
+        payload: Vec<u8>,
+    },
     /// Answer a challenge with the code the owner typed (owner only).
     Confirm { challenge: u32, code: String },
     /// Lock the parked car with the fob output (owner only).
@@ -474,6 +488,24 @@ impl Command {
                     opcode::PREPARE
                 });
                 b.push(ecu.address());
+                b.extend_from_slice(payload);
+            }
+            Op::PrepareWrite {
+                ecu,
+                identification,
+                payload,
+            } => {
+                if payload.is_empty()
+                    || payload.len() > MAX_REQUEST
+                    || identification.is_empty()
+                    || identification.len() > MAX_IDENTIFICATION
+                {
+                    return Err(CodecError::BadArgs);
+                }
+                b.push(opcode::PREPARE_WRITE);
+                b.push(ecu.address());
+                b.push(identification.len() as u8);
+                b.extend_from_slice(identification);
                 b.extend_from_slice(payload);
             }
             Op::Confirm { challenge, code } => {
@@ -527,6 +559,23 @@ impl Command {
                     Op::Request { ecu, payload }
                 } else {
                     Op::Prepare { ecu, payload }
+                }
+            }
+            opcode::PREPARE_WRITE => {
+                let ecu = EcuId::from_address(r.u8()?).ok_or(CodecError::BadArgs)?;
+                let n = r.u8()? as usize;
+                if n == 0 || n > MAX_IDENTIFICATION {
+                    return Err(CodecError::BadArgs);
+                }
+                let identification = r.take(n)?.to_vec();
+                let payload = r.rest().to_vec();
+                if payload.is_empty() || payload.len() > MAX_REQUEST {
+                    return Err(CodecError::BadArgs);
+                }
+                Op::PrepareWrite {
+                    ecu,
+                    identification,
+                    payload,
                 }
             }
             opcode::CONFIRM => {
@@ -616,6 +665,10 @@ pub enum ResultCode {
     LwmActive = 0x13,
     /// The ECU's reply does not fit one Response frame; it was received but is not returned.
     ReplyTooLong = 0x14,
+    /// The session the challenge was made on has ended; nothing was sent. PREPARE again.
+    SessionLost = 0x15,
+    /// A Tier 2 config write needs PREPARE_WRITE with the identification.
+    IdentificationRequired = 0x16,
 }
 
 impl ResultCode {
@@ -643,6 +696,8 @@ impl ResultCode {
             0x12 => VehicleMoving,
             0x13 => LwmActive,
             0x14 => ReplyTooLong,
+            0x15 => SessionLost,
+            0x16 => IdentificationRequired,
             _ => return None,
         })
     }

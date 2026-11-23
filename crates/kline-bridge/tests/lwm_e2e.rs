@@ -28,7 +28,10 @@ fn driving_sirius() -> kline_sim::ecu::SpecEcu {
         .with_change_after(&[0x21, 0xA9], 30_000, "Engine speed", Value::Number(0.0))
 }
 
+/// Arm while parked (engine off, 12.6 V), then the engine starts (14.1 V). Arming is refused
+/// while the car may be moving (review B-2).
 fn arm(rig: &mut Rig) {
+    rig.battery(12_600);
     let (id, code) = challenge(&rig.call(OWNER, Op::LwmArm, 15_000));
     let (id2, code2) = challenge(&rig.call(
         OWNER,
@@ -49,6 +52,7 @@ fn arm(rig: &mut Rig) {
     );
     assert_eq!(r.result, ResultCode::Ok);
     assert!(rig.bridge.lwm().is_armed());
+    rig.battery(14_100);
     rig.car.bmt_journal.assert_no_writes();
 }
 
@@ -126,7 +130,7 @@ fn not_armed_means_no_writes_while_driving() {
 fn a_wrong_arming_code_leaves_it_disarmed() {
     let mut rig = Rig::new(driving_sirius(), bmt_ecu(bmt_scenario(true)));
     rig.connect(OWNER, Role::Owner);
-    rig.battery(14_100);
+    rig.battery(12_600);
     let (id, _) = challenge(&rig.call(OWNER, Op::LwmArm, 15_000));
     let r = rig.call(
         OWNER,
@@ -301,4 +305,150 @@ fn a_low_battery_never_sleeps_over_an_owed_unlock() {
         rig.car.sleeps
     );
     assert!(!rig.car.sleeps.is_empty(), "then it sleeps");
+}
+
+fn cruise_then_stop() -> kline_sim::ecu::SpecEcu {
+    sirius_ecu(sirius_scenario())
+        .with_change_after(&[0x21, 0xA9], 1_000, "Vehicle speed", Value::Number(40.0))
+        .with_change_after(&[0x21, 0xA9], 1_000, "Engine speed", Value::Number(2_200.0))
+        .with_change_after(&[0x21, 0xA9], 60_000, "Vehicle speed", Value::Number(0.0))
+        .with_change_after(&[0x21, 0xA9], 60_000, "Engine speed", Value::Number(0.0))
+}
+
+fn bmt_payloads(rig: &Rig) -> Vec<Vec<u8>> {
+    rig.car
+        .bmt_journal
+        .writes()
+        .into_iter()
+        .map(|w| w.payload)
+        .collect()
+}
+
+/// Review B-1: arming again while locked is refused, so the unlock duty and its risks stay.
+#[test]
+fn r2_rearm_while_locked_keeps_the_unlock_duty() {
+    let mut rig = Rig::new(cruise_then_stop(), bmt_ecu(bmt_scenario(true)));
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(14_100);
+    arm(&mut rig);
+    assert!(rig.run_until_pred(30_000, |r| r.bridge.lwm().locked_by_us()));
+    rig.run_for(6_000);
+    assert_eq!(
+        rig.call(OWNER, Op::LwmArm, 15_000).result,
+        ResultCode::LwmActive
+    );
+    rig.run_for(200_000);
+    assert_eq!(
+        bmt_payloads(&rig).last(),
+        Some(&vec![0x31, 0xA1, 0x00, 0x01]),
+        "unlock duty lost"
+    );
+}
+
+/// Review B-2: arming never takes the bridge off the Sirius while driving.
+#[test]
+fn r2_rearm_while_driving_leaves_the_sirius() {
+    let mut rig = Rig::new(cruising_sirius(), bmt_ecu(bmt_scenario(true)));
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(14_100);
+    arm(&mut rig);
+    assert!(rig.run_until_pred(30_000, |r| r.bridge.lwm().locked_by_us()));
+    rig.run_for(6_000);
+    assert_eq!(
+        rig.call(OWNER, Op::LwmArm, 15_000).result,
+        ResultCode::LwmActive
+    );
+    // Disarmed but still locked: still refused (an unlock is owed).
+    assert_eq!(rig.call(OWNER, Op::LwmDisarm, 1_000).result, ResultCode::Ok);
+    assert_eq!(
+        rig.call(OWNER, Op::LwmArm, 15_000).result,
+        ResultCode::LwmActive
+    );
+}
+
+/// Review B-2: a first arming is refused while the car may move (charging, no fresh speed or
+/// a speed above 0).
+#[test]
+fn arming_is_refused_while_the_car_may_move() {
+    let mut rig = Rig::new(cruising_sirius(), bmt_ecu(bmt_scenario(true)));
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(14_100);
+    assert_eq!(
+        rig.call(OWNER, Op::LwmArm, 15_000).result,
+        ResultCode::VehicleMoving
+    );
+    rig.run_for(10_000);
+    assert_eq!(
+        rig.call(OWNER, Op::LwmArm, 15_000).result,
+        ResultCode::VehicleMoving
+    );
+    assert!(rig.car.bmt_journal.writes().is_empty());
+}
+
+/// Review m-4 (N22): a wrong second arming code leaves the bridge disarmed, and nothing moves.
+#[test]
+fn a_wrong_second_arming_code_leaves_it_disarmed() {
+    let mut rig = Rig::new(driving_sirius(), bmt_ecu(bmt_scenario(true)));
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(12_600);
+    let (id, code) = challenge(&rig.call(OWNER, Op::LwmArm, 15_000));
+    let (id2, _) = challenge(&rig.call(
+        OWNER,
+        Op::Confirm {
+            challenge: id,
+            code,
+        },
+        10_000,
+    ));
+    let r = rig.call(
+        OWNER,
+        Op::Confirm {
+            challenge: id2,
+            code: "AAAAAA".into(),
+        },
+        10_000,
+    );
+    assert_eq!(r.result, ResultCode::ApprovalMismatch);
+    assert!(!rig.bridge.lwm().is_armed());
+    rig.battery(14_100);
+    rig.run_for(60_000);
+    rig.car.bmt_journal.assert_no_writes();
+}
+
+/// Review m-4 (N21): no standing lock below 12.0 V (the engine runs, so the bridge stays up).
+#[test]
+fn no_standing_lock_below_twelve_volts() {
+    let mut rig = Rig::new(cruising_sirius(), bmt_ecu(bmt_scenario(true)));
+    rig.connect(OWNER, Role::Owner);
+    arm(&mut rig);
+    rig.battery(11_900);
+    rig.send(OWNER, Op::StartLive(Profile::Drive));
+    rig.run_for(40_000);
+    rig.car.bmt_journal.assert_no_writes();
+}
+
+/// Review m-4 (N20): below 11.8 V with an unlock owed, the unlock is sent before the critical
+/// shutdown.
+#[test]
+fn a_critical_battery_never_shuts_down_over_an_owed_unlock() {
+    let sirius =
+        cruising_sirius().with_fault(FaultRule::on(&[0x21], ReplyFault::NoReply).after(400));
+    let mut rig = Rig::new(sirius, bmt_ecu(bmt_scenario(true)));
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(14_100);
+    arm(&mut rig);
+    assert!(rig.run_until_pred(60_000, |r| !r.car.bmt_journal.writes().is_empty()));
+    rig.battery(11_700);
+    rig.run_for(120_000);
+    let w = rig.car.bmt_journal.writes();
+    assert_eq!(
+        w.last().map(|w| w.payload.clone()),
+        Some(vec![0x31, 0xA1, 0x00, 0x01])
+    );
+    let unlock_t = w.last().unwrap().t_ms;
+    assert!(
+        rig.car.sleeps.iter().all(|s| s.0 > unlock_t),
+        "{:?}",
+        rig.car.sleeps
+    );
 }
