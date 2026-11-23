@@ -50,7 +50,7 @@ therefore never used for an output that moves anything.
 | 0 | XTAL_32K_P | analog | 32.768 kHz crystal + 18 pF C0G to GND | the C3's only 32 kHz crystal pins; needed for BLE light sleep in the uA range (PLAN-RESEARCH B1) |
 | 1 | XTAL_32K_N | analog | crystal + 18 pF C0G to GND | same |
 | 2 | (strapping) | | not connected | boot mode strap |
-| 3 | VBAT | ADC1_CH3 in | divider 1 MOhm (rail) / 180 kOhm (GND), 100 nF at the pin | ADC1 channel; 15 V -> 2.29 V (PLAN-RESEARCH B5) |
+| 3 | VBAT | ADC1_CH3 in | divider 1 MOhm (rail) / 180 kOhm (GND), 100 nF at the pin | ADC1 channel; 15 V -> 2.29 V (PLAN-RESEARCH B5). ADC1 is shared with the TRNG entropy source used for approval codes; the firmware takes it per use |
 | 4 | K_RX | UART1 RX in | L9637D RX (pin 1) | free, not strapping; RX of L9637D has its own pull-up to VCC |
 | 5 | K_TX | UART1 TX out; plain output low while K_PWR is off | 1 kOhm -> TX node -> L9637D TX (pin 4) | free, not strapping; low when the transceiver is off, so it never back-powers it |
 | 6 | K_PWR | out, low at boot | L9637D VCC (pin 3, 100 nF to GND) and 330 Ohm -> AQY212EH #3 LED (pull-up switch); **10 kOhm pull-down to GND** | one pin powers the transceiver and the K pull-up together; low = K released, transceiver unpowered (< 1 uA, PLAN-RESEARCH B2) |

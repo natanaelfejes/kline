@@ -40,15 +40,24 @@ Default-deny, decided on exact payload bytes and the target of the init that act
   agent bond (the Mac, `kline --transport ble`) is Tier 0 only and can never prepare or confirm.
   Over BLE the bridge applies the car's name guard as compiled byte prefixes and decides every
   request of the car's definitions exactly as the CLI does (`kline-bridge`
-  `tests/definition_parity.rs`); non-reads are refused while the car moves.
+  `tests/definition_parity.rs`); non-reads are refused while the car may move. The compiled
+  guard (`crates/kline-bridge/src/guard_rules.rs`) is specific to **this car's** definitions:
+  Sirius 32 (`SIRIUS32___EMS3132___Soft_RE1_maj`), BMT `BMT_X65_ph1_p` / `BMT_SAGEM`, airbag
+  `AB70_X65` / `AB80_X65_X90_V1`, ABS `X24_ABS_Bosch5.3` / `J64_Bosch5.3_4X4_V2`. Other ECUs at
+  the same addresses (e.g. `S2000_Atmo___SoftA3` at 0x7A) are not covered; a bridge for another
+  car needs its own table. Known issue: `X65_Bosch5.3+REF+Tachy.xml` does not parse with
+  kline-spec, so the parity test cannot cover it.
 - **Standing self-approval, D37 only (owner decision 2026-11-23).** With `kline-bridge` feature
   `standing-lock` (off by default) and only in the bridge firmware, lock-when-moving may send the
   two exact BMT requests `31 A0 00 01` (lock) and `31 A1 00 01` (unlock) to the BMT `0x26`
   without a per-request code: only after the owner armed it in the app by confirming one
   kline-core challenge for each of the two requests, only while armed (until the owner disarms;
   a reset disarms), and only when kline-core's challenge is for exactly that payload, that target
-  and the `RiskInfo` the owner confirmed. No other payload, ECU or binary may do this. The owner
-  accepts that the remote's lock state may get out of step with the doors.
+  and the `RiskInfo` the owner confirmed. The unlock is also sent after a disarm when the bridge
+  has (possibly) locked and the engine stops (by design: the unlock is the accident
+  mitigation). Arming is refused while armed, while an unlock is owed and while the car may
+  move. No other payload, ECU or binary may do this. The owner accepts that the remote's lock
+  state may get out of step with the doors.
 - **What the code is.** The `/dev/tty` code is an **anti-accident gate**, not an
   authentication: it stops a pipe, `--json`, a script or a non-interactive agent from sending by
   mistake. An automated agent that drives a terminal (pty) can read and type the code; the owner

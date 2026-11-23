@@ -38,8 +38,9 @@ use kline_core::{Action, Event};
 esp_bootloader_esp_idf::esp_app_desc!();
 
 /// kline-core's approval codes and nonces come from getrandom; on the C3 they come from the
-/// hardware RNG. True randomness needs an entropy source running (the radio once BLE is up in
-/// W7; NOT VERIFIED here).
+/// hardware RNG with the SAR ADC entropy source switched on for the call (esp-hal `TrngSource`
+/// and `Trng`, review m-3): the esp-hal docs say the RNG is a true RNG while an ADC (or the radio)
+/// feeds it noise. NOT VERIFIED on the chip (statistics of the output were not measured).
 ///
 /// # Safety
 ///
@@ -50,10 +51,23 @@ unsafe extern "Rust" fn __getrandom_v03_custom(
     dest: *mut u8,
     len: usize,
 ) -> Result<(), getrandom::Error> {
+    use esp_hal::rng::{Trng, TrngSource};
     // SAFETY: the caller guarantees `dest` is valid for `len` writable bytes.
     let buf = unsafe { core::slice::from_raw_parts_mut(dest, len) };
-    esp_hal::rng::Rng::new().read(buf);
-    Ok(())
+    // SAFETY: single-threaded loop; ADC1 is otherwise taken only inside `battery_millivolts`,
+    // never during this call, and RNG has no other user.
+    let source = TrngSource::new(unsafe { esp_hal::peripherals::RNG::steal() }, unsafe {
+        ADC1::steal()
+    });
+    let result = match Trng::try_new() {
+        Ok(trng) => {
+            trng.read(buf);
+            Ok(())
+        }
+        Err(_) => Err(getrandom::Error::UNSUPPORTED),
+    };
+    drop(source);
+    result
 }
 
 /// K-line UART speed: 10400 8N1 (docs/protocol.md "Line settings").
@@ -331,20 +345,22 @@ impl OutputPin for FobPin<'_> {
     }
 }
 
-struct Battery<'d> {
-    adc: Adc<'d, ADC1<'d>, Blocking>,
-    pin: AdcPin<GPIO3<'d>, ADC1<'d>>,
-}
-
-impl Battery<'_> {
-    /// Battery millivolts. ADC1 at 11 dB attenuation reads 0..~2500 mV over 12 bits; the raw
-    /// to mV scale is nominal (NOT VERIFIED: calibrate against the multimeter and Sirius 21A9,
-    /// PLAN-RESEARCH B5).
-    fn millivolts(&mut self) -> Option<u16> {
-        let raw = nb_block(|| self.adc.read_oneshot(&mut self.pin))?;
-        let adc_mv = u32::from(raw) * 2_500 / 4_095;
-        u16::try_from(adc_mv * DIVIDER_NUM / DIVIDER_DEN).ok()
-    }
+/// Battery millivolts. ADC1 at 11 dB attenuation reads 0..~2500 mV over 12 bits; the raw to
+/// mV scale is nominal (NOT VERIFIED: calibrate against the multimeter and Sirius 21A9,
+/// PLAN-RESEARCH B5).
+///
+/// ADC1 is shared with the TRNG entropy source (`__getrandom_v03_custom`), so each reading
+/// takes the ADC and gives it back; the main loop is the only thread.
+fn battery_millivolts() -> Option<u16> {
+    // SAFETY: single-threaded loop; the only other user of ADC1 (the TRNG source in
+    // `__getrandom_v03_custom`) holds it only inside its own call, never across this one.
+    let (adc1, gpio3) = unsafe { (ADC1::steal(), GPIO3::steal()) };
+    let mut cfg = AdcConfig::new();
+    let mut pin: AdcPin<GPIO3<'_>, ADC1<'_>> = cfg.enable_pin(gpio3, Attenuation::_11dB);
+    let mut adc: Adc<'_, ADC1<'_>, Blocking> = Adc::new(adc1, cfg);
+    let raw = nb_block(|| adc.read_oneshot(&mut pin))?;
+    let adc_mv = u32::from(raw) * 2_500 / 4_095;
+    u16::try_from(adc_mv * DIVIDER_NUM / DIVIDER_DEN).ok()
 }
 
 fn nb_block<T>(mut f: impl FnMut() -> nb::Result<T, ()>) -> Option<T> {
@@ -386,12 +402,8 @@ fn main() -> ! {
     let _ = (p.UART1, p.GPIO4, p.GPIO5);
     let tx_low = tx_pin_low();
 
-    let mut adc_cfg = AdcConfig::new();
-    let pin = adc_cfg.enable_pin(p.GPIO3, Attenuation::_11dB);
-    let mut battery = Battery {
-        adc: Adc::new(p.ADC1, adc_cfg),
-        pin,
-    };
+    // ADC1/GPIO3 (battery) and RNG/ADC1 (TRNG) are taken per use, see `battery_millivolts`.
+    let _ = (p.ADC1, p.GPIO3, p.RNG);
 
     let mut board = Board {
         kline: KLine {
@@ -430,7 +442,7 @@ fn main() -> ! {
         let now = board.now_ms();
         if now.saturating_sub(last_battery) >= 1_000 {
             last_battery = now;
-            if let Some(mv) = battery.millivolts() {
+            if let Some(mv) = battery_millivolts() {
                 bridge.on_battery_mv(mv, now);
             }
         }

@@ -113,17 +113,18 @@ bridge accepted from this bond ([counters](#roles-pairing-counters-rate-limits))
 | `01` | START_LIVE | profile u8 (1 drive, 2 parked) | owner, agent | poll this profile continuously (parked: `LwmActive` while lock-when-moving needs the Sirius) |
 | `02` | STOP_LIVE | | owner, agent | stop polling |
 | `03` | REQUEST | ecu u8 (`7A`, `26`, `01`, `2C`), payload (1..32 bytes) | owner, agent | one request; must be Tier 0 |
-| `04` | PREPARE | ecu u8, payload | owner | approval challenge for one Tier 1, 2 or 3 request |
+| `04` | PREPARE | ecu u8, payload | owner | approval challenge for one Tier 1 or Tier 3 request (Tier 2: `IdentificationRequired`) |
 | `05` | CONFIRM | challenge id u32, code (1..16 printable ASCII) | owner | send the prepared request |
 | `06` | LOCK | | owner | lock the parked car with the fob output |
 | `07` | UNLOCK | | owner | unlock the parked car with the fob output |
 | `08` | YIELD_KLINE | | owner, agent | take a lease on the line: `Accepted`, then `Ok` once the session is stopped and the transceiver is off (`LwmActive` while lock-when-moving needs the Sirius) |
 | `09` | RESUME_KLINE | | the client that yielded, or an owner | end the lease, take the K line back |
 | `0A` | SET_TIME | Unix seconds u32 | owner, agent | for logs only |
-| `0B` | LWM_ARM | | owner | arm lock-when-moving (two challenges) |
+| `0B` | LWM_ARM | | owner | arm lock-when-moving (two challenges); `LwmActive` while armed or while an unlock is owed (disarm first, and wait for the unlock), `VehicleMoving` while the car may move |
 | `0C` | LWM_DISARM | | owner | disarm |
 | `0D` | RAW_STREAM | 0 or 1 | owner, agent | Raw notifications off or on |
 | `0E` | GET_STATUS | | owner, agent | Status frame in the Response data |
+| `0F` | PREPARE_WRITE | ecu u8, identification length u8 (1..64), identification (the `61 80 ..` reply the app chose its definition from), payload | owner | approval challenge for one Tier 2 config write |
 
 ECU bytes: `7A` Sirius, `26` BMT, `01` Bosch 5.3 ABS (ISO8), `2C` airbag (owner decision
 2026-11-23: BLE scope v1 is everything the CLI can do for these four). Any other byte does not
@@ -156,9 +157,11 @@ same counter and the final result.
 | `0F` | Unsupported | not in this build (no `approvals`, no `standing-lock`), or PREPARE of a read |
 | `10` | Challenge | challenge id u32, tier u8 (1 service, 2 config write, 3 expert), code ASCII (6 characters, 10 for expert) |
 | `11` | IgnitionOn | fob path refused: engine running or charging voltage |
-| `12` | VehicleMoving | a non-read while a fresh Sirius speed is above 0, or on the Sirius with the engine running and no fresh speed |
+| `12` | VehicleMoving | a non-read while a fresh Sirius speed is above 0, or with no fresh speed while the engine may be running (charging voltage, or rpm above 0 seen in the last 120 s), on any ECU, at PREPARE and again at CONFIRM |
 | `13` | LwmActive | lock-when-moving needs the Sirius now |
 | `14` | ReplyTooLong | the ECU reply does not fit one Response frame (never truncated) |
+| `15` | SessionLost | the session the challenge was made on ended (line error, keep-alive lost); nothing was sent, PREPARE again |
+| `16` | IdentificationRequired | a Tier 2 config write needs PREPARE_WRITE |
 
 A Response never carries more than 170 data bytes; a longer reply gives `ReplyTooLong`. Raw
 splits long reads into several frames.
@@ -204,9 +207,10 @@ CLI; forbidden stays forbidden; the agent stays Tier 0.
    or above 12.0 V (MASTER-PLAN-v2 P6), and the car is not moving (`VehicleMoving`).
 2. The bridge opens (or keeps) a session with that ECU and asks kline-core for the challenge
    of the request's tier on the session's real target: `service_challenge`,
-   `config_write_challenge` (Tier 2; the identification is the session's latest `21 80`
-   reply, so the app reads `21 80` and the backup `21 xx` with REQUEST first and chooses its
-   definition from that reply, like the CLI) or `expert_challenge` (10-character code).
+   `config_write_challenge` (Tier 2, from PREPARE_WRITE: the app reads `21 80` and the backup
+   `21 xx` with REQUEST first, chooses its definition from that `21 80` reply and sends it with
+   the request; kline-core refuses unless it equals the session's latest positive `21 80`
+   reply, like the CLI) or `expert_challenge` (10-character code).
    kline-core binds the code to that session, request id, target, key bytes, bytes, tier and
    `RiskInfo`.
 3. Response `Challenge`: id, tier, code, to the owner's phone only (never broadcast, never in
@@ -215,7 +219,10 @@ CLI; forbidden stays forbidden; the agent stays Tier 0.
 4. Owner writes `CONFIRM id code`. The bridge gives the typed code to kline-core
    `Approval::confirm` and sends with `Session::request_approved`, which re-checks everything.
    The challenge is consumed by the first CONFIRM, right or wrong, and expires after 120 s.
-   While it is pending the session stays open (TesterPresent) on that ECU.
+   While it is pending the session stays open on that ECU with the definition's keep-alive
+   interval (3 s KWP, 7 s for the ABS). If that session ends anyway, CONFIRM answers
+   `SessionLost` and writes nothing: a challenge never carries over to a new session. CONFIRM
+   checks the battery and the moving rule again.
 
 **What the code is:** the same anti-accident gate as the CLI's `/dev/tty` code (docs/SAFETY.md rule
 2): it stops the app, a script or the agent link from sending a Tier 1 request by mistake. It
@@ -293,9 +300,17 @@ for when remote B is repaired.
   ignores cranking dips and ADC noise (review M3). Never with the engine running and never while
   lock-when-moving owes an unlock. The firmware sleeps in light-sleep slices that feed the
   watchdog, never in a busy-wait.
-- **Moving**: no non-read to any ECU while a fresh (2 s) Sirius speed is above 0, and none to
-  the Sirius while the engine runs without a fresh speed (`VehicleMoving`; Sirius `31 A0 00`
-  injector inhibition, `30 80` fuel pump and the like). The D37 requests are the exception.
+- **Moving** (review M-1): no non-read to any ECU while a fresh (2 s) Sirius speed is above 0,
+  or while there is no fresh speed and the engine may be running (charging voltage, or rpm above
+  0 seen in the last 120 s), checked at PREPARE and again at CONFIRM (`VehicleMoving`). While
+  the bridge sits on another ECU for a challenge it sees no speed, so with the engine running
+  only a Sirius request at a confirmed standstill goes through; for the ABS, BMT or airbag,
+  switch the engine off (and wait until the voltage is below 13.2 V or 2 minutes passed). The
+  D37 requests are the exception.
+- **Arming** (review B-1/B-2): LWM_ARM only when not armed, no unlock owed and the car is not
+  moving by the rule above (in practice: parked, engine off). The confirmed lock risk is kept
+  apart until the unlock code is confirmed too; only then are both armed together. A wrong code
+  leaves the previous state untouched.
 
 ## Host transport (`kline --transport ble`)
 
@@ -326,6 +341,7 @@ Checked by `crates/kline-bridge/tests/vectors.rs`; the CRCs were cross-checked w
 | Command #3 PREPARE Sirius `14 00 00` | `01 03 09 03 00 00 00 04 7A 14 00 00 47 CB` |
 | Command #4 CONFIRM challenge 7, code `ACDEFG` | `01 03 0F 04 00 00 00 05 07 00 00 00 41 43 44 45 46 47 93 EE` |
 | Command #5 LOCK | `01 03 05 05 00 00 00 06 FF AE` |
+| Command #6 PREPARE_WRITE BMT, identification `61 80 41 42`, `3B D2 00 01` | `01 03 0F 06 00 00 00 0F 26 04 61 80 41 42 3B D2 00 01 49 44` |
 | Response #2 Ok `61 A9 04 35` | `01 04 09 02 00 00 00 00 61 A9 04 35 FB 93` |
 | Response #3 Challenge id 7, tier 1, `ACDEFG` | `01 04 10 03 00 00 00 10 07 00 00 00 01 41 43 44 45 46 47 6A D0` |
 | Live seq 1, t 12345, 1077 rpm, 0 km/h, 7412 us, 1400 mL/h, 19 C, 15 C, 406 mbar, 14.33 V, flags 07 | `01 01 14 01 00 39 30 00 00 35 04 00 F4 1C 78 05 13 0F 96 01 99 05 07 9A EA` |
@@ -350,9 +366,9 @@ Checked by `crates/kline-bridge/tests/vectors.rs`; the CRCs were cross-checked w
 
 1. `approved-routines` no longer implies `std` (`approved-routines = ["dep:getrandom"]`). The
    firmware builds with `--cfg getrandom_backend="custom"` and provides
-   `__getrandom_v03_custom` from the ESP32-C3 hardware RNG (`firmware/esp32c3`, feature
-   `approvals`; true randomness needs an entropy source running, the radio in W7, NOT
-   VERIFIED).
+   `__getrandom_v03_custom`: the ESP32-C3 hardware RNG with the SAR ADC entropy source on for
+   the call (esp-hal `TrngSource` + `Trng`; per esp-hal a true RNG then; output statistics NOT
+   VERIFIED on the chip).
 2. `DefinitionGuard::flagged()`: read access to the flagged prefixes, for the parity test.
 
 Not made: a kline-core `StandingApproval` type. The owner allowed the bridge's standing
