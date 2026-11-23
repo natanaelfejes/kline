@@ -133,3 +133,38 @@ fn other_units_at_0x01_do_not_get_the_bosch_abs_risk_texts() {
         }
     }
 }
+
+/// The Bosch 5.3 ABS itself, every 1- and 2-byte payload: Tier 0 is exactly `51` and `58`,
+/// `45` is the only Tier 1, every `41`/`71` is forbidden, `36`/`3F` are link frames, the rest
+/// is Expert.
+#[test]
+fn bosch_abs_tier_matrix() {
+    let abs = Target {
+        protocol: Protocol::Iso8,
+        ecu_address: 0x01,
+        keywords: Some(BOSCH_ABS_KW),
+    };
+    let mut payloads: Vec<Vec<u8>> = (0..=255u8).map(|a| vec![a]).collect();
+    payloads.extend((0..=255u8).flat_map(|a| (0..=255u8).map(move |b| vec![a, b])));
+    let mut reads = Vec::new();
+    for p in payloads {
+        let got = tier_of(&abs, &p);
+        match (p[0], p.len()) {
+            (0x41 | 0x71, _) => assert!(
+                matches!(&got, Err(d) if matches!(d.reason, DenyReason::BoschAbsRoutine { service, .. } if service == p[0])),
+                "{p:02X?}: {got:?}"
+            ),
+            (0x36 | 0x3F, _) => assert!(
+                matches!(&got, Err(d) if d.reason == DenyReason::ProtocolReserved { service: p[0] }),
+                "{p:02X?}: {got:?}"
+            ),
+            (0x45, 1) => assert_eq!(got, Ok(Tier::Service)),
+            _ => match got {
+                Ok(Tier::Read) => reads.push(p),
+                Ok(Tier::Expert) => {}
+                other => panic!("{p:02X?}: {other:?}"),
+            },
+        }
+    }
+    assert_eq!(reads, [vec![0x51], vec![0x58]]);
+}

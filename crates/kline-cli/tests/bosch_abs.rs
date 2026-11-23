@@ -119,12 +119,34 @@ fn risk_of_the_non_reads() {
         "{w}"
     );
     assert!(s.contains("ABS / BRAKE ECU"), "{s}");
-    let (t, w, _) = tier("41040000030000F0");
-    assert!(t.starts_with("expert"), "{t}");
-    assert!(w.contains("MAY_BRICK_ECU"), "{w}");
-    let (t, w, _) = tier("71FF22FF220000FF22FF22");
-    assert!(t.starts_with("expert"), "{t}");
-    assert!(w.contains("MOVES_ACTUATOR"), "{w}");
+    // RAM download and routine run: permanently forbidden (owner decision 2026-11-23).
+    for req in ["41040000030000F0", "71", "71FF22FF220000FF22FF22"] {
+        let (r, j) = run(bosch_abs_ecu(), &["--json", "risk", "--xml", &x(), req]);
+        assert_eq!(r.code, 7, "{req}: {}", r.stdout);
+        let e = &r.event("risk")[0];
+        assert_eq!(e["allowed"], false, "{e}");
+        assert!(
+            e["refused"]
+                .as_str()
+                .unwrap()
+                .contains("permanently forbidden"),
+            "{e}"
+        );
+        assert!(!r.opened);
+        j.assert_no_writes();
+    }
+    // The bleed frames are named in the refusal.
+    let (r, _) = run(
+        bosch_abs_ecu(),
+        &["--json", "risk", "--xml", &x(), "71FF30FF32000000000000"],
+    );
+    let refused = r.event("risk")[0]["refused"].as_str().unwrap().to_string();
+    assert!(
+        refused.contains("MES_PURGE_GARAGE_ARD_ON")
+            && refused
+                .contains("permanently forbidden: factory fill rig / brake bleed; use a garage"),
+        "{refused}"
+    );
     // The keep-alive is a protocol frame, never a request.
     let (r, _) = run(bosch_abs_ecu(), &["--json", "risk", "--xml", &x(), "36"]);
     assert_eq!(r.code, 7, "{}", r.stdout);
@@ -202,4 +224,81 @@ fn real_x24_definition_ident_and_dtc() {
     assert_eq!(r.event("ident")[0]["request"], "51");
     j.assert_no_writes();
     j2.assert_no_writes();
+}
+
+/// Review of the ABS branch: `exec 41.. --stop 71..` must not get a download and a run out.
+/// With the fixture (key bytes DC 83 declared) it is refused before the port is opened.
+#[test]
+fn exec_download_with_stop_run_is_refused_before_init() {
+    let (r, j) = run_opts(
+        bosch_abs_ecu(),
+        &[
+            "--trace",
+            "exec",
+            "--xml",
+            &x(),
+            "41040000030000F0",
+            "--stop",
+            "71",
+        ],
+        Opts {
+            interactive: true,
+            human: Human::TypesShownCode,
+            ..Opts::default()
+        },
+    );
+    assert_eq!(r.code, 7, "{}\n{}\n{}", r.stdout, r.stderr, r.screen);
+    assert!(r.stderr.contains("permanently forbidden"), "{}", r.stderr);
+    assert!(!r.opened);
+    assert!(!r.stderr.contains("] TX "), "{}", r.stderr);
+    assert!(j.writes().is_empty());
+    // An approvable request with a non-read --stop: refused before the port is opened too.
+    let (r, j) = run_opts(
+        bosch_abs_ecu(),
+        &["exec", "--xml", &x(), "45", "--stop", "45"],
+        Opts {
+            interactive: true,
+            human: Human::TypesShownCode,
+            ..Opts::default()
+        },
+    );
+    assert_eq!(r.code, 7, "{}\n{}", r.stdout, r.stderr);
+    assert!(r.stderr.contains("--stop is not available"), "{}", r.stderr);
+    assert!(!r.opened);
+    assert!(j.writes().is_empty());
+}
+
+/// When the definition does not declare the key bytes, the preview cannot know the unit is the
+/// Bosch 5.3 ABS; kline-core decides on the key bytes the ECU answered (DC 83) and refuses the
+/// download after the init: only the init and the 3F stop go out.
+#[test]
+fn exec_download_is_refused_by_the_session_on_the_answered_key_bytes() {
+    let src = std::fs::read_to_string(fixture_path("bosch_abs_iso8.xml")).unwrap();
+    let nokw = src.replace(r#"<KW1 Value="220"/><KW2 Value="131" Timeout="1500"/>"#, "");
+    assert_ne!(nokw, src);
+    let dir = temp_dir("abs-nokw");
+    let path = dir.join("abs_nokw.xml");
+    std::fs::write(&path, nokw).unwrap();
+    let path = path.display().to_string();
+    let (r, j) = run_opts(
+        bosch_abs_ecu(),
+        &["--trace", "exec", "--xml", &path, "41040000030000F0"],
+        Opts {
+            interactive: true,
+            human: Human::TypesShownCode,
+            ..Opts::default()
+        },
+    );
+    assert_eq!(r.code, 7, "{}\n{}\n{}", r.stdout, r.stderr, r.screen);
+    assert!(r.opened);
+    assert!(r.stderr.contains("permanently forbidden"), "{}", r.stderr);
+    // ISO8 frames on the wire: only the stop `02 3F 41` after the 5-baud init.
+    let tx: Vec<&str> = r
+        .stderr
+        .lines()
+        .filter_map(|l| l.split_once("] TX ").map(|(_, f)| f))
+        .collect();
+    assert_eq!(tx, ["02 3F 41 (inter-byte 5 ms)"], "{}", r.stderr);
+    assert!(j.writes().is_empty());
+    assert!(!r.screen.contains("APPROVAL REQUIRED"), "{}", r.screen);
 }

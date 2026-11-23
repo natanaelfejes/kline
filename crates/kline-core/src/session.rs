@@ -106,6 +106,10 @@ pub struct Session {
     /// Request id of the one outstanding approval challenge.
     #[cfg(feature = "approved-routines")]
     pending_approval: Option<u64>,
+    /// An approved request was handed to the link in this session. On the ISO8 unit at 0x01
+    /// (ABS) a second one is refused ([`DenyReason::OneApprovedRequestPerSession`]).
+    #[cfg(feature = "approved-routines")]
+    approved_sent: bool,
 }
 
 #[derive(Debug)]
@@ -168,6 +172,8 @@ impl Session {
             nonce: None,
             #[cfg(feature = "approved-routines")]
             pending_approval: None,
+            #[cfg(feature = "approved-routines")]
+            approved_sent: false,
         }
     }
 
@@ -302,6 +308,12 @@ impl Session {
     ) -> Result<RiskInfo, SessionError> {
         let deny = |reason| -> SessionError { Denied::new(payload, reason).into() };
         let risk = safety::assess_in(&self.guard, &self.target, payload)?;
+        // ABS (ISO8 at 0x01, any key bytes): one approved request per session, so no approved
+        // request can follow another one (download then run, valve ON then more) in the same
+        // session (defence in depth for `exec --stop`, review of the ABS branch).
+        if self.approved_sent && self.is_iso8_abs_address() {
+            return Err(deny(DenyReason::OneApprovedRequestPerSession));
+        }
         if risk.tier != tier || tier == Tier::Read {
             return Err(deny(DenyReason::ApprovalMismatch));
         }
@@ -345,7 +357,15 @@ impl Session {
             return Err(Denied::new(payload, DenyReason::ApprovalMismatch).into());
         }
         let permit = safety::Permit::new(payload, self.target, approval.tier);
-        self.begin(Kind::Request, permit, now_ms)
+        let action = self.begin(Kind::Request, permit, now_ms)?;
+        self.approved_sent = true;
+        Ok(action)
+    }
+
+    /// The ISO8 unit at the ABS address, whatever its key bytes.
+    #[cfg(feature = "approved-routines")]
+    fn is_iso8_abs_address(&self) -> bool {
+        self.target.protocol == Protocol::Iso8 && self.target.ecu_address == safety::ABS_ADDRESS
     }
 
     /// Send TesterPresent (`36` ISO8, `3E` KWP). A missing reply is not an error.

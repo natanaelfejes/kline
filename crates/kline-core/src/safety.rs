@@ -7,7 +7,7 @@
 //! | [`Tier::Service`] | clear DTC, output tests (Sirius: the 13 listed output ids only), adaptation reset, Sirius `31 A0 00`, BMT remote learning and actuators (not `A4`/`A5`) | a human, one typed `Approval` per request |
 //! | [`Tier::ConfigWrite`] | `3B` config writes | a human `Approval`, after the backup read and (BMT) the `21 80` identification the definition was chosen from |
 //! | [`Tier::Expert`] | any other request that is not forbidden: undocumented services and identifiers, security access `27`, download/upload/transfer `34`-`37` and flash erase/checksum `31 81`/`31 82` (not on a BMT), other `10 xx` sessions, memory/routine-by-address services on non-immobilizer ECUs (with specific warnings such as [`Warning::MayBrickEcu`]) | a human expert `Approval` that shows the risk |
-//! | forbidden | the immobilizer line only (owner decision 2026-11-22, final): on a BMT/UCH/decoder (address `26`/`A6` or a BMT/UCH/decoder definition, [`DefinitionGuard`]) `3D`, `38`-`3A`, `2C`, `34`-`37`, `31`-`33` `81`/`82` (flash erase/checksum), `30`-`33` with `C0`-`C9` (except exact `31C7000000`/`31C8000000`) or with the immobilizer outputs `A6`/`AB`/`AC` ([`BMT_IMMOBILIZER_OUTPUTS`]), `2E`/`2F`, `3B` other than `3B D2` and `3B D2 x2` (AP1CLE, also with a high nibble), `21 A4` with extra bytes; on every other ECU routines `31`-`33`/`38`-`3A` on `A0 A3`; on a Sirius (`7A` or a Sirius definition) also `31`-`33 A3 ..` (function 0xA3, reset of the backed-up memory) and writes `2E`/`2F`/`3B` to the frames `A0`/`A2`/`AE`/`BD`; definition requests named like immobilizer/transponder/key ([`DenyReason::ImmobilizerNamed`]) | nobody, never |
+//! | forbidden | the Bosch 5.3 ABS (ISO8 `01`, key bytes `DC 83`) RAM download `41` and routine run `71`, all of them, named when they are the factory fill / brake bleed ([`DenyReason::BoschAbsRoutine`], owner decision 2026-11-23); the immobilizer line (owner decision 2026-11-22, final): on a BMT/UCH/decoder (address `26`/`A6` or a BMT/UCH/decoder definition, [`DefinitionGuard`]) `3D`, `38`-`3A`, `2C`, `34`-`37`, `31`-`33` `81`/`82` (flash erase/checksum), `30`-`33` with `C0`-`C9` (except exact `31C7000000`/`31C8000000`) or with the immobilizer outputs `A6`/`AB`/`AC` ([`BMT_IMMOBILIZER_OUTPUTS`]), `2E`/`2F`, `3B` other than `3B D2` and `3B D2 x2` (AP1CLE, also with a high nibble), `21 A4` with extra bytes; on every other ECU routines `31`-`33`/`38`-`3A` on `A0 A3`; on a Sirius (`7A` or a Sirius definition) also `31`-`33 A3 ..` (function 0xA3, reset of the backed-up memory) and writes `2E`/`2F`/`3B` to the frames `A0`/`A2`/`AE`/`BD`; definition requests named like immobilizer/transponder/key ([`DenyReason::ImmobilizerNamed`]) | nobody, never |
 //!
 //! Link frames (`81`, `82`, ISO8 `36`/`3F`) are refused as requests ([`DenyReason::ProtocolReserved`]),
 //! not as a safety rule: sent as a request they would desynchronise the session state machine.
@@ -174,10 +174,226 @@ pub const BOSCH_ABS_IDENT: u8 = 0x51;
 pub const BOSCH_ABS_FAULTS: u8 = 0x58;
 /// Bosch 5.3 ISO8 "MES_RAZ": erase the fault memory.
 pub const BOSCH_ABS_CLEAR: u8 = 0x45;
-/// Bosch 5.3 ISO8 "DOWNLOAD_*" / "DL_*": download a routine (machine code) into the ECU RAM.
+/// Bosch 5.3 ISO8 "DOWNLOAD_*" / "DL_*": download a routine (Intel 80C196 machine code) into
+/// the ECU RAM. Forbidden on the Bosch 5.3 ABS ([`DenyReason::BoschAbsRoutine`], owner
+/// decision 2026-11-23).
 pub const BOSCH_ABS_DOWNLOAD: u8 = 0x41;
-/// Bosch 5.3 ISO8 "MES_*" with `71 ..`: run the routine downloaded last, with parameters.
+/// Bosch 5.3 ISO8 "MES_*" with `71 ..`: run the routine downloaded last, with parameters
+/// (valves, return pump, EEPROM). Forbidden on the Bosch 5.3 ABS like [`BOSCH_ABS_DOWNLOAD`]:
+/// kline has no sequence executor that sends the matching OFF / FIN frame on an error or
+/// Ctrl-C, and whether the ECU releases its outputs on `3F` or keep-alive loss is NOT
+/// VERIFIED, so a valve or the pump could stay energized.
 pub const BOSCH_ABS_RUN: u8 = 0x71;
+
+/// The first 9 bytes (download header) shared by X24_ABS_Bosch5.3 "DOWNLOAD_PURGE" (brake
+/// bleed routine, 134 bytes) and "DOWNLOAD_remplissage_usine" (factory fill routine, 131
+/// bytes); no other download of that definition starts with them. Only the header is kept
+/// here, not the Renault routine code (SAFETY.md rule 1); the test checks it against the XML.
+pub const BOSCH_ABS_FILL_BLEED_DOWNLOAD_HEADER: [u8; 9] =
+    [0x41, 0x04, 0x00, 0x00, 0x00, 0x00, 0x12, 0x06, 0x00];
+/// Names of the downloads that start with [`BOSCH_ABS_FILL_BLEED_DOWNLOAD_HEADER`].
+pub const BOSCH_ABS_FILL_BLEED_DOWNLOADS: [&str; 2] =
+    ["DOWNLOAD_PURGE", "DOWNLOAD_remplissage_usine"];
+/// The factory fill (MES_REMPLISSAGE*, run after DOWNLOAD_remplissage_usine on the filling
+/// rig) and brake bleed (MES_PURGE_*: GARAGE_*, SEC_*, ECH_*, DESACTIVE_*, CONDITIONS, run
+/// after DOWNLOAD_PURGE) `71` frames of X24_ABS_Bosch5.3, exact bytes (11 each; the test checks
+/// them against the XML both ways). They open inlet / outlet valves and run the return pump.
+/// Permanently forbidden by name (owner decision 2026-11-23): every `71` is forbidden on the
+/// Bosch 5.3 ABS anyway, the names only make the refusal say what the frame is.
+pub const BOSCH_ABS_FILL_BLEED_FRAMES: [(&str, [u8; 11]); 32] = [
+    (
+        "MES_PURGE_CONDITIONS",
+        [
+            0x71, 0xFF, 0x22, 0xFF, 0x62, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00,
+        ],
+    ),
+    (
+        "MES_PURGE_DESACTIVE_24",
+        [
+            0x71, 0x00, 0x36, 0x00, 0x34, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x3E,
+        ],
+    ),
+    (
+        "MES_PURGE_DESACTIVE_25",
+        [
+            0x71, 0x00, 0x32, 0x00, 0x30, 0x00, 0x00, 0x00, 0x38, 0x00, 0x3A,
+        ],
+    ),
+    (
+        "MES_PURGE_DESACTIVE_26",
+        [
+            0x71, 0x00, 0x52, 0xFF, 0x54, 0x00, 0x00, 0x00, 0x22, 0x00, 0x00,
+        ],
+    ),
+    (
+        "MES_PURGE_DESACTIVE_CONDIT",
+        [
+            0x71, 0x00, 0x62, 0xFF, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ],
+    ),
+    (
+        "MES_PURGE_ECH_ARD",
+        [
+            0x71, 0xFF, 0x38, 0xFF, 0x3A, 0xE8, 0x03, 0x00, 0x38, 0x00, 0x3A,
+        ],
+    ),
+    (
+        "MES_PURGE_ECH_ARG",
+        [
+            0x71, 0xFF, 0x3C, 0xFF, 0x3E, 0xE8, 0x03, 0x00, 0x3C, 0x00, 0x3E,
+        ],
+    ),
+    (
+        "MES_PURGE_GARAGE_ARD_OFF",
+        [
+            0x71, 0x00, 0x30, 0x00, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ],
+    ),
+    (
+        "MES_PURGE_GARAGE_ARD_ON",
+        [
+            0x71, 0xFF, 0x30, 0xFF, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ],
+    ),
+    (
+        "MES_PURGE_GARAGE_ARG_OFF",
+        [
+            0x71, 0x00, 0x34, 0x00, 0x36, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ],
+    ),
+    (
+        "MES_PURGE_GARAGE_ARG_ON",
+        [
+            0x71, 0xFF, 0x34, 0xFF, 0x36, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ],
+    ),
+    (
+        "MES_PURGE_GARAGE_ASV1_OFF",
+        [
+            0x71, 0x00, 0x52, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ],
+    ),
+    (
+        "MES_PURGE_GARAGE_ASV1_ON",
+        [
+            0x71, 0xFF, 0x52, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ],
+    ),
+    (
+        "MES_PURGE_GARAGE_ASV2_OFF",
+        [
+            0x71, 0x00, 0x54, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ],
+    ),
+    (
+        "MES_PURGE_GARAGE_ASV2_ON",
+        [
+            0x71, 0xFF, 0x54, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ],
+    ),
+    (
+        "MES_PURGE_GARAGE_AVD_OFF",
+        [
+            0x71, 0x00, 0x3C, 0x00, 0x3E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ],
+    ),
+    (
+        "MES_PURGE_GARAGE_AVD_ON",
+        [
+            0x71, 0xFF, 0x3C, 0xFF, 0x3E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ],
+    ),
+    (
+        "MES_PURGE_GARAGE_AVG_OFF",
+        [
+            0x71, 0x00, 0x38, 0x00, 0x3A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ],
+    ),
+    (
+        "MES_PURGE_GARAGE_AVG_ON",
+        [
+            0x71, 0xFF, 0x38, 0xFF, 0x3A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ],
+    ),
+    (
+        "MES_PURGE_GARAGE_FIN",
+        [
+            0x71, 0x00, 0x22, 0x00, 0x62, 0x00, 0x00, 0xFF, 0x64, 0x00, 0x00,
+        ],
+    ),
+    (
+        "MES_PURGE_SEC_21",
+        [
+            0x71, 0x00, 0x52, 0xFF, 0x54, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ],
+    ),
+    (
+        "MES_PURGE_SEC_22",
+        [
+            0x71, 0xFF, 0x36, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x3C, 0xFF, 0x3E,
+        ],
+    ),
+    (
+        "MES_PURGE_SEC_23",
+        [
+            0x71, 0xFF, 0x32, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x38, 0xFF, 0x3A,
+        ],
+    ),
+    (
+        "MES_PURGE_SEC_25",
+        [
+            0x71, 0x00, 0x32, 0x00, 0x30, 0x00, 0x00, 0x00, 0x38, 0x00, 0x3A,
+        ],
+    ),
+    (
+        "MES_REMPLISSAGE",
+        [
+            0x71, 0xB8, 0x0B, 0xE8, 0x03, 0x16, 0x00, 0x52, 0x54, 0x22, 0x64,
+        ],
+    ),
+    (
+        "MES_REMPLISSAGE_Message2",
+        [
+            0x71, 0xFF, 0x52, 0xFF, 0x54, 0x00, 0x00, 0xFF, 0x40, 0xFF, 0x42,
+        ],
+    ),
+    (
+        "MES_REMPLISSAGE_Message3",
+        [
+            0x71, 0xFF, 0x30, 0xFF, 0x32, 0x00, 0x00, 0xFF, 0x34, 0xFF, 0x36,
+        ],
+    ),
+    (
+        "MES_REMPLISSAGE_Message4",
+        [
+            0x71, 0xFF, 0x38, 0xFF, 0x3A, 0x00, 0x00, 0xFF, 0x3C, 0xFF, 0x3E,
+        ],
+    ),
+    (
+        "MES_REMPLISSAGE_Message5",
+        [
+            0x71, 0x00, 0x52, 0x00, 0x54, 0x00, 0x00, 0x00, 0x40, 0x00, 0x42,
+        ],
+    ),
+    (
+        "MES_REMPLISSAGE_Message6",
+        [
+            0x71, 0x00, 0x30, 0x00, 0x32, 0x00, 0x00, 0x00, 0x34, 0x00, 0x36,
+        ],
+    ),
+    (
+        "MES_REMPLISSAGE_Message7",
+        [
+            0x71, 0x00, 0x38, 0x00, 0x3A, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x3E,
+        ],
+    ),
+    (
+        "MES_REMPLISSAGE_Message8",
+        [
+            0x71, 0x00, 0x22, 0x00, 0x62, 0x00, 0x00, 0xFF, 0x64, 0x00, 0x00,
+        ],
+    ),
+];
 
 /// Key bytes (KW1, KW2) of the Bosch 5.3 ABS: `55 DC 83` on the car (2026-11-23), KW1=220 /
 /// KW2=131 in X24_ABS_Bosch5.3 and J64_Bosch5.3_4X4_V2.
@@ -191,6 +407,21 @@ pub fn is_bosch_abs(target: &Target) -> bool {
     target.protocol == Protocol::Iso8
         && target.ecu_address == ABS_ADDRESS
         && target.keywords == Some(BOSCH_ABS_KEYWORDS)
+}
+
+/// The factory fill / brake bleed names (DDT2000 X24_ABS_Bosch5.3) of a Bosch 5.3 ABS
+/// `payload`: the downloads by their header, the `71` frames by their exact bytes (one payload
+/// can carry several names: MES_PURGE_GARAGE_FIN is MES_REMPLISSAGE_Message8). Empty for any
+/// other payload.
+pub fn bosch_abs_fill_bleed_names(payload: &[u8]) -> Vec<&'static str> {
+    if payload.starts_with(&BOSCH_ABS_FILL_BLEED_DOWNLOAD_HEADER) {
+        return BOSCH_ABS_FILL_BLEED_DOWNLOADS.to_vec();
+    }
+    BOSCH_ABS_FILL_BLEED_FRAMES
+        .iter()
+        .filter(|(_, b)| b[..] == *payload)
+        .map(|(n, _)| *n)
+        .collect()
 }
 
 /// Protocol family the payload is sent with; the allowlists differ.
@@ -479,6 +710,18 @@ pub enum DenyReason {
     /// A Tier 1-3 request of the loaded definition whose name looks immobilizer / transponder
     /// / key related ([`DefinitionGuard`]). Forbidden always, also in expert mode.
     ImmobilizerNamed { names: Vec<alloc::string::String> },
+    /// Bosch 5.3 ABS (ISO8 at 0x01, key bytes DC 83): every RAM download `41` and routine run
+    /// `71`. Forbidden always, also in expert mode (owner decision 2026-11-23). `names` are the
+    /// factory fill / brake bleed requests the bytes are ([`bosch_abs_fill_bleed_names`]),
+    /// empty for any other `41`/`71`.
+    BoschAbsRoutine {
+        service: u8,
+        names: Vec<&'static str>,
+    },
+    /// A second approved (non-read) request in one session on the ISO8 unit at 0x01 (ABS):
+    /// refused by `Session` (defence in depth: no download followed by a run, no test followed
+    /// by another). Close the session (Stop) and open a new one.
+    OneApprovedRequestPerSession,
     /// A link-layer frame (`81`, `82`, ISO8 `36`/`3F`): sent only by the init machines and
     /// `Session::tester_present` / `Session::stop`, never as a request.
     ProtocolReserved { service: u8 },
@@ -502,6 +745,7 @@ impl DenyReason {
             DenyReason::Empty
                 | DenyReason::Immobilizer
                 | DenyReason::ImmobilizerNamed { .. }
+                | DenyReason::BoschAbsRoutine { .. }
                 | DenyReason::ProtocolReserved { .. }
         )
     }
@@ -664,6 +908,14 @@ fn forbidden_bytes(guard: &DefinitionGuard, target: &Target, payload: &[u8]) -> 
         if reset || immo_write {
             return Some(DenyReason::Immobilizer);
         }
+    }
+    // Bosch 5.3 ABS: no RAM download, no routine run, in any tier (owner decision 2026-11-23,
+    // SAFETY.md "ABS / brake ECU").
+    if is_bosch_abs(target) && matches!(service, BOSCH_ABS_DOWNLOAD | BOSCH_ABS_RUN) {
+        return Some(DenyReason::BoschAbsRoutine {
+            service,
+            names: bosch_abs_fill_bleed_names(payload),
+        });
     }
     match (target.protocol, service) {
         (Protocol::Kwp, 0x81 | 0x82) | (Protocol::Iso8, 0x36 | 0x3F) => {
@@ -902,11 +1154,10 @@ fn brake_risk(info: RiskInfo) -> RiskInfo {
     }
 }
 
-/// Risk of a request to the Bosch 5.3 ABS (ISO8 at 0x01). The service bytes come from DDT2000's
-/// Bosch 5.3 definitions and a disassembly of their download blocks (80C196 code;
-/// docs/protocol.md "Bosch 5.3 ABS"): `41` downloads a routine into the ECU RAM, `71` runs the
-/// routine downloaded last. What a `71` does depends on that download, which the bytes cannot
-/// show, so every `71` is Expert; its length tells which family of DDT2000 frames it belongs to.
+/// Risk of a request to the Bosch 5.3 ABS (ISO8 at 0x01, key bytes DC 83). The service bytes
+/// come from DDT2000's Bosch 5.3 definitions (docs/protocol.md "Bosch 5.3 ABS"). The RAM
+/// download `41` and the routine run `71` never get here: they are forbidden
+/// ([`DenyReason::BoschAbsRoutine`]).
 fn bosch_abs_risk(payload: &[u8], tier: Tier) -> RiskInfo {
     let r = |what_it_changes,
              what_can_go_wrong,
@@ -921,7 +1172,6 @@ fn bosch_abs_risk(payload: &[u8], tier: Tier) -> RiskInfo {
         prerequisites: Prerequisites::from_slice(prerequisites),
         warnings: Warnings::from_slice(warnings),
     };
-    const AFTER_DOWNLOAD: &str = "the matching 41 download sent in this same session (kline exec sends one request per session: NOT supported yet)";
     match (tier, payload) {
         (Tier::Read, _) => r("nothing (read)", "none known", true, NONE, &[]),
         (Tier::Service, [BOSCH_ABS_CLEAR]) => r(
@@ -930,38 +1180,6 @@ fn bosch_abs_risk(payload: &[u8], tier: Tier) -> RiskInfo {
             false,
             NONE,
             &[Warning::ErasesFaultMemory],
-        ),
-        (Tier::Expert, [BOSCH_ABS_DOWNLOAD, ..]) => r(
-            "downloads a routine (80C196 machine code) into the ABS ECU RAM and lets the ECU run it (DDT2000 DOWNLOAD_* / DL_*); RAM only, gone at the next ignition off",
-            "the routines come from the X24 (Master) and J64 (Scenic RX4) Bosch 5.3 definitions, not from this car (the X65 file is empty): they call ROM entry points 0x2089/0x208C/0x2092 and read ROM pointers 0x209A..0x20B2 that this ABS software (51: 02 49 12) is NOT VERIFIED to have; a mismatch can crash or reset the ABS ECU, light the ABS lamp, write RAM or EEPROM at a wrong address (FAB, SAV, ECR_DEV and ReadWriteProcessByte write EEPROM), or make a later 71 do something else than its name says",
-            false,
-            &["51 identification read and saved first", "vehicle stationary, engine off, battery charger connected"],
-            &[Warning::MayBrickEcu, Warning::UnknownEffect],
-        ),
-        (Tier::Expert, [BOSCH_ABS_RUN]) => r(
-            "runs the routine downloaded last (DDT2000 MES_INFO_SYS, MES_LEC_DEV, MES_CONTR_STAT, InfosytemeASR): a read after the INFO_SYS or LEC_DEV download, but CONTR_STAT changes an ECU state flag and other downloads act",
-            "without its download the ECU runs whatever is in its download RAM; after an actuator, bleed or write download it acts instead of reading",
-            false,
-            &[AFTER_DOWNLOAD],
-            &[Warning::UnknownEffect],
-        ),
-        (Tier::Expert, [BOSCH_ABS_RUN, rest @ ..]) if rest.len() == 10 => r(
-            "valve / pump command for the routine downloaded last (DDT2000 MES_PURGE_*, MES_POMPE_*, MES_MONTE_*, MES_CHUTE_*, MES_REMPLISSAGE_*): FF bytes energize inlet / outlet valves or run the return pump",
-            "brake pressure can drop or rise at a wheel, brake fluid or air can be pushed into the wrong circuit; a frame without its matching OFF / FIN frame can leave a valve energized or the pump running until the routine stops or ignition off",
-            false,
-            &[
-                AFTER_DOWNLOAD,
-                "brake fluid reservoir full; for bleed steps a second person on the bleed screw and the pedal, as the procedure says",
-                "the matching OFF / FIN frame ready to send next",
-            ],
-            &[Warning::MovesActuator, Warning::UnknownEffect],
-        ),
-        (Tier::Expert, [BOSCH_ABS_RUN, ..]) => r(
-            "parameter frame for the routine downloaded last (DDT2000 MES_ECR_DEV, MES_ECR_VARIANTE*, MES_ECR_PROCESS_BYTE, MES_DAT_FAB / MES_DAT_SAV write EEPROM; MES_LEC_PROCESS_BYTE / MES_LEC_VARIANTE* read)",
-            "EEPROM coding can be overwritten: tyre circumference (wrong wheel speeds, ABS lamp), variant coding (ABS/ASR layout, fault 39 'variant coding absent or wrong', ABS disabled), factory or after-sales dates",
-            false,
-            &[AFTER_DOWNLOAD, "the current value read and saved first"],
-            &[Warning::EepromWrite, Warning::UnknownEffect],
         ),
         _ => r(
             "unknown effect: undocumented Bosch 5.3 service",

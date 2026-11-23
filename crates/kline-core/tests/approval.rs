@@ -400,3 +400,64 @@ fn set_definition_guard_closes_the_pending_challenge() {
     let a = approve(&mut s, &p);
     assert!(s.request_approved(&p, a, 0).is_ok());
 }
+
+fn iso8_01(kw1: u8, kw2: u8) -> Session {
+    let cfg = LinkConfig::new(
+        0x01,
+        KTiming {
+            init: InitKind::Iso8FiveBaud,
+            ..KTiming::default()
+        },
+    );
+    Session::new(open(&cfg, kw1, kw2), 0)
+}
+
+/// Send `payload` (approved) on an ISO8 session and let the ECU echo it back.
+fn send_iso8(s: &mut Session, payload: &[u8], approval: Approval) {
+    let first = s.request_approved(payload, approval, 0).unwrap();
+    let mut frame = vec![payload.len() as u8 + 1];
+    frame.extend_from_slice(payload);
+    frame.push(frame.iter().fold(0u8, |a, b| a.wrapping_add(*b)));
+    let script = vec![
+        (flush(), done()),
+        (write(&frame, 0), done()),
+        (read(frame.len(), 300), ok(&frame)),
+        (read(1, 300), ok(&frame[..1])),
+        (read(frame.len() - 1, 300), ok(&frame[1..])),
+    ];
+    assert!(matches!(
+        drive(first, &script, |ev| s.on_event(ev, 10)),
+        Step::Done(SessionOutcome::Reply(_))
+    ));
+}
+
+/// Review of the ABS branch: on the ISO8 unit at 0x01 one approved request per session, so
+/// `exec --stop` (or any caller) cannot chain a download and a run, or a valve ON and more.
+#[test]
+fn iso8_abs_allows_one_approved_request_per_session() {
+    let one = |r: Result<_, SessionError>| matches!(r, Err(SessionError::Denied(ref d)) if d.reason == DenyReason::OneApprovedRequestPerSession);
+    // The Bosch 5.3 ABS: 45 once, then nothing approved (reads still go).
+    let mut s = iso8_01(0xDC, 0x83);
+    let a = approve(&mut s, &[0x45]);
+    send_iso8(&mut s, &[0x45], a);
+    assert!(one(s.service_challenge(&[0x45])));
+    assert!(one(s.expert_challenge(&[0x22])));
+    assert!(s.request(&[0x58], 20).is_ok());
+    // Another ISO8 unit at 0x01 (other key bytes: generic tiers, 41/71 Expert there): one
+    // approved download, and the run after it is refused.
+    let mut s = iso8_01(0xC2, 0x85);
+    let ch = s.expert_challenge(&[0x41, 0x04, 0x00]).unwrap();
+    let code = ch.code().to_string();
+    let a = Approval::confirm(ch, &code).unwrap();
+    send_iso8(&mut s, &[0x41, 0x04, 0x00], a);
+    assert!(one(s.expert_challenge(&[0x71])));
+    // Elsewhere two approved requests in one session stay possible (BMT remote learning).
+    let mut s = bmt();
+    let a = approve(&mut s, &ERASE_AND_LEARN_1);
+    let first = s.request_approved(&ERASE_AND_LEARN_1, a, 0).unwrap();
+    assert!(matches!(
+        exchange(&mut s, first, 0x26, &ERASE_AND_LEARN_1, &[0x71, 0xC7], 0),
+        Step::Done(_)
+    ));
+    assert!(s.service_challenge(&LEARN_2).is_ok());
+}

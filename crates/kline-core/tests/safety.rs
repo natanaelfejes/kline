@@ -975,7 +975,7 @@ const ABS: Target = Target {
 
 /// Bosch 5.3 ABS (ISO8 at 0x01, KW DC 83): `51` identification and `58` fault memory are the
 /// only Tier 0 reads; `45` (fault memory erase) is Tier 1; the RAM download `41` and the
-/// routine run `71` are Expert with brake-system warnings; nothing is forbidden.
+/// routine run `71` are forbidden, all of them (owner decision 2026-11-23).
 #[test]
 fn bosch_abs_tiers() {
     assert_eq!(tier(&ABS, &[0x51]), Tier::Read);
@@ -1000,7 +1000,7 @@ fn bosch_abs_tiers() {
     let kwp01 = Target {
         protocol: Protocol::Kwp,
         ecu_address: 0x01,
-        keywords: None,
+        keywords: Some((0xDC, 0x83)),
     };
     for t in [SAFIR, kwp01] {
         assert_eq!(tier_of(&t, &[0x51]).unwrap(), Tier::Expert);
@@ -1013,13 +1013,63 @@ fn bosch_abs_tiers() {
         reason(&ABS, &[0x36]),
         Some(DenyReason::ProtocolReserved { service: 0x36 })
     );
-    // Download and routine run: Expert, never forbidden.
-    let dl = [0x41, 0x04, 0x00, 0x16, 0x03, 0x00, 0x15, 0xA0];
-    let run = [
+}
+
+/// Every `41` and `71` on the Bosch 5.3 ABS is forbidden, also unnamed ones; the factory fill /
+/// brake bleed bytes carry their DDT2000 names.
+#[test]
+fn bosch_abs_downloads_and_routine_runs_are_forbidden() {
+    let forbidden = |p: &[u8]| match reason(&ABS, p) {
+        Some(DenyReason::BoschAbsRoutine { service, names }) => {
+            assert_eq!(service, p[0]);
+            assert!(tier_of(&ABS, p).is_err(), "{p:02X?}");
+            assert!(assess(&ABS, p).is_err(), "{p:02X?}");
+            names
+        }
+        r => panic!("{p:02X?}: {r:?}"),
+    };
+    let pump_on = [
         0x71, 0xFF, 0x22, 0xFF, 0x22, 0x00, 0x00, 0xFF, 0x22, 0xFF, 0x22,
     ];
-    for p in [&dl[..], &run, &[0x71]] {
-        assert_eq!(tier_of(&ABS, p).unwrap(), Tier::Expert, "{p:02X?}");
+    for p in [
+        &[0x41][..],
+        &[0x41, 0x04, 0x00, 0x16, 0x03, 0x00, 0x15, 0xA0],
+        &[0x71],
+        &[0x71, 0x00],
+        &[0x71, 0x99, 0x99, 0x99],
+        &pump_on,
+    ] {
+        assert_eq!(forbidden(p), Vec::<&str>::new(), "{p:02X?}");
+    }
+    // DOWNLOAD_PURGE / DOWNLOAD_remplissage_usine by their header (any length after it).
+    let mut dl = vec![0x41, 0x04, 0x00, 0x00, 0x00, 0x00, 0x12, 0x06, 0x00];
+    dl.extend([0x6B, 0x01, 0xA6]);
+    assert_eq!(
+        forbidden(&dl),
+        ["DOWNLOAD_PURGE", "DOWNLOAD_remplissage_usine"]
+    );
+    // A bleed frame, and one whose bytes carry two names.
+    assert_eq!(
+        forbidden(&[0x71, 0xFF, 0x30, 0xFF, 0x32, 0, 0, 0, 0, 0, 0]),
+        ["MES_PURGE_GARAGE_ARD_ON"]
+    );
+    assert_eq!(
+        forbidden(&[0x71, 0x00, 0x22, 0x00, 0x62, 0x00, 0x00, 0xFF, 0x64, 0x00, 0x00]),
+        ["MES_PURGE_GARAGE_FIN", "MES_REMPLISSAGE_Message8"]
+    );
+    assert_eq!(
+        forbidden(&[0x71, 0xB8, 0x0B, 0xE8, 0x03, 0x16, 0x00, 0x52, 0x54, 0x22, 0x64]),
+        ["MES_REMPLISSAGE"]
+    );
+    // One byte more or less is not the named frame, and still forbidden.
+    assert!(forbidden(&[0x71, 0xFF, 0x30, 0xFF, 0x32, 0, 0, 0, 0, 0]).is_empty());
+    // Not on other targets: there 41/71 keep the generic (pre-ABS) tiers.
+    let iso8_01_other = Target {
+        keywords: Some((0xC2, 0x85)),
+        ..ABS
+    };
+    for t in [iso8_01_other, SAFIR] {
+        assert_eq!(tier_of(&t, &pump_on).unwrap(), Tier::Expert, "{t:?}");
     }
 }
 
@@ -1034,56 +1084,10 @@ fn bosch_abs_risk_texts() {
     assert!(!clear.reversible);
     let w: Vec<Warning> = clear.warnings.iter().copied().collect();
     assert_eq!(w, [Warning::SafetySystem, Warning::ErasesFaultMemory]);
-    let dl = assess(&ABS, &[0x41, 0x04, 0x00]).unwrap();
-    let w: Vec<Warning> = dl.warnings.iter().copied().collect();
-    assert_eq!(
-        w,
-        [
-            Warning::SafetySystem,
-            Warning::MayBrickEcu,
-            Warning::UnknownEffect
-        ]
-    );
-    assert!(dl.what_it_changes.contains("RAM"));
-    // 71 families by length: bare run, 11-byte valve/pump frames, short parameter frames.
-    let warns =
-        |p: &[u8]| -> Vec<Warning> { assess(&ABS, p).unwrap().warnings.iter().copied().collect() };
-    assert_eq!(
-        warns(&[0x71]),
-        [Warning::SafetySystem, Warning::UnknownEffect]
-    );
-    let pump_on = [
-        0x71, 0xFF, 0x22, 0xFF, 0x22, 0x00, 0x00, 0xFF, 0x22, 0xFF, 0x22,
-    ];
-    assert_eq!(
-        warns(&pump_on),
-        [
-            Warning::SafetySystem,
-            Warning::MovesActuator,
-            Warning::UnknownEffect
-        ]
-    );
-    let run = assess(&ABS, &pump_on).unwrap();
-    assert!(run.what_can_go_wrong.contains("valve energized"));
-    assert!(run
-        .prerequisites
-        .iter()
-        .any(|p| p.contains("41 download sent in this same session")));
-    for p in [
-        &[0x71, 0x00][..],
-        &[0x71, 0x99, 0x99, 0x99],
-        &[0x71, 0x00, 0x00, 0x01, 0x00],
-    ] {
-        assert_eq!(
-            warns(p),
-            [
-                Warning::SafetySystem,
-                Warning::EepromWrite,
-                Warning::UnknownEffect
-            ],
-            "{p:02X?}"
-        );
-    }
-    // Every risk fits the static lists (brake prerequisites appended).
-    assert!(run.prerequisites.len() <= 8);
+    // An undocumented service is Expert with the brake text and unknown effect.
+    let x = assess(&ABS, &[0x22]).unwrap();
+    assert_eq!(x.tier, Tier::Expert);
+    let w: Vec<Warning> = x.warnings.iter().copied().collect();
+    assert_eq!(w, [Warning::SafetySystem, Warning::UnknownEffect]);
+    assert!(x.what_it_changes.contains("Bosch 5.3"));
 }

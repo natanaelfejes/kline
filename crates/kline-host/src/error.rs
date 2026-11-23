@@ -141,6 +141,17 @@ pub fn deny_text(r: &DenyReason) -> String {
             "definition request(s) {} look immobilizer/transponder/key related: forbidden always (SAFETY.md rule 3)",
             crate::sanitize_list(names)
         ),
+        DenyReason::BoschAbsRoutine { service, names } if !names.is_empty() => format!(
+            "{} (Bosch 5.3 ABS {service:02X}): permanently forbidden: factory fill rig / brake bleed; use a garage (SAFETY.md \"ABS / brake ECU\")",
+            names.join(" / ")
+        ),
+        DenyReason::BoschAbsRoutine { service, .. } => format!(
+            "Bosch 5.3 ABS {}: permanently forbidden: a routine can leave a valve or the pump energized and kline cannot guarantee the OFF frame (release on 3F / keep-alive loss NOT VERIFIED); use a garage (SAFETY.md \"ABS / brake ECU\")",
+            if *service == 0x41 { "41 RAM download" } else { "71 routine run" }
+        ),
+        DenyReason::OneApprovedRequestPerSession => {
+            "one approved request per session on the ISO8 unit at 01 (ABS): close this session (Stop), read 58, then start a new one".into()
+        }
         DenyReason::ProtocolReserved { service } => {
             format!("{service:02X} is a link frame, sent only by init / TesterPresent / Stop")
         }

@@ -322,6 +322,16 @@ pub fn exec(
         }
         None => None,
     };
+    // kline-core allows one approved request per session on the ISO8 unit at 01 (ABS), so an
+    // approved --stop could never be sent there: refused before anything is opened.
+    if stop.as_ref().is_some_and(|(_, r)| r.tier != Tier::Read)
+        && asx.target.protocol == safety::Protocol::Iso8
+        && asx.target.ecu_address == safety::ABS_ADDRESS
+    {
+        return Err(CliError::refused(
+            "--stop is not available on the ISO8 unit at 01 (ABS): one approved request per session (SAFETY.md \"ABS / brake ECU\"); nothing was sent",
+        ));
+    }
     // --watch is checked before anything is opened: a Tier 0 read only (exit 7 otherwise).
     let watch = a.hold.watch_read(&ecu)?;
     // Example read for a lost reply (F06): what shows the state this request changes.
