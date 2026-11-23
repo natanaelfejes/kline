@@ -76,7 +76,8 @@ pub struct GlobalArgs {
     #[arg(long, global = true, value_enum, default_value_t = DtrArg::High)]
     pub dtr: DtrArg,
     /// Init rounds over all variants (default 3, DDT2000; 500 ms apart). Global: it may stand
-    /// before or after the command (`kline --init-attempts 1 connect`).
+    /// before or after the command (`kline --init-attempts 1 connect`); commands that open no
+    /// session (ports, replay, risk, setup, selftest) ignore it.
     #[arg(long, global = true, value_name = "N")]
     pub init_attempts: Option<u8>,
 }
@@ -126,10 +127,12 @@ impl RtsArg {
 }
 
 impl GlobalArgs {
-    pub fn capture_dir(&self) -> PathBuf {
+    /// `--capture-dir`, else `env_dir` (`$KLINE_CAPTURE_DIR`, read once into [`Env`]), else the
+    /// data directory's `captures`.
+    pub fn capture_dir(&self, env_dir: Option<&std::path::Path>) -> PathBuf {
         self.capture_dir
             .clone()
-            .or_else(|| std::env::var_os("KLINE_CAPTURE_DIR").map(PathBuf::from))
+            .or_else(|| env_dir.map(PathBuf::from))
             .unwrap_or_else(|| defs::data_dir().join("captures"))
     }
 
@@ -166,6 +169,9 @@ impl GlobalArgs {
         }
         if self.dtr != DtrArg::High {
             v.extend(["--dtr".into(), self.dtr.label().into()]);
+        }
+        if let Some(n) = self.init_attempts {
+            v.extend(["--init-attempts".into(), n.to_string()]);
         }
         v
     }
@@ -425,6 +431,9 @@ pub struct Env {
     pub host_clock: Box<dyn Fn() -> Box<dyn Clock>>,
     /// Linux sysfs root for the FTDI latency timer ([`crate::latency::SYS_ROOT`]).
     pub sys_root: PathBuf,
+    /// `$KLINE_CAPTURE_DIR` (real: read from the process environment once; tests set it here
+    /// instead of mutating the shared process environment).
+    pub capture_dir_env: Option<PathBuf>,
 }
 
 impl Env {
@@ -437,6 +446,7 @@ impl Env {
             stop: Arc::new(AtomicBool::new(false)),
             host_clock: Box::new(|| Box::new(SystemClock::new())),
             sys_root: PathBuf::from(crate::latency::SYS_ROOT),
+            capture_dir_env: std::env::var_os("KLINE_CAPTURE_DIR").map(PathBuf::from),
         }
     }
 }
@@ -584,7 +594,12 @@ pub fn open_session(
     } else {
         Tracer::off()
     };
-    let cap = Capture::create(&ctx.g.capture_dir(), &ecu.label, command, ctx.tool)?;
+    let cap = Capture::create(
+        &ctx.g.capture_dir(ctx.env.capture_dir_env.as_deref()),
+        &ecu.label,
+        command,
+        ctx.tool,
+    )?;
     let trace_path = cap.path().with_extension("trace.txt");
     tracer
         .add_file(&trace_path)
@@ -1459,27 +1474,56 @@ pub fn read(ctx: &mut Ctx, a: &ReadArgs) -> Result<(), CliError> {
     with_session(ctx, &a.link, "read", |ctx, o| {
         definition_choice_notice(ctx, o);
         // One session, the requests in the given order. A request the ECU answers negatively
-        // or that does not decode does not end the others; a line problem does. The exit
-        // code is that of the first failure.
+        // or that does not decode does not end the others. A line problem ends the rest (the
+        // line is not trustworthy), and is the more severe exit: it replaces an earlier
+        // negative/decode failure. Otherwise the exit code is that of the first failure.
+        // Requests not sent (line error, Ctrl-C) are named in a `read_skipped` event.
+        let many = reqs.len() > 1;
+        let skipped = |ctx: &Ctx, from: usize, why: &str| {
+            let rest: Vec<String> = reqs[from..].iter().map(|r| hex(&r.payload)).collect();
+            if many && !rest.is_empty() {
+                ctx.out.emit(
+                    json!({"event": "read_skipped", "requests": rest, "reason": why}),
+                    format!(
+                        "not read ({why}): {}",
+                        reqs[from..]
+                            .iter()
+                            .map(|r| hex_sp(&r.payload))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                );
+            }
+        };
         let mut first: Option<CliError> = None;
         for (i, r) in reqs.iter().enumerate() {
             // Ctrl-C between requests: the rest is not sent (the first always is, as before).
             if i > 0 && ctx.stopped() {
+                skipped(ctx, i, "Ctrl-C");
                 break;
             }
             match read_one(ctx, o, &r.payload, &r.names) {
                 Ok(_) => {}
                 Err(e) if matches!(e.code, exit::NEGATIVE | exit::DECODE) => {
                     // A single request reports through the exit path, as before.
-                    if reqs.len() > 1 {
+                    if many {
                         ctx.out.emit(
-                        json!({"event": "read_error", "request": hex(&r.payload), "kind": e.kind, "message": e.message}),
+                            json!({"event": "read_error", "request": hex(&r.payload), "kind": e.kind, "message": e.message}),
                             format!("{}: {}", hex_sp(&r.payload), e.message),
                         );
                     }
                     first.get_or_insert(e);
                 }
-                Err(e) => return Err(first.unwrap_or(e)),
+                Err(e) => {
+                    if many {
+                        ctx.out.emit(
+                            json!({"event": "read_error", "request": hex(&r.payload), "kind": e.kind, "message": e.message}),
+                            format!("{}: {}", hex_sp(&r.payload), e.message),
+                        );
+                    }
+                    skipped(ctx, i + 1, "line error");
+                    return Err(e);
+                }
             }
         }
         first.map_or(Ok(()), Err)
@@ -1732,7 +1776,11 @@ pub fn live(ctx: &mut Ctx, a: &LiveArgs) -> Result<(), CliError> {
         // --compact: the last shown text of every item (to print only what changed).
         let mut last: std::collections::HashMap<String, String> = Default::default();
         let mut cycle = 0u64;
-        let deadline = a.duration.map(|d| o.link.now_ms() + d.saturating_mul(1000));
+        // Did any cycle get an answer? (--duration/--cycles ending on silence is exit 5.)
+        let mut ever_ok = false;
+        let deadline = a
+            .duration
+            .map(|d| o.link.now_ms().saturating_add(d.saturating_mul(1000)));
         let done = |cycle: u64, now: u64| {
             a.cycles.is_some_and(|c| cycle >= c) || deadline.is_some_and(|d| now >= d)
         };
@@ -1869,11 +1917,16 @@ pub fn live(ctx: &mut Ctx, a: &LiveArgs) -> Result<(), CliError> {
                            "wait_ms": policy.cycle_retry_ms}),
                     format!("read data: retry {retries}/{}", policy.cycle_retries),
                 );
-                if !idle(ctx, o, u64::from(policy.cycle_retry_ms))? {
+                let mut wait = u64::from(policy.cycle_retry_ms);
+                if let Some(d) = deadline {
+                    wait = wait.min(d.saturating_sub(o.link.now_ms()));
+                }
+                if !idle(ctx, o, wait)? {
                     break;
                 }
                 continue;
             }
+            ever_ok = true;
             retries = 0;
             streak_negative = true;
             streak_nrcs.clear();
@@ -1887,6 +1940,15 @@ pub fn live(ctx: &mut Ctx, a: &LiveArgs) -> Result<(), CliError> {
                     break;
                 }
             }
+        }
+        if !ever_ok && cycle > 0 && !ctx.stopped() {
+            return Err(CliError::new(
+                exit::COMM,
+                "comm",
+                format!(
+                    "no communication with the ECU: no cycle got an answer in {cycle} cycle(s) before --duration/--cycles ended"
+                ),
+            ));
         }
         Ok(())
     })

@@ -187,6 +187,54 @@ mod pty_sessions {
     }
 
     #[test]
+    fn agent_multi_read_and_live_cycles_duration() {
+        if unified() {
+            return;
+        }
+        let Some((sim, j)) = sim("multi") else {
+            return;
+        };
+        let x = fixture("sirius_cli.xml").display().to_string();
+        let (code, ev, err) = agent(&sim, &["read", "--xml", &x, "21A9", "21AA"]);
+        assert_eq!(code, Some(0), "{ev:?}\n{err}");
+        let req: Vec<&str> = ev
+            .iter()
+            .filter(|e| e["event"] == "read")
+            .map(|e| e["request"].as_str().unwrap())
+            .collect();
+        assert_eq!(req, ["21A9", "21AA"]);
+        // One non-read among reads refuses everything: exit 7, no read event.
+        let (code, ev, _) = agent(&sim, &["read", "--xml", &x, "21A9", "11FF", "21AA"]);
+        assert_eq!(code, Some(7), "{ev:?}");
+        assert!(ev.iter().all(|e| e["event"] != "read"), "{ev:?}");
+        let (code, ev, err) = agent(
+            &sim,
+            &[
+                "live", "--xml", &x, "--frames", "21A9", "--cycles", "2", "--rate", "10",
+            ],
+        );
+        assert_eq!(code, Some(0), "{ev:?}\n{err}");
+        assert_eq!(ev.iter().filter(|e| e["event"] == "live").count(), 2);
+        let (code, ev, err) = agent(
+            &sim,
+            &[
+                "live",
+                "--xml",
+                &x,
+                "--frames",
+                "21A9",
+                "--duration",
+                "1",
+                "--rate",
+                "10",
+            ],
+        );
+        assert_eq!(code, Some(0), "{ev:?}\n{err}");
+        assert!(ev.iter().filter(|e| e["event"] == "live").count() >= 2);
+        j.assert_no_writes();
+    }
+
+    #[test]
     fn prepare_prints_risk_and_the_exact_human_command() {
         if unified() {
             return;

@@ -336,3 +336,100 @@ fn init_attempts_works_before_and_after_the_command() {
         6
     );
 }
+
+// ---- review round: line error, Ctrl-C, silent ECU ---------------------------------------
+
+#[test]
+fn read_line_error_after_a_negative_reply_is_the_exit_and_names_the_skipped() {
+    use kline_sim::ecu::{FaultRule, ReplyFault};
+    let sx = xml("sirius_cli.xml");
+    let ecu = sirius_ecu().with_fault(FaultRule::on(&[0x21, 0xAA], ReplyFault::NoReply));
+    let (r, _) = run(
+        ecu,
+        &["--json", "read", "--xml", &sx, "21B0", "21AA", "21A9"],
+    );
+    // 21B0 negative (6), then 21AA: no reply, the more severe line error (5) wins.
+    assert_eq!(r.code, 5, "{}\n{}", r.stdout, r.stderr);
+    let errs = r.event("read_error");
+    let which: Vec<&str> = errs
+        .iter()
+        .map(|e| e["request"].as_str().unwrap())
+        .collect();
+    assert_eq!(which, ["21B0", "21AA"], "{}", r.stdout);
+    let sk = &r.event("read_skipped")[0];
+    assert_eq!(sk["requests"], serde_json::json!(["21A9"]));
+    assert_eq!(sk["reason"], "line error");
+    assert!(r.event("read").iter().all(|e| e["request"] != "21A9"));
+}
+
+#[test]
+fn read_ctrl_c_between_requests_names_the_requests_not_read() {
+    let sx = xml("sirius_cli.xml");
+    let (r, _) = run_opts(
+        sirius_ecu(),
+        &["--json", "read", "--xml", &sx, "21A9", "21AA", "21A9"],
+        Opts {
+            ctrl_c_after_tx: Some((vec![0x21, 0xA9], 0)),
+            ..Opts::default()
+        },
+    );
+    assert_eq!(r.event("read").len(), 1, "{}", r.stdout);
+    let sk = &r.event("read_skipped")[0];
+    assert_eq!(sk["requests"], serde_json::json!(["21AA", "21A9"]));
+    assert_eq!(sk["reason"], "Ctrl-C");
+    assert_eq!(r.event("stopped")[0]["ctrl_c"], true);
+}
+
+#[test]
+fn live_duration_with_a_silent_ecu_is_exit_5() {
+    use kline_sim::ecu::{FaultRule, ReplyFault};
+    let sx = xml("sirius_cli.xml");
+    let ecu = sirius_ecu().with_fault(FaultRule::on(&[0x21, 0xA9], ReplyFault::NoReply));
+    let (r, _) = run(
+        ecu,
+        &live_args(&sx, &["--frames", "21A9", "--duration", "1"]),
+    );
+    assert_eq!(r.code, 5, "{}\n{}", r.stdout, r.stderr);
+    assert!(r.event("live").is_empty());
+    assert_eq!(r.event("stopped")[0]["ok"], true, "Stop is still sent");
+}
+
+#[test]
+fn live_huge_duration_does_not_overflow() {
+    let sx = xml("sirius_cli.xml");
+    let (r, _) = run(
+        sirius_ecu(),
+        &live_args(
+            &sx,
+            &[
+                "--frames",
+                "21A9",
+                "--cycles",
+                "1",
+                "--duration",
+                "18446744073709551615",
+            ],
+        ),
+    );
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    assert_eq!(r.event("live").len(), 1);
+}
+
+#[test]
+fn global_init_attempts_is_carried_into_the_printed_command() {
+    let sx = xml("sirius_cli.xml");
+    let (r, _) = run(
+        sirius_ecu(),
+        &[
+            "--json",
+            "--init-attempts",
+            "1",
+            "risk",
+            "--xml",
+            &sx,
+            "11FF",
+        ],
+    );
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("--init-attempts 1"), "{}", r.stdout);
+}

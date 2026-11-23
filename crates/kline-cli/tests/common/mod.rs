@@ -442,8 +442,8 @@ pub enum CaptureArg {
     BeforeCommand,
     /// `kline <command> .. --capture-dir DIR`
     AfterCommand,
-    /// Only `$KLINE_CAPTURE_DIR` (set for the run; the other tests always pass the option,
-    /// which wins over the variable, so they do not see it).
+    /// Only `$KLINE_CAPTURE_DIR`, injected through `Env::capture_dir_env` (the process
+    /// environment is not touched: tests run in threads).
     Env,
 }
 
@@ -571,6 +571,7 @@ fn run_line_inner(line: VirtualLine, port: &str, args: &[&str], o: Opts, blind: 
                 }) as Box<dyn Clock>
             }),
             sys_root: sys_root.clone(),
+            capture_dir_env: (o.capture == CaptureArg::Env).then(|| capture_dir.clone()),
         },
         interactive: o.interactive,
         tty: Box::new(move || {
@@ -591,12 +592,10 @@ fn run_line_inner(line: VirtualLine, port: &str, args: &[&str], o: Opts, blind: 
         CaptureArg::AfterCommand => {
             full.extend(["--capture-dir".into(), capture_dir.display().to_string()])
         }
-        CaptureArg::Env => std::env::set_var("KLINE_CAPTURE_DIR", &capture_dir),
+        CaptureArg::Env => {}
     }
     let code = kline_cli::run_args(full, &mut env);
-    if o.capture == CaptureArg::Env {
-        std::env::remove_var("KLINE_CAPTURE_DIR");
-    }
+
     let s = |b: &Arc<Mutex<Vec<u8>>>| String::from_utf8(b.lock().unwrap().clone()).unwrap();
     let r = Run {
         code,
