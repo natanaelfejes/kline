@@ -19,7 +19,7 @@ means.
 | Module | What it does |
 |---|---|
 | `bus` | The K line of a dumb FTDI KKL cable: echo of every TX byte, break loopback, one 0x00 "break residue" on break release (optional), 5-baud and fast-init wake-up detection from the break edges, time-stamped delivery of the ECU's bytes. |
-| `ecu::SpecEcu` | An ECU answering from a kline-spec `EcuDef` and a `Scenario`. Profiles: Sirius 32 (0x7A, KWP 5-baud, `55 D0 8F`, ~KW2 handshake), BMT (0x26, same), Safir 2 (0x7A, ISO8, `55 C2 85`, no handshake), or `EcuProfile::from_def`. |
+| `ecu::SpecEcu` | An ECU answering from a kline-spec `EcuDef` and a `Scenario`. Profiles: Sirius 32 (0x7A, KWP 5-baud, `55 D0 8F`, ~KW2 handshake), BMT (0x26, same), Safir 2 (0x7A, ISO8, `55 C2 85`, no handshake), Bosch 5.3 ABS (0x01, ISO8, `55 DC 83`, no handshake, replies with the request SID, answers `36` and `3F`, P3min 55 ms; `from_def` picks it for an ISO8 definition at 0x01 with `DC 83`), or `EcuProfile::from_def`. |
 | `scenario` | Values per `<Data>` name; the positive response builder. |
 | `classify`, `journal` | The simulator's own read/dangerous classification and the **ECU write log**, plus timing violations and notes. |
 | `replay::ReplayEcu` | Plays back a JSONL capture as the ECU. |
@@ -51,8 +51,10 @@ means.
   are more than P4max (20) apart. Replies start after P2 (25 ms).
 - **Answers.**
   - built in: KWP `81` -> `C1 KW1 KW2`, `82` -> `C2` then asleep, `3E` -> `7E`; ISO8 `36` ->
-    nothing by default, `3F` -> nothing then asleep;
-  - a request matching a definition (`SentBytes`, sent-item bytes free): SID + 0x40, the echo
+    nothing by default (`36` for the Bosch ABS profile), `3F` -> nothing then asleep (`3F`
+    then asleep for the Bosch ABS profile);
+  - a request matching a definition (`SentBytes`, sent-item bytes free): SID + 0x40 (SID
+    unchanged for the Bosch ABS profile, `positive_sid_offset` 0), the echo
     of the request bytes before the first received item, zeros up to
     `max(MinBytes, last item end)`, then every scenario value inserted with
     `DataDef::encode_exact` + `insert`. All definitions with the same bytes (BMT `2180`) are
@@ -148,7 +150,9 @@ wrong together:
    address.
 4. Key bytes `D0 8F` (Sirius, BMT), `C2 85` (Safir 2); the length-in-format rule from KW1; the
    StartCommunication key bytes after fast init (copied from the 5-baud ones).
-5. Framing: header layout, 8-bit sum checksum, ISO8 `[N][data][cs]`; Safir status replies are
+5. Framing: header layout, 8-bit sum checksum, ISO8 `[N][data][cs]` (car-verified for the
+   Bosch 5.3 ABS, 2026-11-23, replayed from `tests/fixtures/abs_car_51.jsonl` and
+   `abs_car_58.jsonl`); Safir status replies are
    not simulated.
 6. Positive reply = SID + 0x40 + echo of the request bytes before the first item, length from
    MinBytes and the items; replies to requests without received items (`50 A0`, `7E`, `C2`,

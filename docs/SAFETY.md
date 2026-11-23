@@ -19,8 +19,9 @@ Default-deny, decided on exact payload bytes and the target of the init that act
 (owner-approved tiers, [protocol.md "Safety policy"](protocol.md#safety-policy)):
 
 - **Tier 0 READ**: documented reads only (KWP `21 xx`/`1A xx` exactly 2 bytes, `17`/`18`, `3E`,
-  `10 81`, `10 A0`; Safir `21`, `3350`, `3351`, `3352`, `3354`). The only tier library code
-  paths, `--json`, MCP and tests against a real port may execute.
+  `10 81`, `10 A0`; Safir `21`, `3350`, `3351`, `3352`, `3354`; Bosch 5.3 ABS (ISO8 at `0x01`)
+  exactly `51` and `58`). The only tier library code paths, `--json`, MCP and tests against a
+  real port may execute.
 - **Tier 1 SERVICE** (clear DTC `14`, output tests `30`, adaptation reset `11 FF`/`32`, Sirius
   `31A000` injector inhibition, BMT `31C7`/`31C8` remote learning and `31 out` actuators; see "Output control ids" below), **Tier 2 CONFIG WRITE**
   (`3B`, with backup read and `21 80` identification in the same session) and **Tier 3 EXPERT**
@@ -65,6 +66,19 @@ Default-deny, decided on exact payload bytes and the target of the init that act
   Other (non-Sirius, non-BMT) ECUs keep `30 lid` + 1-4 bytes as Tier 1. The S2000 definition (Generic class) lists
   more ids (`87`, `8B`, `8C`, `B5`..): at address `7A` the Sirius allowlist applies to it and those ids are
   Expert; at any other address, with no Sirius definition, it keeps `30 lid` + 1-4 bytes as Tier 1. The A/C text is Sirius-only.
+- **ABS / brake ECU (audit 2026-11-23).** The Bosch 5.3 ABS (target ISO8 at `0x01`, key bytes
+  `DC 83`, car-verified) has only two reads: `51` identification and `58` fault memory, exactly
+  one byte (Tier 0). `45` clears the fault memory (Tier 1, `ErasesFaultMemory`). `41 ..`
+  downloads 80C196 machine code into the ABS RAM and `71 ..` runs it: both Tier 3 Expert, never
+  Tier 0, because the download blocks come from other vehicles' definitions (X24 Master, J64
+  Scenic RX4), call ROM entry points this car's software is not verified to have, and the same
+  `71` bytes read, move valves or write EEPROM depending on the block loaded before
+  (`41` `MayBrickEcu`; bare `71` `UnknownEffect`; 11-byte `71` valve/pump frames
+  `MovesActuator`; other `71` frames `EepromWrite`). Safir `21`/`33` are not reads there. Every
+  non-read carries `SafetySystem` first, a brake text and brake prerequisites (stationary,
+  engine off, handbrake; afterwards ignition cycle, ABS lamp out, firm pedal, brake test at
+  walking speed), like the airbag rule. `kline exec` sends one request per session, so a
+  download followed by its `71` is not possible yet.
 - **BMT actuator `A4`/`A5`** (unnamed "LO"/"LF" lines) are Tier 3 Expert; the other outputs
   `A0`..`B3` stay Tier 1, `A6`/`AB`/`AC` stay forbidden, `B4`+ stays Expert.
 - **BMT actuators.** `31 out param count` stays Tier 1; on the lock motors (`A0`/`A1`) and the

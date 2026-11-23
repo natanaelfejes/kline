@@ -17,6 +17,7 @@ first test at the car. Run `kline --help` or `kline <command> --help` for the sh
 - [Capture files](#capture-files)
 - [Running against the simulator](#running-against-the-simulator)
 - [First test on the car](#first-test-on-the-car)
+- [ABS (Bosch 5.3) on the car](#abs-bosch-53-on-the-car)
 - [Not verified (host and cable)](#not-verified-host-and-cable)
 - [kline-agent (read-only)](#kline-agent-read-only)
 
@@ -160,7 +161,7 @@ nothing.
 | `ident` | `21 80` (KWP; else Tier 0 requests named like "ident"; NRC 21/23 retried like DDT2000), chooses the definition | DDT2000 AutoIdent ladder (exact, unique, soft, diag, soft+diag; DiagVersion numeric, Supplier/Soft/Version whitespace-normalized, case-sensitive) when the candidates have `<AutoIdents>`; else the first candidate whose key bytes match and whose identification requests decode. A reply shorter than MinBytes is decoded anyway and flagged; `ddt2000_diagfailures_accepts` says whether DiagFailures (exactly 26 bytes) would take it |
 | `read REQ [REQ ..] [--set ITEM=VALUE ..]` | one or more requests (definition name or hex) read in order in ONE session, each decoded (every one is checked as a Tier 0 read before the port is opened; a negative or undecodable reply does not stop the others, the exit code is the first such failure; a line error (no reply, bad frame after the retry, port) ends the rest, is the exit code instead (5) and replaces an earlier 6/10; JSON `read_error` {request, kind, message} per failed request when several were given, and `read_skipped` {requests, reason: `line error` or `Ctrl-C`} naming the requests not sent; Ctrl-C between requests stops the rest (Stop is sent, exit 0 unless an earlier request failed); `--set` only with a single request). A reply with a bad checksum or cut short is retried once after 400 ms, visibly (`21 A3: bad reply frame: checksum mismatch ..; retrying once in 400 ms`, JSON `read_retry`); a missing reply or a negative answer is not retried. Known BMT flags carry a one-line meaning in human output (`TRF  1  (1 = RF remote (inferred, NOT VERIFIED))`, `TIR RF RECU`, `TIR RF VAL`, `TIR RF OK`, `TRP RECU`, `TRP VAL`, `TRPOK`, `INTCLE`, `VERLOGI`; table `FLAG_MEANINGS` in `crates/kline-host/src/defs.rs`, also used by `live`, `ident` and `replay`) | Tier 0 only; a non-read is refused before the port is opened (exit 7) and again by kline-core. `--set` (also on `risk`, `exec`, `prepare`): builds the named request from its `<Sent>` data items (`Request::build`); VALUE is a number in physical units (must lie on the item's scaling grid), a list label, or `hex:..`; unknown items and off-grid values are exit 8 before anything is opened |
 | `live --frames A,B --rate HZ [--cycles N] [--duration SECS] [--items NAME,..] [--compact]` | all frames once per cycle, `HZ` cycles/s. `--items` shows only those decoded items (names case-insensitive, also in JSON; an unknown name is exit 8 before the port is opened). `--cycles N` (old name `--count`, never an item filter) stops after N cycles, `--duration SECS` after that many seconds, whichever comes first, both with a clean Stop; if no cycle got a positive answer before they end, exit 5 (`ECU rejected every request (7F ..)` when every answer was negative, else `no communication with the ECU`); this also holds for `--count`/`--cycles N`, which used to exit 0 with no output. `--compact` prints one line per cycle, `#3 t=4512 ms Engine speed=850 rpm; ...`: only the values that changed since the previous cycle (all in the first), with or without `--items`, else `(no change)`; human output only | TesterPresent when idle >= TesterPresent delay (or every 2000 ms with `--periodic-tester-present`); Ctrl-C stops cleanly (`stopped by Ctrl-C, Stop sent`; JSON `stopped` has `ctrl_c`); a cycle in which every request failed is retried after 400 ms, the 4th in a row is exit 5 (DDT2000 "Read Data : Retry n/3"): `ECU rejected every request (7F 21 12 subFunctionNotSupported-invalidFormat) in 4 cycles` when every answer was negative, else `no communication with the ECU` |
-| `dtc [--show-clear]` | `<Failures Id="1">` (Sirius 32): reads the Tier 0 frames that carry `FailureFlag="1"` items of `<Devices>` and lists the set flags with their device (DDT2000 DiagFailures); otherwise the frames whose name says `panne`/`defaut`/`fault`/`dtc`, non-zero items; otherwise (ISO8 Safir: `Failures Id="0"`, which DDT2000 shows as no fault list) a `dtc_note` saying so and the non-zero fault-named items of its Tier 0 reads (Safir `33 50`/`33 51`/`33 52` "Panne presente ..."). Each frame and the summary say `N set (present: a, memorized: b)` (by item name; `, other: c` for the rest; just `N set` when no name says present or memorized). `--show-clear` adds the clear plan (what `kline clear-dtc` would send); JSON `dtc_summary` always has `clear_plan`, plus `present`/`memorized` | never clears |
+| `dtc [--show-clear]` | `<Failures Id="1">` (Sirius 32): reads the Tier 0 frames that carry `FailureFlag="1"` items of `<Devices>` and lists the set flags with their device (DDT2000 DiagFailures); otherwise the frames whose name says `panne`/`defaut`/`fault`/`dtc`, non-zero items; otherwise (ISO8 Safir: `Failures Id="0"`, which DDT2000 shows as no fault list) a `dtc_note` saying so and the non-zero fault-named items of its Tier 0 reads (Safir `33 50`/`33 51`/`33 52` "Panne presente ..."). A frame laid out in numbered slots (at least two fault-named items `... 1`, `... 2` each with other items of the same number: Bosch 5.3 ABS `58`) counts one fault per set slot and lists the slot's other items with it (`context`). Each frame and the summary say `N set (present: a, memorized: b)` (by item name; `, other: c` for the rest; just `N set` when no name says present or memorized). `--show-clear` adds the clear plan (what `kline clear-dtc` would send); JSON `dtc_summary` always has `clear_plan`, plus `present`/`memorized` | never clears |
 | `clear-dtc [--ddt2000-clear]` | Tier 1 clear: prints the exact bytes (default: `ClearDiagnosticInformation.*` if the definition has one, else the definition's own `14 ..` request; Sirius `14 00 00`) and what DDT2000's global clear would send (`14 FF 00` for the Sirius), then the `exec` approval | `kline` only; `--ddt2000-clear` sends DDT2000's choice |
 | `scan --range 21:B0-C5 [--interval MS]` | kline-core `ScanPlan`: `21`/`1A` only, >= 200 ms apart, stops after 3 missing replies or a security NRC (exit 12) | `kline` only; not offered by kline-agent |
 | `risk REQ [--hold S --watch REQ]` | tier and `RiskInfo` of a request, nothing sent; for an allowed non-read also the exact `kline exec` command (`command:`, JSON `command`) with the given `--hold`/`--watch`; for the BMT remote learning without `--hold` it suggests `--hold 30 --watch 21A3` | exit 7 when forbidden, refused by the name guard, or `--watch` is not a read |
@@ -423,6 +424,31 @@ remote.
 4. Check: both remotes lock and unlock, also 10 s later; the key still starts the engine.
 
 `kline risk --ecu bmt 31C7000000` prints the same command (`command (remote learning: ...)`).
+
+## ABS (Bosch 5.3) on the car
+
+The car's ABS (0x01, ISO8, key bytes `DC 83`) has no usable X65 definition (the DDT2000 X65
+Bosch 5.3 files are empty stubs); `X24_ABS_Bosch5.3.xml` (Renault Master) has the same ISO8
+link and the same `51`/`58` layout as the car's replies (2026-11-23). Use it with
+`--variant single` (plain 5-baud `01`, no handshake):
+
+1. `kline --trace connect --xml X24_ABS_Bosch5.3.xml --variant single`
+2. `kline ident --xml X24_ABS_Bosch5.3.xml --variant single`: `51` decoded (Renault part
+   number, software, Bosch number).
+3. `kline dtc --xml X24_ABS_Bosch5.3.xml --variant single`: `58`, one line per set fault slot
+   with its context, for the car's reply of 2026-11-23 (simulated with the same bytes):
+   `Défaut mémoire 1 = signal capteur AVG  (compteur mémoire 1 1, Etat contacteur stop 1
+   Pédale relâchée, Etat régulateur ABS 1 Inactif, Tension 1 13.56 V, Vitesse de référence 1
+   16. km/h)`. The fault texts are the X24 list (NOT VERIFIED for the
+   X65 software). JSON: each `active` entry has `context` (the slot's other items).
+4. `kline read --xml X24_ABS_Bosch5.3.xml --variant single 51 58`: both raw frames decoded.
+5. Only when the owner decides: `kline clear-dtc --xml X24_ABS_Bosch5.3.xml --variant single`
+   sends `45` (MES_RAZ, Tier 1, brake-system warnings and prerequisites), then `kline dtc`
+   again to see whether the slot stays empty.
+
+`41` downloads and `71` routine runs (live values, valve tests, bleeding, coding) are Expert
+and not usable yet: `exec` sends one request per session, while each `71` needs its `41`
+download in the same session. `kline risk --xml X24_ABS_Bosch5.3.xml 41..` shows why.
 
 ## Not verified (host and cable)
 
