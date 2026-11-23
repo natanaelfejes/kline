@@ -7,6 +7,7 @@ members = [
     "crates/kline-host",
     "crates/kline-cli",
     "crates/kline-agent",
+    "crates/kline-bridge",
 ]
 
 [workspace.package]

@@ -370,6 +370,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kline-bridge"
+version = "0.1.0"
+dependencies = [
+ "kline-core",
+ "kline-sim",
+ "kline-spec",
+ "proptest",
+ "thiserror",
+]
+
+[[package]]
 name = "kline-cli"
 version = "0.1.0"
 dependencies = [

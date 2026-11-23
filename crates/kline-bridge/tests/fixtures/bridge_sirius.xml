@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Hand-written kline-bridge fixture (not derived from any Renault file). An injection ECU at
+     0x7A, KWP 5-baud, KW D0 8F (docs/protocol.md). The `21AA`/`21A9` byte positions are the ones
+     kline-bridge decodes (src/live.rs, from the car captures); names are invented and every
+     value is raw (no scaling). -->
+<Target Name="Bridge fixture injection" xmlns="http://www-diag.renault.com/2002/ECU">
+<Function Name="Injection" Address="122"/>
+<K BaudRate="10400">
+<KWP Multipoint="1">
+<ISO8><KW1 Value="208"/><KW2 Value="143" Timeout="300"/><FirstRequest Delay="20"/></ISO8>
+<KW2_ Delay="25"/>
+</KWP>
+<InterByte Delay="0"/>
+<ReplyToRequest Delay="5"/>
+<RequestToReply Timeout="300"/>
+<TesterPresent Delay="3000"/>
+<OnError Delay="300"/>
+</K>
+<Datas>
+<Data Name="Engine speed"><Bits count="16"><Scaled/></Bits></Data>
+<Data Name="Injection raw"><Bits count="16"><Scaled/></Bits></Data>
+<Data Name="Fuel raw"><Bits count="16"><Scaled/></Bits></Data>
+<Data Name="Battery raw"><Bits><Scaled/></Bits></Data>
+<Data Name="Pressure raw"><Bits><Scaled/></Bits></Data>
+<Data Name="Coolant raw"><Bits><Scaled/></Bits></Data>
+<Data Name="Air raw"><Bits><Scaled/></Bits></Data>
+<Data Name="Vehicle speed"><Bits><Scaled/></Bits></Data>
+<Data Name="Output id"><Bits><Scaled/></Bits></Data>
+<Data Name="Output command"><Bits><Scaled/></Bits></Data>
+<Data Name="Output cycles"><Bits><Scaled/></Bits></Data>
+</Datas>
+<Requests Endian="Big">
+<Request Name="Start Diagnostic Session">
+<Sent><SentBytes>10A0</SentBytes></Sent>
+<Received MinBytes="2"></Received>
+</Request>
+<Request Name="Live AA">
+<Sent><SentBytes>21AA</SentBytes></Sent>
+<Received MinBytes="14">
+<DataItem Name="Engine speed" Ref="1" FirstByte="3"/>
+<DataItem Name="Injection raw" Ref="1" FirstByte="8"/>
+<DataItem Name="Fuel raw" Ref="1" FirstByte="13"/>
+</Received>
+</Request>
+<Request Name="Live A9">
+<Sent><SentBytes>21A9</SentBytes></Sent>
+<Received MinBytes="15">
+<DataItem Name="Engine speed" Ref="1" FirstByte="3"/>
+<DataItem Name="Battery raw" Ref="1" FirstByte="5"/>
+<DataItem Name="Pressure raw" Ref="1" FirstByte="6"/>
+<DataItem Name="Coolant raw" Ref="1" FirstByte="8"/>
+<DataItem Name="Air raw" Ref="1" FirstByte="9"/>
+<DataItem Name="Vehicle speed" Ref="1" FirstByte="12"/>
+</Received>
+</Request>
+<Request Name="Clear faults">
+<Sent><SentBytes>140000</SentBytes></Sent>
+<Received MinBytes="1"></Received>
+</Request>
+<Request Name="Output test">
+<Sent><SentBytes>30940000</SentBytes>
+<DataItem Name="Output id" FirstByte="2"/>
+<DataItem Name="Output command" FirstByte="3"/>
+<DataItem Name="Output cycles" FirstByte="4"/>
+</Sent>
+<Received MinBytes="2"></Received>
+</Request>
+</Requests>
+</Target>

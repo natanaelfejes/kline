@@ -1,0 +1,32 @@
+[package]
+name = "kline-bridge"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Clio Link bridge logic (ESP32-C3 firmware, host-testable): profiles, scheduler, BLE GATT codec, tier gate, lock-when-moving. Sans-IO, no_std + alloc."
+
+[features]
+default = ["std"]
+std = ["kline-core/std", "thiserror/std"]
+# Tier 1 over BLE from the owner's bonded phone (docs/bridge-protocol.md "Approvals"). OFF by
+# default: it pulls kline-core's `approved-routines`, which SAFETY.md rule 2 reserves for the
+# interactive `kline` CLI until the owner extends it to the bridge (open question in
+# docs/bridge-protocol.md). It also needs `std` today ("kline-core changes needed").
+approvals = ["std", "kline-core/approved-routines"]
+# Lock-when-moving over the K line (decision D37): the bridge itself confirms the two exact BMT
+# actuator requests `31 A0 00 01` / `31 A1 00 01` after the owner armed the feature with one
+# approval code per request. OFF by default: it is an automated Tier 1 send and waits for the
+# owner's decision (docs/bridge-protocol.md "Lock-when-moving").
+standing-lock = ["approvals"]
+
+[dependencies]
+kline-core = { path = "../kline-core", default-features = false }
+thiserror = { version = "2.0.21", default-features = false }
+
+[dev-dependencies]
+kline-sim = { path = "../kline-sim" }
+kline-spec = { path = "../kline-spec" }
+kline-core = { path = "../kline-core", features = ["spec"] }
+proptest = "1.12.0"
