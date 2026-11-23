@@ -431,6 +431,10 @@ pub const AIRBAG_FORBIDDEN_WRITES: [(u8, &str); 6] = [
     ),
 ];
 
+/// Airbag date writes (`3B B0` vehicle production date, `3B C0` last after-sales date, 3
+/// bytes each; AB70 / AB80 EcritureDate*): the only Tier 2 writes on the airbag ECU.
+pub const AIRBAG_DATE_WRITES: [u8; 2] = [0xB0, 0xC0];
+
 /// What a payload to the airbag ECU ([`AIRBAG_ADDRESS`], any protocol) is when it is
 /// forbidden there (owner decision 2026-11-23: no airbag fault clear yet, nothing that touches
 /// the firing lines or the crash data), else `None`: the writes of
@@ -1139,6 +1143,13 @@ fn classify_bytes(
             && payload[2] <= BMT_CONFIG_MAX_INDEX
             && (payload[3] <= 1 || payload[2] == BMT_CONFIG_TRF_INDEX))
             .then_some(ConfigWrite),
+        // Tier 2 on the airbag only for the two date writes (`3B B0`/`3B C0` + 3 bytes, AB70 /
+        // AB80 EcritureDate*): configuration 1 `3B D1`, crash sensor signature `3B D4`, fault
+        // detection time `3B D5` and any other identifier are Expert there (command inventory
+        // 2026-11-23 section 3.3); the firing-line and crash-data writes are forbidden.
+        (Kwp, 0x3B) if target.ecu_address == AIRBAG_ADDRESS => {
+            (len == 5 && p1.is_some_and(|b| AIRBAG_DATE_WRITES.contains(&b))).then_some(ConfigWrite)
+        }
         // Tier 2: WriteDataByLocalIdentifier (Sirius 3BD010).
         (Kwp, 0x3B) => (3..=6).contains(&len).then_some(ConfigWrite),
         _ => {

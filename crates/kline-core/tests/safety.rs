@@ -655,7 +655,6 @@ fn airbag_risk_keeps_the_request_warnings_and_prerequisites() {
         &[0x38, 0x10, 0x00],
         &[0x2C, 0xF0],
         &[0x23, 0x00, 0x10],
-        &[0x3B, 0xD5, 0x28],
         &[0x31, 0x00],
         &[0x99],
     ] {
@@ -765,13 +764,29 @@ fn airbag_requests_that_touch_firing_lines_or_crash_data_are_forbidden() {
     ] {
         assert_eq!(tier(&kwp, p), Tier::Read, "{p:02X?}");
     }
-    // Not forbidden there: dates (Tier 2), config 1 (Tier 2), other routines (Expert).
+    // Not forbidden there: the dates (Tier 2, the only airbag writes below Expert), config 1,
+    // crash sensor signature, fault detection time and other identifiers (Expert), other
+    // routines (Expert).
     assert_eq!(
         tier(&kwp, &[0x3B, 0xC0, 0xFF, 0xFF, 0xFF]),
         Tier::ConfigWrite
     );
-    assert_eq!(tier(&kwp, &[0x3B, 0xD1, 0xF0]), Tier::ConfigWrite);
-    assert_eq!(tier_of(&kwp, &[0x31, 0xA0, 0x01]).unwrap(), Tier::Expert);
+    assert_eq!(
+        tier(&kwp, &[0x3B, 0xB0, 0x00, 0x00, 0x00]),
+        Tier::ConfigWrite
+    );
+    for p in [
+        &[0x3B, 0xD1, 0xF0][..],
+        &[0x3B, 0xD4, 0x19],
+        &[0x3B, 0xD5, 0x28],
+        &[0x3B, 0xFF, 0x00],
+        &[0x3B, 0xC0, 0xFF],
+        &[0x31, 0xA0, 0x01],
+    ] {
+        assert_eq!(tier_of(&kwp, p).unwrap(), Tier::Expert, "{p:02X?}");
+    }
+    // Elsewhere 3B D1 F0 stays a Tier 2 write.
+    assert_eq!(tier(&SIRIUS, &[0x3B, 0xD1, 0xF0]), Tier::ConfigWrite);
     // Other ECUs keep their tiers for the same bytes (10 A0 stays a read on the Sirius).
     assert_eq!(tier(&SIRIUS, &[0x10, 0xA0]), Tier::Read);
     assert_eq!(tier(&SIRIUS, &[0x14, 0x00, 0x00]), Tier::Service);
