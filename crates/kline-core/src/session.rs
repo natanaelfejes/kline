@@ -514,6 +514,7 @@ mod tests {
     use super::*;
     use crate::safety::Approval;
     use crate::{KTiming, LinkConfig};
+    use alloc::string::ToString;
 
     /// Security review L8 (mutant M51): an approval whose risk differs from the policy's
     /// current risk for the same bound request is refused. The public API cannot change the

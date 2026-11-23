@@ -564,6 +564,12 @@ impl DefinitionGuard {
         }
     }
 
+    /// The flagged `(fixed sent-byte prefix, request name)` pairs. Lets a binary without the
+    /// definitions (the bridge firmware) carry the same refusals as compiled byte prefixes.
+    pub fn flagged(&self) -> &[(Vec<u8>, alloc::string::String)] {
+        &self.flagged
+    }
+
     /// Add `other`'s refusals: the stronger class (immobilizer over Sirius over generic) and
     /// all its flagged requests. For several candidate definitions of one ECU (security
     /// review L4): the guard of the union only adds refusals.

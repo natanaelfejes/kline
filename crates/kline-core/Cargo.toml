@@ -12,9 +12,11 @@ default = ["std"]
 std = ["thiserror/std"]
 # EcuDef/KLine -> LinkConfig mapping. Pulls kline-spec (std only).
 spec = ["std", "dep:kline-spec"]
-# Tier 1/2 approvals (SAFETY.md rule 2). OFF by default. Only the interactive `kline` CLI may
-# enable it; MCP servers and any --json-only binary must never depend on kline-core with it.
-approved-routines = ["std", "dep:getrandom"]
+# Tier 1/2 approvals (SAFETY.md rule 2). OFF by default. Only the interactive `kline` CLI and
+# the bridge firmware (kline-bridge `approvals`) may enable it; MCP servers and any
+# --json-only binary must never depend on kline-core with it. No `std`: the firmware is no_std
+# and provides the random source through getrandom's custom backend.
+approved-routines = ["dep:getrandom"]
 
 [dependencies]
 thiserror = { version = "2.0.21", default-features = false }
