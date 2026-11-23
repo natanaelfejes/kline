@@ -953,3 +953,122 @@ fn bmt_actuator_a4_a5_are_expert() {
         assert_eq!(tier_of(&BMT, &p).unwrap(), Tier::Expert, "{p:02X?}");
     }
 }
+
+const ABS: Target = Target {
+    protocol: Protocol::Iso8,
+    ecu_address: 0x01,
+};
+
+/// Bosch 5.3 ABS (ISO8 at 0x01, KW DC 83): `51` identification and `58` fault memory are the
+/// only Tier 0 reads; `45` (fault memory erase) is Tier 1; the RAM download `41` and the
+/// routine run `71` are Expert with brake-system warnings; nothing is forbidden.
+#[test]
+fn bosch_abs_tiers() {
+    assert_eq!(tier(&ABS, &[0x51]), Tier::Read);
+    assert_eq!(tier(&ABS, &[0x58]), Tier::Read);
+    assert_eq!(check(&ABS, &[0x58]).unwrap().payload(), &[0x58]);
+    assert_eq!(tier(&ABS, &[0x45]), Tier::Service);
+    // Extra bytes are not the documented read or clear.
+    for p in [&[0x51, 0x00][..], &[0x58, 0x01], &[0x45, 0x00]] {
+        assert!(reason(&ABS, p).is_some(), "{p:02X?}");
+        assert_eq!(tier_of(&ABS, p).unwrap(), Tier::Expert, "{p:02X?}");
+    }
+    // The Safir reads are not reads on the ABS.
+    for p in [&[0x21][..], &[0x33, 0x50]] {
+        assert_eq!(
+            reason(&ABS, p),
+            Some(DenyReason::ServiceNotAllowed { service: p[0] }),
+            "{p:02X?}"
+        );
+        assert_eq!(tier_of(&ABS, p).unwrap(), Tier::Expert);
+    }
+    // 51/58 elsewhere (Safir at 7A, KWP at 01) stay undocumented.
+    let kwp01 = Target {
+        protocol: Protocol::Kwp,
+        ecu_address: 0x01,
+    };
+    for t in [SAFIR, kwp01] {
+        assert_eq!(tier_of(&t, &[0x51]).unwrap(), Tier::Expert);
+        assert_eq!(tier_of(&t, &[0x45]).unwrap(), Tier::Expert);
+    }
+    // Safir reads unchanged at 7A.
+    assert_eq!(tier(&SAFIR, &[0x21]), Tier::Read);
+    // Link frames stay reserved.
+    assert_eq!(
+        reason(&ABS, &[0x36]),
+        Some(DenyReason::ProtocolReserved { service: 0x36 })
+    );
+    // Download and routine run: Expert, never forbidden.
+    let dl = [0x41, 0x04, 0x00, 0x16, 0x03, 0x00, 0x15, 0xA0];
+    let run = [
+        0x71, 0xFF, 0x22, 0xFF, 0x22, 0x00, 0x00, 0xFF, 0x22, 0xFF, 0x22,
+    ];
+    for p in [&dl[..], &run, &[0x71]] {
+        assert_eq!(tier_of(&ABS, p).unwrap(), Tier::Expert, "{p:02X?}");
+    }
+}
+
+#[test]
+fn bosch_abs_risk_texts() {
+    let read = assess(&ABS, &[0x58]).unwrap();
+    assert_eq!(read.tier, Tier::Read);
+    assert!(read.safety_system.is_none());
+    let clear = assess(&ABS, &[0x45]).unwrap();
+    assert_eq!(clear.tier, Tier::Service);
+    assert!(clear.safety_system.unwrap().contains("ABS"));
+    assert!(!clear.reversible);
+    let w: Vec<Warning> = clear.warnings.iter().copied().collect();
+    assert_eq!(w, [Warning::SafetySystem, Warning::ErasesFaultMemory]);
+    let dl = assess(&ABS, &[0x41, 0x04, 0x00]).unwrap();
+    let w: Vec<Warning> = dl.warnings.iter().copied().collect();
+    assert_eq!(
+        w,
+        [
+            Warning::SafetySystem,
+            Warning::MayBrickEcu,
+            Warning::UnknownEffect
+        ]
+    );
+    assert!(dl.what_it_changes.contains("RAM"));
+    // 71 families by length: bare run, 11-byte valve/pump frames, short parameter frames.
+    let warns =
+        |p: &[u8]| -> Vec<Warning> { assess(&ABS, p).unwrap().warnings.iter().copied().collect() };
+    assert_eq!(
+        warns(&[0x71]),
+        [Warning::SafetySystem, Warning::UnknownEffect]
+    );
+    let pump_on = [
+        0x71, 0xFF, 0x22, 0xFF, 0x22, 0x00, 0x00, 0xFF, 0x22, 0xFF, 0x22,
+    ];
+    assert_eq!(
+        warns(&pump_on),
+        [
+            Warning::SafetySystem,
+            Warning::MovesActuator,
+            Warning::UnknownEffect
+        ]
+    );
+    let run = assess(&ABS, &pump_on).unwrap();
+    assert!(run.what_can_go_wrong.contains("valve energized"));
+    assert!(run
+        .prerequisites
+        .iter()
+        .any(|p| p.contains("41 download sent in this same session")));
+    for p in [
+        &[0x71, 0x00][..],
+        &[0x71, 0x99, 0x99, 0x99],
+        &[0x71, 0x00, 0x00, 0x01, 0x00],
+    ] {
+        assert_eq!(
+            warns(p),
+            [
+                Warning::SafetySystem,
+                Warning::EepromWrite,
+                Warning::UnknownEffect
+            ],
+            "{p:02X?}"
+        );
+    }
+    // Every risk fits the static lists (brake prerequisites appended).
+    assert!(run.prerequisites.len() <= 8);
+}

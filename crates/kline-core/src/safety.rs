@@ -162,6 +162,29 @@ pub const RENAULT_DIAG_SESSION: u8 = 0xA0;
 /// Safir "salve" reads `33 xx` present in Safir_1.xml and Safir_2.xml (there is no `33 53`).
 pub const SAFIR_SALVES: [u8; 4] = [0x50, 0x51, 0x52, 0x54];
 
+/// ABS unit K-line address in the X65 addressing (`vehicles/x65/addressing.xml`: Function
+/// Address="1" "ABS-VDC", protocols ISO8 and KWP fast init). On the car (2026-11-23) a 5-baud
+/// init of 0x01 answered `55 DC 83`, the KW1/KW2 (220/131) of DDT2000's Bosch 5.3 ISO8
+/// definitions (X24_ABS_Bosch5.3, J64_Bosch5.3_4X4_V2).
+pub const ABS_ADDRESS: u8 = 0x01;
+/// Bosch 5.3 ISO8 "MES_IDENTIF": identification (ROM service, in every Bosch 5.3 definition).
+pub const BOSCH_ABS_IDENT: u8 = 0x51;
+/// Bosch 5.3 ISO8 "MES_DIAG": the three fault memory slots (code, stop switch / ABS control
+/// state, reference speed, voltage, counter).
+pub const BOSCH_ABS_FAULTS: u8 = 0x58;
+/// Bosch 5.3 ISO8 "MES_RAZ": erase the fault memory.
+pub const BOSCH_ABS_CLEAR: u8 = 0x45;
+/// Bosch 5.3 ISO8 "DOWNLOAD_*" / "DL_*": download a routine (machine code) into the ECU RAM.
+pub const BOSCH_ABS_DOWNLOAD: u8 = 0x41;
+/// Bosch 5.3 ISO8 "MES_*" with `71 ..`: run the routine downloaded last, with parameters.
+pub const BOSCH_ABS_RUN: u8 = 0x71;
+
+/// Whether the session's target is the Bosch 5.3 ABS (ISO8 at [`ABS_ADDRESS`]). The policy
+/// decides on the init target, never on the definition alone (SAFETY.md rule 2).
+pub fn is_bosch_abs(target: &Target) -> bool {
+    target.protocol == Protocol::Iso8 && target.ecu_address == ABS_ADDRESS
+}
+
 /// Protocol family the payload is sent with; the allowlists differ.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
@@ -314,8 +337,8 @@ pub enum Warning {
     /// Changes the remote-control type (BMT config TRF: RF or infrared); a remote of the other
     /// type stops working.
     ChangesRemoteType,
-    /// Airbag / restraint ECU (safety system): a wrong write or test can disable the airbags
-    /// or pretensioners or light the airbag lamp.
+    /// Safety system ECU (airbag/restraint 0x2C, ABS/brakes 0x01): a wrong write or test can
+    /// disable the airbags, pretensioners or ABS/EBD, or light the warning lamp.
     SafetySystem,
 }
 
@@ -695,6 +718,19 @@ fn classify_bytes(
         (Kwp, 0x1A | 0x21) => (len == 2).then_some(Read),
         // ReadStatusOfDTC / ReadDTCByStatus.
         (Kwp, 0x17 | 0x18) => (2..=4).contains(&len).then_some(Read),
+        // Bosch 5.3 ABS (ISO8 at 0x01): identification `51` and fault memory `58`, exactly one
+        // byte (MES_IDENTIF, MES_DIAG). `45` (MES_RAZ) erases the fault memory: Tier 1.
+        (Iso8, BOSCH_ABS_IDENT | BOSCH_ABS_FAULTS) if is_bosch_abs(target) => {
+            (len == 1).then_some(Read)
+        }
+        (Iso8, BOSCH_ABS_CLEAR) if is_bosch_abs(target) => (len == 1).then_some(Service),
+        // The Safir reads mean nothing documented on the ABS: Expert there.
+        (Iso8, 0x21 | 0x33) if is_bosch_abs(target) => {
+            return Err(Denied::new(
+                payload,
+                DenyReason::ServiceNotAllowed { service },
+            ))
+        }
         // Safir generic request: the definitions only contain bare `21`.
         (Iso8, 0x21) => (len == 1).then_some(Read),
         // Safir salves present in the definitions.
@@ -783,15 +819,21 @@ pub fn assess_in(
     payload: &[u8],
 ) -> Result<RiskInfo, Denied> {
     let tier = tier_of_in(guard, target, payload)?;
-    let info = risk_info(
-        is_immobilizer_ecu(guard, target),
-        is_sirius_ecu(guard, target),
-        payload,
-        tier,
-    );
+    let info = if is_bosch_abs(target) {
+        bosch_abs_risk(payload, tier)
+    } else {
+        risk_info(
+            is_immobilizer_ecu(guard, target),
+            is_sirius_ecu(guard, target),
+            payload,
+            tier,
+        )
+    };
     Ok(
         if target.ecu_address == AIRBAG_ADDRESS && tier != Tier::Read {
             airbag_risk(info)
+        } else if target.ecu_address == ABS_ADDRESS && tier != Tier::Read {
+            brake_risk(info)
         } else {
             info
         },
@@ -823,6 +865,99 @@ fn airbag_risk(info: RiskInfo) -> RiskInfo {
         prerequisites,
         warnings: info.warnings.with_first(Warning::SafetySystem),
         ..info
+    }
+}
+
+/// The request's own risk plus the brake-system text and `SafetySystem` (first), like
+/// [`airbag_risk`]: every non-read on the ABS unit is a change to a safety system.
+fn brake_risk(info: RiskInfo) -> RiskInfo {
+    const WHAT: &str = "ABS / BRAKE ECU (safety system): a wrong routine, valve test or coding can disable ABS/EBD (brake force distribution), light the ABS lamp, or open brake valves while the pedal is pressed";
+    const PRE: [&str; 3] = [
+        "vehicle stationary, engine off, ignition on, handbrake on",
+        "read and save 51 (identification) and 58 (fault memory) first",
+        "afterwards: ignition off/on, ABS lamp must go out, firm pedal, test the brakes at walking speed before driving",
+    ];
+    let mut prerequisites = info.prerequisites;
+    for p in PRE {
+        prerequisites.push(p);
+    }
+    RiskInfo {
+        safety_system: Some(WHAT),
+        reversible: false,
+        prerequisites,
+        warnings: info.warnings.with_first(Warning::SafetySystem),
+        ..info
+    }
+}
+
+/// Risk of a request to the Bosch 5.3 ABS (ISO8 at 0x01). The service bytes come from DDT2000's
+/// Bosch 5.3 definitions and a disassembly of their download blocks (80C196 code;
+/// docs/protocol.md "Bosch 5.3 ABS"): `41` downloads a routine into the ECU RAM, `71` runs the
+/// routine downloaded last. What a `71` does depends on that download, which the bytes cannot
+/// show, so every `71` is Expert; its length tells which family of DDT2000 frames it belongs to.
+fn bosch_abs_risk(payload: &[u8], tier: Tier) -> RiskInfo {
+    let r = |what_it_changes,
+             what_can_go_wrong,
+             reversible,
+             prerequisites: &[&'static str],
+             warnings: &[Warning]| RiskInfo {
+        tier,
+        what_it_changes,
+        what_can_go_wrong,
+        safety_system: None,
+        reversible,
+        prerequisites: Prerequisites::from_slice(prerequisites),
+        warnings: Warnings::from_slice(warnings),
+    };
+    const AFTER_DOWNLOAD: &str = "the matching 41 download sent in this same session (kline exec sends one request per session: NOT supported yet)";
+    match (tier, payload) {
+        (Tier::Read, _) => r("nothing (read)", "none known", true, NONE, &[]),
+        (Tier::Service, [BOSCH_ABS_CLEAR]) => r(
+            "erases the ABS fault memory (the three slots read by 58)",
+            "fault evidence is lost; a fault still present is stored again and the ABS lamp stays on",
+            false,
+            &["read and save 58 first"],
+            &[Warning::ErasesFaultMemory],
+        ),
+        (Tier::Expert, [BOSCH_ABS_DOWNLOAD, ..]) => r(
+            "downloads a routine (80C196 machine code) into the ABS ECU RAM and lets the ECU run it (DDT2000 DOWNLOAD_* / DL_*); RAM only, gone at the next ignition off",
+            "the routines come from the X24 (Master) and J64 (Scenic RX4) Bosch 5.3 definitions, not from this car (the X65 file is empty): they call ROM entry points 0x2089/0x208C/0x2092 and read ROM pointers 0x209A..0x20B2 that this ABS software (51: 02 49 12) is NOT VERIFIED to have; a mismatch can crash or reset the ABS ECU, light the ABS lamp, write RAM or EEPROM at a wrong address (FAB, SAV, ECR_DEV and ReadWriteProcessByte write EEPROM), or make a later 71 do something else than its name says",
+            false,
+            &["51 identification read and saved first", "vehicle stationary, engine off, battery charger connected"],
+            &[Warning::MayBrickEcu, Warning::UnknownEffect],
+        ),
+        (Tier::Expert, [BOSCH_ABS_RUN]) => r(
+            "runs the routine downloaded last (DDT2000 MES_INFO_SYS, MES_LEC_DEV, MES_CONTR_STAT, InfosytemeASR): a read after the INFO_SYS or LEC_DEV download, but CONTR_STAT changes an ECU state flag and other downloads act",
+            "without its download the ECU runs whatever is in its download RAM; after an actuator, bleed or write download it acts instead of reading",
+            false,
+            &[AFTER_DOWNLOAD],
+            &[Warning::UnknownEffect],
+        ),
+        (Tier::Expert, [BOSCH_ABS_RUN, rest @ ..]) if rest.len() == 10 => r(
+            "valve / pump command for the routine downloaded last (DDT2000 MES_PURGE_*, MES_POMPE_*, MES_MONTE_*, MES_CHUTE_*, MES_REMPLISSAGE_*): FF bytes energize inlet / outlet valves or run the return pump",
+            "brake pressure can drop or rise at a wheel, brake fluid or air can be pushed into the wrong circuit; a frame without its matching OFF / FIN frame can leave a valve energized or the pump running until the routine stops or ignition off",
+            false,
+            &[
+                AFTER_DOWNLOAD,
+                "brake fluid reservoir full; for bleed steps a second person on the bleed screw and the pedal, as the procedure says",
+                "the matching OFF / FIN frame ready to send next",
+            ],
+            &[Warning::MovesActuator, Warning::UnknownEffect],
+        ),
+        (Tier::Expert, [BOSCH_ABS_RUN, ..]) => r(
+            "parameter frame for the routine downloaded last (DDT2000 MES_ECR_DEV, MES_ECR_VARIANTE*, MES_ECR_PROCESS_BYTE, MES_DAT_FAB / MES_DAT_SAV write EEPROM; MES_LEC_PROCESS_BYTE / MES_LEC_VARIANTE* read)",
+            "EEPROM coding can be overwritten: tyre circumference (wrong wheel speeds, ABS lamp), variant coding (ABS/ASR layout, fault 39 'variant coding absent or wrong', ABS disabled), factory or after-sales dates",
+            false,
+            &[AFTER_DOWNLOAD, "the current value read and saved first"],
+            &[Warning::EepromWrite, Warning::UnknownEffect],
+        ),
+        _ => r(
+            "unknown effect: undocumented Bosch 5.3 service",
+            "unknown: may write EEPROM, move valves or the pump, erase data or drop communication",
+            false,
+            NONE,
+            &[Warning::UnknownEffect],
+        ),
     }
 }
 
