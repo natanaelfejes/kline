@@ -9,6 +9,9 @@ use crate::journal::WriteKind;
 /// anything after it is treated as an immobilizer write).
 pub const BMT_ADDRESS: u8 = 0x26;
 
+/// Bosch 5.3 ABS address (ISO8); its reads are `51` and `58`, nothing else.
+pub const BOSCH_ABS_ADDRESS: u8 = 0x01;
+
 /// `None` for a Tier 0 read / protocol frame (SAFETY.md rule 2), else why it is dangerous.
 pub fn classify(iso8: bool, ecu_address: u8, payload: &[u8]) -> Option<WriteKind> {
     let Some(&sid) = payload.first() else {
@@ -16,6 +19,16 @@ pub fn classify(iso8: bool, ecu_address: u8, payload: &[u8]) -> Option<WriteKind
     };
     let len = payload.len();
     let p1 = payload.get(1).copied();
+    if iso8 && ecu_address == BOSCH_ABS_ADDRESS {
+        return match sid {
+            0x51 | 0x58 | 0x36 | 0x3F if len == 1 => None,
+            0x45 => Some(WriteKind::ClearDtc),
+            // RAM download (machine code) and its runs: valves, pump, EEPROM.
+            0x41 => Some(WriteKind::Programming),
+            0x71 => Some(WriteKind::Routine),
+            other => Some(dangerous_sid(other)),
+        };
+    }
     if iso8 {
         return match sid {
             0x21 if len == 1 => None,
@@ -55,6 +68,26 @@ fn dangerous_sid(sid: u8) -> WriteKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bosch_abs_reads_are_51_and_58_only() {
+        for p in [&[0x51][..], &[0x58], &[0x36], &[0x3F]] {
+            assert_eq!(classify(true, 0x01, p), None, "{p:02X?}");
+        }
+        assert_eq!(classify(true, 0x01, &[0x45]), Some(WriteKind::ClearDtc));
+        assert_eq!(classify(true, 0x01, &[0x21]), Some(WriteKind::Unknown));
+        assert_eq!(
+            classify(true, 0x01, &[0x58, 0x00]),
+            Some(WriteKind::Unknown)
+        );
+        assert_eq!(
+            classify(true, 0x01, &[0x41, 0x04, 0x00]),
+            Some(WriteKind::Programming)
+        );
+        assert_eq!(classify(true, 0x01, &[0x71]), Some(WriteKind::Routine));
+        // Safir reads at 0x7A unchanged.
+        assert_eq!(classify(true, 0x7A, &[0x21]), None);
+    }
 
     #[test]
     fn reads_and_writes() {

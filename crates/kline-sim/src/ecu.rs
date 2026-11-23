@@ -6,7 +6,7 @@ use crate::bus::{Out, Responder, Wake};
 use crate::classify::classify;
 use crate::frame::{encode_reply, Assembler, Feed, Parsed, WireFormat};
 use crate::journal::{Journal, ViolationKind, WriteRecord};
-use crate::scenario::{positive_response, request_matches, Scenario};
+use crate::scenario::{positive_response_with, request_matches, Scenario};
 use crate::timing::{EcuTiming, Tolerance, BYTE_MS};
 use crate::SimError;
 
@@ -59,11 +59,30 @@ pub struct EcuProfile {
     pub fast_init_keywords: (u8, u8),
     /// Reply framing: short lengths in the KWP format byte.
     pub length_in_format: bool,
-    /// Payload the ECU answers ISO8 TesterPresent `36` with (None: silent; unknown on the car).
+    /// Payload the ECU answers ISO8 TesterPresent `36` with (None: silent). The Bosch 5.3 ABS
+    /// answers `36` (car capture 2026-11-23); Safir is unknown.
     pub iso8_tester_present_reply: Option<Vec<u8>>,
+    /// Payload the ECU answers ISO8 Stop `3F` with before it sleeps (None: silent). The
+    /// Bosch 5.3 ABS answers `3F` (car capture 2026-11-23); Safir is unknown.
+    pub iso8_stop_reply: Option<Vec<u8>>,
+    /// Added to the request SID to make the positive response SID: 0x40 (KWP, assumed for
+    /// Safir), 0 for the Bosch 5.3 ABS (`51` -> `51 ..`, car capture 2026-11-23).
+    pub positive_sid_offset: u8,
     pub timing: EcuTiming,
     pub tolerance: Tolerance,
 }
+
+/// Positive response SID = request SID + 0x40. ISO 14230-3.
+pub const POSITIVE_SID_OFFSET: u8 = 0x40;
+/// Bosch 5.3 ABS address in the X65 addressing.
+pub const BOSCH_ABS_ADDRESS: u8 = 0x01;
+/// Bosch 5.3 ABS key bytes: car 2026-11-23 and X24_ABS_Bosch5.3.xml KW1 220 / KW2 131.
+pub const BOSCH_ABS_KEYWORDS: (u8, u8) = (0xDC, 0x83);
+/// Strict P3min of the ABS profile: ISO 9141-2 P3min (55 ms). Not the X24 definition's
+/// `ReplyToRequest@Delay` (300): that is the tester's own pause, and on the car the ABS
+/// accepted the first request 200 ms after its key bytes (FirstRequest 100 + flush), so a
+/// 300 ms ECU-side minimum would be wrong.
+pub const BOSCH_ABS_P3_MIN_MS: u64 = 55;
 
 /// `ReplyToRequest@Delay` of the car's ECUs (XML <K> of SIRIUS32 and BMT_X65), used as the
 /// strict P3min of the named profiles.
@@ -83,6 +102,8 @@ impl EcuProfile {
             // KW1 0xD0 keeps the length in the format byte (docs/protocol.md "Framing").
             length_in_format: true,
             iso8_tester_present_reply: None,
+            iso8_stop_reply: None,
+            positive_sid_offset: POSITIVE_SID_OFFSET,
             timing: EcuTiming::default(),
             tolerance: Tolerance::strict(CAR_REPLY_TO_REQUEST_MS),
         }
@@ -109,9 +130,36 @@ impl EcuProfile {
             fast_init_keywords: (0xC2, 0x85),
             length_in_format: false,
             iso8_tester_present_reply: None,
+            iso8_stop_reply: None,
+            positive_sid_offset: POSITIVE_SID_OFFSET,
             timing: EcuTiming::default(),
             tolerance: Tolerance::strict(CAR_REPLY_TO_REQUEST_MS),
         }
+    }
+
+    /// Bosch 5.3 ABS at 0x01 (this car): ISO8, `55 DC 83`, no handshake; answers `36` with
+    /// `36`, `3F` with `3F` (then sleeps) and a request with its own SID (`51` -> `51 ..`).
+    /// All from the car capture of 2026-11-23 (docs/protocol.md "Bosch 5.3 ABS"). P3min:
+    /// [`BOSCH_ABS_P3_MIN_MS`].
+    pub fn bosch_abs53() -> EcuProfile {
+        EcuProfile {
+            name: "Bosch ABS 5.3".into(),
+            address: BOSCH_ABS_ADDRESS,
+            keywords: BOSCH_ABS_KEYWORDS,
+            fast_init_keywords: BOSCH_ABS_KEYWORDS,
+            iso8_tester_present_reply: Some(vec![0x36]),
+            iso8_stop_reply: Some(vec![0x3F]),
+            positive_sid_offset: 0,
+            tolerance: Tolerance::strict(BOSCH_ABS_P3_MIN_MS),
+            ..EcuProfile::safir_iso8()
+        }
+    }
+
+    /// Whether this is the Bosch 5.3 ABS behaviour (ISO8 at 0x01 with key bytes DC 83).
+    pub fn is_bosch_abs(&self) -> bool {
+        self.protocol == EcuProtocol::Iso8
+            && self.address == BOSCH_ABS_ADDRESS
+            && self.keywords == BOSCH_ABS_KEYWORDS
     }
 
     /// Profile from a definition's `<Function Address>` and `<K>` (read here, not through
@@ -131,6 +179,9 @@ impl EcuProfile {
         };
         let keywords = k.key_words().ok_or(SimError::NoKeywords)?;
         let p3 = k.reply_to_request_delay.map_or(0, u64::from);
+        let bosch_abs = protocol == EcuProtocol::Iso8
+            && address == BOSCH_ABS_ADDRESS
+            && keywords == BOSCH_ABS_KEYWORDS;
         Ok(EcuProfile {
             name: def.name.clone(),
             address,
@@ -144,9 +195,11 @@ impl EcuProfile {
             accept_fast_init: protocol == EcuProtocol::KwpFast,
             fast_init_keywords: keywords,
             length_in_format: keywords.0 == 0xD0 || keywords.0 & 1 != 0,
-            iso8_tester_present_reply: None,
+            iso8_tester_present_reply: bosch_abs.then(|| vec![0x36]),
+            iso8_stop_reply: bosch_abs.then(|| vec![0x3F]),
+            positive_sid_offset: if bosch_abs { 0 } else { POSITIVE_SID_OFFSET },
             timing: EcuTiming::default(),
-            tolerance: Tolerance::strict(p3),
+            tolerance: Tolerance::strict(if bosch_abs { BOSCH_ABS_P3_MIN_MS } else { p3 }),
         })
     }
 
@@ -403,11 +456,18 @@ impl SpecEcu {
             (false, [0x82]) => return (Some(vec![0xC2]), true),
             (false, [0x3E, ..]) => return (Some(vec![0x7E]), false),
             (true, [0x36]) => return (self.profile.iso8_tester_present_reply.clone(), false),
-            (true, [0x3F]) => return (None, true),
+            (true, [0x3F]) => return (self.profile.iso8_stop_reply.clone(), true),
             _ => {}
         }
         if !matches.is_empty() {
-            return match positive_response(&self.def, &matches, payload, &self.scenario) {
+            let offset = self.profile.positive_sid_offset;
+            return match positive_response_with(
+                &self.def,
+                &matches,
+                payload,
+                &self.scenario,
+                offset,
+            ) {
                 Ok(r) => (Some(r), false),
                 Err(e) => {
                     self.journal

@@ -1,0 +1,15 @@
+{"header":{"tool":"kline","version":"0.1.0","commit":"74b7fe4-dirty","command":"exec","label":"X24_ABS_Bosch5.3","unix_ms":1795436524750}}
+{"t_ms":301,"dir":"tx","kind":"five_baud","hex":"01","unix_ms":1795436525057}
+{"t_ms":2568,"dir":"rx","hex":"55DC83","unix_ms":1795436527324}
+{"t_ms":2775,"dir":"tx","hex":"023638","unix_ms":1795436527549}
+{"t_ms":2807,"dir":"rx","hex":"023638","unix_ms":1795436527563}
+{"t_ms":2839,"dir":"rx","hex":"02","unix_ms":1795436527595}
+{"t_ms":2839,"dir":"rx","hex":"3638","unix_ms":1795436527595}
+{"t_ms":8119,"dir":"tx","hex":"02585A","unix_ms":1795436532893}
+{"t_ms":8148,"dir":"rx","hex":"02585A","unix_ms":1795436532904}
+{"t_ms":8196,"dir":"rx","hex":"11","unix_ms":1795436532952}
+{"t_ms":8212,"dir":"rx","hex":"58080010BF010000000000000000000041","unix_ms":1795436532968}
+{"t_ms":8513,"dir":"tx","hex":"023F41","unix_ms":1795436533286}
+{"t_ms":8530,"dir":"rx","hex":"023F41","unix_ms":1795436533286}
+{"t_ms":8577,"dir":"rx","hex":"02","unix_ms":1795436533334}
+{"t_ms":8577,"dir":"rx","hex":"3F41","unix_ms":1795436533334}

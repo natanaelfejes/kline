@@ -84,8 +84,22 @@ pub fn positive_response(
     sent: &[u8],
     scenario: &Scenario,
 ) -> Result<Vec<u8>, SimError> {
+    positive_response_with(ecu, reqs, sent, scenario, 0x40)
+}
+
+/// [`positive_response`] with the response SID `sent[0] + sid_offset` (0 for the Bosch 5.3
+/// ABS, which answers `51` with `51 ..`: car capture 2026-11-23).
+pub fn positive_response_with(
+    ecu: &EcuDef,
+    reqs: &[&Request],
+    sent: &[u8],
+    scenario: &Scenario,
+    sid_offset: u8,
+) -> Result<Vec<u8>, SimError> {
     let sid = *sent.first().ok_or(SimError::EmptyRequest)?;
-    let rsid = sid.checked_add(0x40).ok_or(SimError::NoPositiveSid(sid))?;
+    let rsid = sid
+        .checked_add(sid_offset)
+        .ok_or(SimError::NoPositiveSid(sid))?;
     let mut len = 1;
     let mut echo_end = sent.len();
     for r in reqs {
