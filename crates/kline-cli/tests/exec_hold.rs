@@ -320,6 +320,11 @@ fn a_lost_reply_is_in_the_saved_output_with_its_exit_code() {
     assert!(out.contains("done (exit 13)"), "{out}");
 }
 
+/// The printed command with single shell quotes removed, so a quoted Windows path compares equal.
+fn unquoted(s: &str) -> String {
+    s.replace('\'', "")
+}
+
 #[test]
 fn risk_prints_the_exact_exec_command_with_hold_and_watch() {
     let x = xml("bmt_cli.xml");
@@ -337,8 +342,9 @@ fn risk_prints_the_exact_exec_command_with_hold_and_watch() {
         ],
     );
     assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    // Paths with backslashes or a drive colon (Windows) are shell-quoted in the printed command.
     let want = format!("exec --xml {x} 31C7000000 --hold 30 --watch 21A3");
-    assert!(r.stdout.contains(&want), "{want}\n{}", r.stdout);
+    assert!(unquoted(&r.stdout).contains(&want), "{want}\n{}", r.stdout);
     assert!(!r.opened);
     j.assert_no_writes();
     // JSON carries it too.
@@ -359,14 +365,13 @@ fn risk_prints_the_exact_exec_command_with_hold_and_watch() {
     let e = &r.event("risk")[0];
     let c = e["command"].as_str().unwrap_or_default();
     assert!(
-        c.ends_with(&format!("exec --xml {x} 31C8000000 --hold 30 --watch 21A3")),
+        unquoted(c).ends_with(&format!("exec --xml {x} 31C8000000 --hold 30 --watch 21A3")),
         "{e}"
     );
     // Remote learning without --hold: the suggested command holds and watches.
     let (r, _) = run(bmt_ecu(), &["risk", "--xml", &x, "31C7000000"]);
     assert!(
-        r.stdout
-            .contains(&format!("exec --xml {x} 31C7000000 --hold 30 --watch 21A3")),
+        unquoted(&r.stdout).contains(&format!("exec --xml {x} 31C7000000 --hold 30 --watch 21A3")),
         "{}",
         r.stdout
     );
