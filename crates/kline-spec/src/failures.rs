@@ -26,8 +26,9 @@ pub const DDT2000_CLEAR_PREFIX: &str = "ClearDiagnosticInformation.";
 pub enum ClearSource {
     /// A definition request DDT2000 would also pick by name.
     NamedRequest { name: String },
-    /// The definition's own clear (first request whose SentBytes start with `14`), which
-    /// DDT2000's global clear does not look for. Ours.
+    /// The definition's own clear (first request whose SentBytes start with `14`; for an ISO8
+    /// definition without one, a one-byte request named `RAZ`, "remise a zero", e.g. the
+    /// Bosch 5.3 ABS `MES_RAZ` = `45`), which DDT2000's global clear does not look for. Ours.
     DefinitionRequest { name: String },
     /// DDT2000's built-in `14 FF 00`.
     Ddt2000Fallback,
@@ -136,6 +137,24 @@ impl EcuDef {
             })
     }
 
+    /// ISO8 only: the first one-byte request with a name token `RAZ` (Bosch 5.3 ABS
+    /// `MES_RAZ` = `45`, X24_ABS_Bosch5.3.xml and J64_Bosch5.3_4X4_V2.xml).
+    fn iso8_raz_request(&self) -> Option<&Request> {
+        let iso8 = self
+            .k
+            .as_ref()
+            .is_some_and(|k| k.protocol() == crate::model::KProtocol::Iso8);
+        if !iso8 {
+            return None;
+        }
+        self.requests.iter().find(|r| {
+            r.sent_bytes.0.len() == 1
+                && r.name
+                    .split(|c: char| !c.is_ascii_alphanumeric())
+                    .any(|t| t.eq_ignore_ascii_case("RAZ"))
+        })
+    }
+
     /// The clear request choice. Sending it is Tier 1 (kline-core) whichever is chosen.
     pub fn clear_plan(&self) -> ClearPlan {
         let named = self.ddt2000_named_clear().map(|r| ClearChoice {
@@ -152,6 +171,7 @@ impl EcuDef {
             .requests
             .iter()
             .find(|r| r.sent_bytes.0.first() == Some(&0x14))
+            .or_else(|| self.iso8_raz_request())
             .map(|r| ClearChoice {
                 payload: r.sent_bytes.0.clone(),
                 source: ClearSource::DefinitionRequest {
