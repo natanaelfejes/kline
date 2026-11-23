@@ -175,6 +175,7 @@ fn approval_is_bound_to_the_exact_bytes() {
     let bmt = kline_core::safety::Target {
         protocol: kline_core::safety::Protocol::Kwp,
         ecu_address: 0x26,
+        keywords: None,
     };
     assert_eq!(assess(&bmt, &window).unwrap(), assess(&bmt, &lock).unwrap());
     let a = approve(&mut s, &window);

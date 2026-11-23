@@ -251,6 +251,7 @@ mod tests {
         let to = |protocol, ecu_address| Target {
             protocol,
             ecu_address,
+            keywords: None,
         };
         let p = |t| Permit::new(&[0x21, 0xA0], t, Tier::Read);
         for (framing, target) in [

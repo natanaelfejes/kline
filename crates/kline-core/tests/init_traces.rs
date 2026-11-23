@@ -110,7 +110,8 @@ fn assert_kwp_outcome(
         o.target(),
         Target {
             protocol: Protocol::Kwp,
-            ecu_address: ecu
+            ecu_address: ecu,
+            keywords: Some((0xD0, 0x8F)),
         }
     );
     assert_eq!(o.config().ecu_address, ecu);
@@ -230,7 +231,8 @@ fn safir_iso8_init_has_no_handshake() {
         o.target(),
         Target {
             protocol: Protocol::Iso8,
-            ecu_address: 0x7A
+            ecu_address: 0x7A,
+            keywords: Some((0xC2, 0x85)),
         }
     );
 }
@@ -443,7 +445,8 @@ fn fast_init_sirius32_fallback() {
         o.target(),
         Target {
             protocol: Protocol::Kwp,
-            ecu_address: 0x7A
+            ecu_address: 0x7A,
+            keywords: Some((0xD0, 0x8F)),
         }
     );
 }

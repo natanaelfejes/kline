@@ -79,6 +79,7 @@ mod with_spec {
         Target {
             protocol: Protocol::Kwp,
             ecu_address: addr,
+            keywords: None,
         }
     }
 
@@ -134,6 +135,7 @@ mod list_texts {
         let t = Target {
             protocol: Protocol::Kwp,
             ecu_address: 0x51,
+            keywords: None,
         };
         kline_core::spec::immobilizer_named_requests(&def, &t, p)
     }
@@ -222,6 +224,7 @@ mod prefixes {
         Target {
             protocol: Protocol::Kwp,
             ecu_address: addr,
+            keywords: None,
         }
     }
 

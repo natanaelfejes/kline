@@ -179,10 +179,18 @@ pub const BOSCH_ABS_DOWNLOAD: u8 = 0x41;
 /// Bosch 5.3 ISO8 "MES_*" with `71 ..`: run the routine downloaded last, with parameters.
 pub const BOSCH_ABS_RUN: u8 = 0x71;
 
-/// Whether the session's target is the Bosch 5.3 ABS (ISO8 at [`ABS_ADDRESS`]). The policy
-/// decides on the init target, never on the definition alone (SAFETY.md rule 2).
+/// Key bytes (KW1, KW2) of the Bosch 5.3 ABS: `55 DC 83` on the car (2026-11-23), KW1=220 /
+/// KW2=131 in X24_ABS_Bosch5.3 and J64_Bosch5.3_4X4_V2.
+pub const BOSCH_ABS_KEYWORDS: (u8, u8) = (0xDC, 0x83);
+
+/// Whether the session's target is the Bosch 5.3 ABS: ISO8 at [`ABS_ADDRESS`] that answered
+/// the key bytes [`BOSCH_ABS_KEYWORDS`]. Protocol and address alone are not enough (another
+/// ISO8 unit at 0x01 keeps the generic rules). The policy decides on the init target, never on
+/// the definition alone (SAFETY.md rule 2).
 pub fn is_bosch_abs(target: &Target) -> bool {
-    target.protocol == Protocol::Iso8 && target.ecu_address == ABS_ADDRESS
+    target.protocol == Protocol::Iso8
+        && target.ecu_address == ABS_ADDRESS
+        && target.keywords == Some(BOSCH_ABS_KEYWORDS)
 }
 
 /// Protocol family the payload is sent with; the allowlists differ.
@@ -197,6 +205,10 @@ pub enum Protocol {
 pub struct Target {
     pub protocol: Protocol,
     pub ecu_address: u8,
+    /// Key bytes (KW1, KW2) the init that ran received, or `None` when not known (a target
+    /// built before any init). Rules that depend on the ECU variant (the Bosch 5.3 ABS,
+    /// [`is_bosch_abs`]) need them; an approval is bound to them like to the address.
+    pub keywords: Option<(u8, u8)>,
 }
 
 /// What the loaded ECU definition says the ECU is, for the immobilizer line.

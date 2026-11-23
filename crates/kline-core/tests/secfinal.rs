@@ -13,14 +13,17 @@ use kline_core::safety::{
 const BMT: Target = Target {
     protocol: Protocol::Kwp,
     ecu_address: 0x26,
+    keywords: None,
 };
 const BMT_ALT: Target = Target {
     protocol: Protocol::Kwp,
     ecu_address: 0xA6,
+    keywords: None,
 };
 const SIRIUS: Target = Target {
     protocol: Protocol::Kwp,
     ecu_address: 0x7A,
+    keywords: None,
 };
 
 fn immo(t: &Target, p: &[u8]) -> bool {
@@ -166,6 +169,7 @@ fn immobilizer_class_definition_gets_bmt_rules_at_any_address() {
         let t = Target {
             protocol: Protocol::Kwp,
             ecu_address: a,
+            keywords: None,
         };
         for p in [
             &[0x31, 0xC2, 0x00][..],
@@ -194,6 +198,7 @@ fn immobilizer_class_definition_gets_bmt_rules_at_any_address() {
         &Target {
             protocol: Protocol::Kwp,
             ecu_address: 0x40,
+            keywords: None,
         },
         &[0x2C, 1],
     );
@@ -209,6 +214,7 @@ fn sirius_lid_rules_follow_the_definition_only() {
     let t = Target {
         protocol: Protocol::Kwp,
         ecu_address: 0x40,
+        keywords: None,
     };
     let sirius = DefinitionGuard::new(EcuClass::Sirius);
     for p in [
@@ -297,6 +303,7 @@ fn named_immobilizer_request_is_refused_by_the_core() {
     let t = Target {
         protocol: Protocol::Kwp,
         ecu_address: 0x51,
+        keywords: None,
     };
     let d = tier_of_in(&g, &t, &[0x3B, 0x50, 0x12]).unwrap_err();
     assert_eq!(
@@ -373,6 +380,7 @@ mod with_spec {
         let t = Target {
             protocol: Protocol::Kwp,
             ecu_address: 0x40,
+            keywords: None,
         };
         assert!(tier_of_in(&g, &t, &[0x3B, 0x60, 0x00])
             .unwrap_err()
@@ -448,6 +456,7 @@ fn bmt_config_index_nibble_alias_of_ap1cle_is_forbidden() {
     let at_40 = Target {
         protocol: Protocol::Kwp,
         ecu_address: 0x40,
+        keywords: None,
     };
     for idx in [0x02u8, 0x12, 0x22, 0x82, 0xF2] {
         for p in [vec![0x3B, 0xD2, idx, 0x01], vec![0x3B, 0xD2, idx]] {
@@ -483,6 +492,7 @@ fn merged_guard_keeps_the_strongest_class_and_all_flags() {
     let t = Target {
         protocol: Protocol::Kwp,
         ecu_address: 0x40,
+        keywords: None,
     };
     let mut a = DefinitionGuard::new(EcuClass::Sirius);
     a.flag(vec![0x3B, 0x50], "a".into());
@@ -513,6 +523,7 @@ fn sirius_backup_memory_reset_is_function_a3_at_byte_2() {
     let other = Target {
         protocol: Protocol::Kwp,
         ecu_address: 0x40,
+        keywords: None,
     };
     for p in [
         &[0x31, 0xA3, 0x00][..],

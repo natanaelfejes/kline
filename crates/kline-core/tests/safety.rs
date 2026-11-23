@@ -8,14 +8,17 @@ use kline_core::safety::{
 const SIRIUS: Target = Target {
     protocol: Protocol::Kwp,
     ecu_address: 0x7A,
+    keywords: None,
 };
 const BMT: Target = Target {
     protocol: Protocol::Kwp,
     ecu_address: 0x26,
+    keywords: None,
 };
 const SAFIR: Target = Target {
     protocol: Protocol::Iso8,
     ecu_address: 0x7A,
+    keywords: None,
 };
 
 fn reason(t: &Target, p: &[u8]) -> Option<DenyReason> {
@@ -230,6 +233,7 @@ fn immobilizer_is_forbidden_always() {
             let iso = Target {
                 protocol: Protocol::Iso8,
                 ecu_address: 0x26,
+                keywords: None,
             };
             assert_eq!(reason(&iso, &p), Some(DenyReason::Immobilizer), "{p:02X?}");
         }
@@ -407,6 +411,7 @@ fn sirius_immobilizer_and_session_rules_hold_under_iso8() {
     let iso8_7a = Target {
         protocol: Protocol::Iso8,
         ecu_address: 0x7A,
+        keywords: None,
     };
     for p in [
         &[0x31, 0xA0, 0xA3][..],
@@ -472,10 +477,12 @@ fn bmt_immobilizer_outputs_and_flash_services_are_forbidden() {
     let elsewhere = Target {
         protocol: Protocol::Kwp,
         ecu_address: 0x40,
+        keywords: None,
     };
     let bmt_alt = Target {
         protocol: Protocol::Kwp,
         ecu_address: 0xA6,
+        keywords: None,
     };
     let none = DefinitionGuard::default();
     let forbidden: &[&[u8]] = &[
@@ -594,6 +601,7 @@ fn airbag_non_reads_carry_safety_system_warning() {
     const AIRBAG: Target = Target {
         protocol: Protocol::Kwp,
         ecu_address: 0x2C,
+        keywords: None,
     };
     for p in [
         &[0x3B, 0xD0, 0x01][..],
@@ -630,10 +638,12 @@ fn airbag_risk_keeps_the_request_warnings_and_prerequisites() {
     const AIRBAG: Target = Target {
         protocol: Protocol::Kwp,
         ecu_address: 0x2C,
+        keywords: None,
     };
     const OTHER: Target = Target {
         protocol: Protocol::Kwp,
         ecu_address: 0x40,
+        keywords: None,
     };
     for p in [
         &[0x14, 0xFF, 0x00][..],
@@ -848,6 +858,7 @@ fn sirius_ac_output_warns_the_car_has_no_ac() {
         let t = Target {
             protocol: Protocol::Kwp,
             ecu_address: addr,
+            keywords: None,
         };
         let r = assess(&t, &[0x30, 0x82, 0x00, 0x0A]).unwrap();
         assert_eq!(r.tier, Tier::Service, "{addr:02X}");
@@ -868,6 +879,7 @@ fn sirius_allowlist_scope() {
     let at = |a| Target {
         protocol: Protocol::Kwp,
         ecu_address: a,
+        keywords: None,
     };
     let sirius_def = DefinitionGuard::new(EcuClass::Sirius);
     let generic = DefinitionGuard::new(EcuClass::Generic);
@@ -896,6 +908,7 @@ fn sirius_allowlist_scope() {
     let iso = Target {
         protocol: Protocol::Iso8,
         ecu_address: 0x7A,
+        keywords: None,
     };
     assert_eq!(tier_of(&iso, &good).unwrap(), Tier::Expert);
     assert_eq!(tier_of(&iso, &bad).unwrap(), Tier::Expert);
@@ -957,6 +970,7 @@ fn bmt_actuator_a4_a5_are_expert() {
 const ABS: Target = Target {
     protocol: Protocol::Iso8,
     ecu_address: 0x01,
+    keywords: Some((0xDC, 0x83)),
 };
 
 /// Bosch 5.3 ABS (ISO8 at 0x01, KW DC 83): `51` identification and `58` fault memory are the
@@ -986,6 +1000,7 @@ fn bosch_abs_tiers() {
     let kwp01 = Target {
         protocol: Protocol::Kwp,
         ecu_address: 0x01,
+        keywords: None,
     };
     for t in [SAFIR, kwp01] {
         assert_eq!(tier_of(&t, &[0x51]).unwrap(), Tier::Expert);

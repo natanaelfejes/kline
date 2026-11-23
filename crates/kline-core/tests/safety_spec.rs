@@ -85,6 +85,7 @@ fn every_request_classified() {
                 Protocol::Kwp
             },
             ecu_address: cfg.ecu_address,
+            keywords: None,
         };
         assert_eq!(ecu.requests.len(), case.requests, "{}", case.file);
         eprintln!(
@@ -144,6 +145,7 @@ fn bmt_remote_learning_is_tier1_and_in_definition() {
     let target = Target {
         protocol: Protocol::Kwp,
         ecu_address: cfg.ecu_address,
+        keywords: None,
     };
     for routine in BMT_REMOTE_LEARNING {
         let reqs = ecu.request_by_bytes(&hex(&routine)).unwrap();
@@ -168,6 +170,7 @@ fn bmt_definition_guard_flags_immobilizer_actuator_outputs() {
         let t = Target {
             protocol: Protocol::Kwp,
             ecu_address: 0x26,
+            keywords: None,
         };
         let named = |p: &[u8]| kline_core::spec::immobilizer_named_requests(&ecu, &t, p);
         assert!(!named(&[0x31, 0xA6, 0x00, 0x01]).is_empty(), "{file}");
@@ -196,6 +199,7 @@ fn bmt_code_manuel_routine_template_does_not_block_other_31_requests() {
             let t = Target {
                 protocol: Protocol::Kwp,
                 ecu_address: addr,
+                keywords: None,
             };
             let tier = |p: &[u8]| kline_core::safety::tier_of_in(&g, &t, p);
             assert_eq!(

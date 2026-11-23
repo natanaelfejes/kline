@@ -25,6 +25,7 @@ fn check_file(name: &str) {
         Target {
             protocol: Protocol::Kwp,
             ecu_address: cfg.ecu_address,
+            keywords: cfg.expected_keywords,
         }
     );
     let mut sent = 0;

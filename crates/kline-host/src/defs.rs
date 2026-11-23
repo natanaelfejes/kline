@@ -339,11 +339,14 @@ impl Ecu {
         g
     }
 
-    /// The policy target the init would produce (address from the definition or --address).
+    /// The policy target the init would produce (address from the definition or --address, key
+    /// bytes the definition expects). Only a preview: the session decides on the key bytes the
+    /// ECU really answered.
     pub fn target(&self) -> Result<Target, CliError> {
         Ok(Target {
             protocol: self.protocol(),
             ecu_address: self.address()?,
+            keywords: self.def().k.as_ref().and_then(|k| k.key_words()),
         })
     }
 

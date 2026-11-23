@@ -90,6 +90,7 @@ pub use error::LinkError;
 ///     target: kline_core::safety::Target {
 ///         protocol: kline_core::safety::Protocol::Iso8,
 ///         ecu_address: 0x26,
+///         keywords: None,
 ///     },
 ///     address_byte: None,
 ///     sync: None,
@@ -109,7 +110,7 @@ pub use error::LinkError;
 /// ```
 /// F4: a safety `Permit` cannot be fabricated either.
 /// ```compile_fail,E0624
-/// let t = kline_core::safety::Target { protocol: kline_core::safety::Protocol::Kwp, ecu_address: 0x26 };
+/// let t = kline_core::safety::Target { protocol: kline_core::safety::Protocol::Kwp, ecu_address: 0x26, keywords: None };
 /// let _ = kline_core::safety::Permit::new(&[0x27, 0x01], t, kline_core::safety::Tier::Read);
 /// ```
 #[cfg_attr(
@@ -131,9 +132,9 @@ pub use error::LinkError;
     doc = "F1 (feature on): an `Approval` has no public constructor besides `confirm`.\n\
            ```compile_fail,E0451\n\
            let _ = kline_core::safety::Approval { session: 0, request: 0, \
-           target: kline_core::safety::Target { protocol: kline_core::safety::Protocol::Kwp, ecu_address: 0x26 }, \
+           target: kline_core::safety::Target { protocol: kline_core::safety::Protocol::Kwp, ecu_address: 0x26, keywords: None }, \
            tier: kline_core::safety::Tier::Service, payload: vec![0x31, 0xC7, 0, 0, 0], identification: None, \
-           risk: kline_core::safety::assess(&kline_core::safety::Target { protocol: kline_core::safety::Protocol::Kwp, ecu_address: 0x26 }, &[0x31, 0xC7, 0, 0, 0]).unwrap() };\n\
+           risk: kline_core::safety::assess(&kline_core::safety::Target { protocol: kline_core::safety::Protocol::Kwp, ecu_address: 0x26, keywords: None }, &[0x31, 0xC7, 0, 0, 0]).unwrap() };\n\
            ```"
 )]
 pub mod security_regressions {}

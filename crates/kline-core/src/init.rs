@@ -44,6 +44,7 @@ impl InitOutcome {
             target: Target {
                 protocol: crate::safety::Protocol::Kwp,
                 ecu_address: cfg.ecu_address,
+                keywords: Some((0xD0, 0x8F)),
             },
             address_byte: Some(cfg.ecu_address),
             sync: Some(0x55),
@@ -66,7 +67,7 @@ impl InitOutcome {
     }
 
     /// The ECU the init woke: ISO8/KWP from the init kind, address derived from the 5-baud wake
-    /// byte or the StartCommunication header target.
+    /// byte or the StartCommunication header target, and the key bytes it answered.
     pub fn target(&self) -> Target {
         self.target
     }
@@ -147,6 +148,7 @@ fn wire_target(cfg: &LinkConfig, kind: InitKind) -> Result<Target, LinkError> {
             Protocol::Kwp
         },
         ecu_address: derived,
+        keywords: None,
     })
 }
 
@@ -381,7 +383,10 @@ impl FiveBaudInit {
         InitOutcome {
             cfg: self.cfg.clone(),
             kind: self.t.init,
-            target: self.target,
+            target: Target {
+                keywords: Some((kw1, kw2)),
+                ..self.target
+            },
             address_byte: Some(self.address_byte),
             sync: Some(sync),
             kw1,
@@ -505,7 +510,10 @@ impl FastInit {
                     let outcome = InitOutcome {
                         cfg: self.cfg.clone(),
                         kind: self.t.init,
-                        target: self.target,
+                        target: Target {
+                            keywords: Some(kw),
+                            ..self.target
+                        },
                         address_byte: None,
                         sync: None,
                         kw1: kw.0,
