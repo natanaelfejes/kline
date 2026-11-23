@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Hand-written fixture (not copied from any Renault file): a Bosch 5.3 style ABS at 0x01 on
+     ISO8 (5-baud init, key bytes DC 83, no ~KW2 handshake). Byte positions follow the car
+     capture of 2026-11-23 and docs/protocol.md "Bosch 5.3 ABS"; names, lists and the routine
+     bytes are written for tests (the routine is a dummy, not real code). -->
+<Target Name="Fixture Bosch ABS" xmlns="http://www-diag.renault.com/2002/ECU">
+<Function Name="ABS" Address="1"/>
+<Failures Name="No fault memory screen" Id="0"/>
+<K BaudRate="10400">
+<ISO8><L/><KW1 Value="220"/><KW2 Value="131" Timeout="1500"/><FirstRequest Delay="100"/></ISO8>
+<InterByte Delay="5"/>
+<ReplyToRequest Delay="300"/>
+<RequestToReply Timeout="9300"/>
+<TesterPresent Delay="7000"/>
+<OnError Delay="300"/>
+</K>
+<Datas>
+<Data Name="ECU type"><Bits><List><Item Value="5" Text="ABS"/></List></Bits></Data>
+<Data Name="Supplier"><Bits><List><Item Value="2" Text="Bosch"/><Item Value="3" Text="ITT"/></List></Bits></Data>
+<Data Name="After-sales id"><Bytes count="1"/></Data>
+<Data Name="Part number"><Bytes count="5"/></Data>
+<Data Name="Part index"><Bytes count="1" ascii="1"/></Data>
+<Data Name="Software"><Bytes count="3"/></Data>
+<Data Name="Supplier part number"><Bytes count="5"/></Data>
+<Data Name="Fault code 1"><Bits><List><Item Value="0" Text="none"/><Item Value="8" Text="front left sensor signal"/><Item Value="18" Text="pump motor circuit"/></List></Bits></Data>
+<Data Name="Fault code 2"><Bits><List><Item Value="0" Text="none"/><Item Value="8" Text="front left sensor signal"/><Item Value="18" Text="pump motor circuit"/></List></Bits></Data>
+<Data Name="Fault code 3"><Bits><List><Item Value="0" Text="none"/><Item Value="8" Text="front left sensor signal"/><Item Value="18" Text="pump motor circuit"/></List></Bits></Data>
+<Data Name="Stop switch 1"><Bits count="1"><List><Item Value="0" Text="released"/><Item Value="1" Text="pressed"/></List></Bits></Data>
+<Data Name="Stop switch 2"><Bits count="1"><List><Item Value="0" Text="released"/><Item Value="1" Text="pressed"/></List></Bits></Data>
+<Data Name="Stop switch 3"><Bits count="1"><List><Item Value="0" Text="released"/><Item Value="1" Text="pressed"/></List></Bits></Data>
+<Data Name="Reference speed 1"><Bits><Scaled Unit=" km/h"/></Bits></Data>
+<Data Name="Reference speed 2"><Bits><Scaled Unit=" km/h"/></Bits></Data>
+<Data Name="Reference speed 3"><Bits><Scaled Unit=" km/h"/></Bits></Data>
+<Data Name="Voltage 1"><Bits><Scaled Unit=" V" Step=".071" Format="##.##"/></Bits></Data>
+<Data Name="Voltage 2"><Bits><Scaled Unit=" V" Step=".071" Format="##.##"/></Bits></Data>
+<Data Name="Voltage 3"><Bits><Scaled Unit=" V" Step=".071" Format="##.##"/></Bits></Data>
+<Data Name="Counter 1"><Bits><Scaled/></Bits></Data>
+<Data Name="Counter 2"><Bits><Scaled/></Bits></Data>
+<Data Name="Counter 3"><Bits><Scaled/></Bits></Data>
+</Datas>
+<Requests Endian="Big">
+<Request Name="Identification">
+<Sent><SentBytes>51</SentBytes></Sent>
+<Received MinBytes="24">
+<DataItem Name="ECU type" Ref="1" FirstByte="2"/>
+<DataItem Name="Supplier" Ref="1" FirstByte="3"/>
+<DataItem Name="After-sales id" Ref="1" FirstByte="4"/>
+<DataItem Name="Part number" Ref="1" FirstByte="5"/>
+<DataItem Name="Part index" Ref="1" FirstByte="10"/>
+<DataItem Name="Software" Ref="1" FirstByte="11"/>
+<DataItem Name="Supplier part number" Ref="1" FirstByte="14"/>
+</Received>
+</Request>
+<Request Name="Fault memory">
+<Sent><SentBytes>58</SentBytes></Sent>
+<Received MinBytes="16">
+<DataItem Name="Fault code 1" Ref="1" FirstByte="2"/>
+<DataItem Name="Stop switch 1" Ref="1" FirstByte="3" BitOffset="1"/>
+<DataItem Name="Reference speed 1" Ref="1" FirstByte="4"/>
+<DataItem Name="Voltage 1" Ref="1" FirstByte="5"/>
+<DataItem Name="Counter 1" Ref="1" FirstByte="6"/>
+<DataItem Name="Fault code 2" Ref="1" FirstByte="7"/>
+<DataItem Name="Stop switch 2" Ref="1" FirstByte="8" BitOffset="1"/>
+<DataItem Name="Reference speed 2" Ref="1" FirstByte="9"/>
+<DataItem Name="Voltage 2" Ref="1" FirstByte="10"/>
+<DataItem Name="Counter 2" Ref="1" FirstByte="11"/>
+<DataItem Name="Fault code 3" Ref="1" FirstByte="12"/>
+<DataItem Name="Stop switch 3" Ref="1" FirstByte="13" BitOffset="1"/>
+<DataItem Name="Reference speed 3" Ref="1" FirstByte="14"/>
+<DataItem Name="Voltage 3" Ref="1" FirstByte="15"/>
+<DataItem Name="Counter 3" Ref="1" FirstByte="16"/>
+</Received>
+</Request>
+<Request Name="Fault memory RAZ">
+<Sent><SentBytes>45</SentBytes></Sent>
+<Received MinBytes="0"></Received>
+</Request>
+<Request Name="Keep alive">
+<Sent><SentBytes>36</SentBytes></Sent>
+<Received MinBytes="0"></Received>
+</Request>
+<Request Name="Download dummy routine">
+<Sent><SentBytes>41040000030000F0</SentBytes></Sent>
+<Received MinBytes="0"></Received>
+</Request>
+<Request Name="Run routine">
+<Sent><SentBytes>71</SentBytes></Sent>
+<Received MinBytes="1"></Received>
+</Request>
+</Requests>
+</Target>

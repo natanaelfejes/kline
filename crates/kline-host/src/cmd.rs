@@ -2060,7 +2060,23 @@ pub fn dtc(ctx: &mut Ctx, a: &DtcArgs) -> Result<(), CliError> {
             let mut active = Vec::new();
             for (rname, d) in &decoded {
                 let Ok(items) = d else { continue };
-                if by_flags {
+                let slots = (!by_flags).then(|| defs::fault_slots(items)).flatten();
+                if let Some(slots) = slots {
+                    for s in slots {
+                        if s.fault.raw_int().is_some_and(|v| v != 0) {
+                            let context: Vec<Json> = s
+                                .context
+                                .iter()
+                                .map(|c| {
+                                    json!({"name": c.name, "display": c.display,
+                                                "unit": c.unit, "raw": c.raw_int()})
+                                })
+                                .collect();
+                            active.push(json!({"name": s.fault.name, "display": s.fault.display,
+                                               "raw": s.fault.raw_int(), "context": context}));
+                        }
+                    }
+                } else if by_flags {
                     for f in o.ecu.def().active_faults(rname, items) {
                         active.push(json!({"name": f.item, "devices": f.devices,
                                            "display": f.display, "raw": f.raw}));
@@ -2086,9 +2102,24 @@ pub fn dtc(ctx: &mut Ctx, a: &DtcArgs) -> Result<(), CliError> {
                 active
                     .iter()
                     .map(|a| format!(
-                        "\n    {} = {}{}",
+                        "\n    {} = {}{}{}",
                         a["name"].as_str().unwrap_or(""),
                         a["display"].as_str().unwrap_or(""),
+                        a["context"]
+                            .as_array()
+                            .map(|c| format!(
+                                "  ({})",
+                                c.iter()
+                                    .map(|x| format!(
+                                        "{} {}{}",
+                                        x["name"].as_str().unwrap_or(""),
+                                        x["display"].as_str().unwrap_or(""),
+                                        x["unit"].as_str().unwrap_or("")
+                                    ))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ))
+                            .unwrap_or_default(),
                         a["devices"]
                             .as_array()
                             .filter(|d| !d.is_empty())

@@ -84,6 +84,31 @@ pub fn abs_ecu() -> SpecEcu {
     SpecEcu::new(profile, def, abs_scenario()).unwrap()
 }
 
+/// The values of the car's Bosch 5.3 ABS replies to 51 / 58 (2026-11-23), for the hand-written
+/// `bosch_abs_iso8.xml`: one stored fault (front left sensor signal at 16 km/h, 13.56 V).
+pub fn bosch_abs_scenario() -> Scenario {
+    Scenario::new()
+        .text("ECU type", "ABS")
+        .text("Supplier", "Bosch")
+        .set("After-sales id", Value::Hex("16".into()))
+        .set("Part number", Value::Hex("7701046407".into()))
+        .set("Part index", Value::Text(" ".into()))
+        .set("Software", Value::Hex("024912".into()))
+        .set("Supplier part number", Value::Hex("0265216703".into()))
+        .text("Fault code 1", "front left sensor signal")
+        .number("Reference speed 1", 16.0)
+        .number("Voltage 1", 13.561)
+        .number("Counter 1", 1.0)
+}
+
+/// Bosch 5.3 ABS at 0x01 (ISO8, DC 83) from `bosch_abs_iso8.xml` (`EcuProfile::from_def`
+/// recognizes it: SID echo, 36/3F answered).
+pub fn bosch_abs_ecu() -> SpecEcu {
+    let def = fixture("bosch_abs_iso8.xml");
+    let profile = EcuProfile::from_def(&def).unwrap();
+    SpecEcu::new(profile, def, bosch_abs_scenario()).unwrap()
+}
+
 pub fn iso8_nofaults_ecu() -> SpecEcu {
     let def = fixture("iso8_nofaults.xml");
     let profile = EcuProfile::from_def(&def).unwrap();

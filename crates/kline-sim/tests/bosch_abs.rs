@@ -9,7 +9,6 @@ use kline_core::session::SessionOutcome;
 use kline_sim::bus::BusConfig;
 use kline_sim::driver::Driver;
 use kline_sim::ecu::{EcuProfile, SpecEcu};
-use kline_sim::journal::WriteKind;
 use kline_sim::line::VirtualLine;
 use kline_sim::replay::{read_jsonl, ReplayEcu};
 use kline_sim::scenario::Scenario;
@@ -85,6 +84,7 @@ fn spec_ecu_answers_like_the_car() {
 #[test]
 fn approved_clear_reaches_the_ecu_and_is_logged() {
     use kline_core::safety::{Approval, Tier};
+    use kline_sim::journal::WriteKind;
     let def = abs();
     let ecu = SpecEcu::new(EcuProfile::bosch_abs53(), def.clone(), car_scenario()).unwrap();
     let (mut d, journal) = drive(ecu);

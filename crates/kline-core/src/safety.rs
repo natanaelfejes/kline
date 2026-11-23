@@ -916,7 +916,7 @@ fn bosch_abs_risk(payload: &[u8], tier: Tier) -> RiskInfo {
             "erases the ABS fault memory (the three slots read by 58)",
             "fault evidence is lost; a fault still present is stored again and the ABS lamp stays on",
             false,
-            &["read and save 58 first"],
+            NONE,
             &[Warning::ErasesFaultMemory],
         ),
         (Tier::Expert, [BOSCH_ABS_DOWNLOAD, ..]) => r(

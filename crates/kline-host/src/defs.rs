@@ -660,6 +660,49 @@ pub fn is_fault_name(name: &str) -> bool {
         .any(|k| n.contains(k))
 }
 
+/// One numbered fault slot of a fault-memory frame: the fault-named item (`Défaut mémoire 1`)
+/// and the other items with the same number (`Tension 1`, `Vitesse de référence 1`,
+/// `compteur mémoire 1`, ...).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FaultSlot<'a> {
+    pub fault: &'a DecodedItem,
+    pub context: Vec<&'a DecodedItem>,
+}
+
+/// The trailing ` N` slot number of an item name.
+fn slot_number(name: &str) -> Option<&str> {
+    let (head, n) = name.trim_end().rsplit_once(' ')?;
+    (!head.is_empty() && !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())).then_some(n)
+}
+
+/// Fault slots of one decoded frame, when the frame is laid out in numbered slots: at least
+/// two fault-named items (`panne`/`defaut`/`fault`) with different trailing numbers, each with
+/// at least one other item of the same number. The Bosch 5.3 ABS `58` (MES_DIAG) holds three
+/// slots of 5 bytes (X24_ABS_Bosch5.3.xml, docs/protocol.md "Bosch 5.3 ABS"). `None` for any
+/// other layout (a single numbered fault item, e.g. Safir's "... n 1", is not a slot frame).
+pub fn fault_slots(items: &[DecodedItem]) -> Option<Vec<FaultSlot<'_>>> {
+    let mut slots = Vec::new();
+    for f in items.iter().filter(|i| is_fault_name(&i.name)) {
+        let Some(n) = slot_number(&f.name) else {
+            continue;
+        };
+        let context: Vec<&DecodedItem> = items
+            .iter()
+            .filter(|i| !is_fault_name(&i.name) && slot_number(&i.name) == Some(n))
+            .collect();
+        if context.is_empty() {
+            return None;
+        }
+        slots.push(FaultSlot { fault: f, context });
+    }
+    let mut numbers: Vec<&str> = slots
+        .iter()
+        .filter_map(|s| slot_number(&s.fault.name))
+        .collect();
+    numbers.dedup();
+    (numbers.len() >= 2).then_some(slots)
+}
+
 /// Tier 0 reads carrying at least one fault-named received item (ISO8 definitions such as
 /// Safir declare `Failures Id="0"` and no fault request, but their `33 51`/`33 52` frames hold
 /// "Panne presente ..." flags).
@@ -1031,5 +1074,49 @@ mod git_tests {
         );
         assert_eq!(git_work_tree(&outside.join("plain").join("ecus")), None);
         let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+#[cfg(test)]
+mod fault_slot_tests {
+    use super::*;
+
+    fn item(name: &str, raw: u64) -> DecodedItem {
+        DecodedItem {
+            name: name.into(),
+            raw: Some(Raw::Int(raw)),
+            value: None,
+            display: Some(raw.to_string()),
+            unit: None,
+        }
+    }
+
+    #[test]
+    fn numbered_slots_group_their_items() {
+        let items = [
+            item("Défaut mémoire 1", 8),
+            item("Tension 1", 191),
+            item("compteur mémoire 1", 1),
+            item("Défaut mémoire 2", 0),
+            item("Tension 2", 0),
+        ];
+        let s = fault_slots(&items).unwrap();
+        assert_eq!(s.len(), 2);
+        assert_eq!(s[0].fault.name, "Défaut mémoire 1");
+        let ctx: Vec<&str> = s[0].context.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(ctx, ["Tension 1", "compteur mémoire 1"]);
+    }
+
+    #[test]
+    fn a_single_numbered_fault_item_is_not_a_slot_frame() {
+        // Safir_1 "Panne présente capteur de cliquetis n 1" next to "DATA 1".
+        let items = [
+            item("Panne présente capteur de cliquetis n 1", 1),
+            item("DATA 1", 3),
+        ];
+        assert_eq!(fault_slots(&items), None);
+        // A numbered fault item without context.
+        let items = [item("Défaut mémoire 1", 8), item("Défaut mémoire 2", 0)];
+        assert_eq!(fault_slots(&items), None);
     }
 }
