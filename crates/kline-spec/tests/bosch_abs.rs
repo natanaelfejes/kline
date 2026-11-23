@@ -96,6 +96,45 @@ fn kwp_reply_with_the_request_sid_stays_unexpected() {
     ));
 }
 
+/// The SID echo is a Bosch 5.3 ABS quirk: an ISO8 definition with other key bytes (Safir
+/// `C2 85`) or none keeps the strict `SID + 0x40` rule (review of the ABS branch, finding 3).
+#[test]
+fn iso8_reply_with_the_request_sid_needs_the_bosch_key_bytes() {
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/bosch_abs_iso8.xml"
+    ))
+    .unwrap();
+    let kw = r#"<KW1 Value="220"/><KW2 Value="131" Timeout="1500"/>"#;
+    assert!(src.contains(kw));
+    for other in [
+        r#"<KW1 Value="194"/><KW2 Value="133" Timeout="1500"/>"#,
+        r#"<KW1 Value="220"/><KW2 Value="132" Timeout="1500"/>"#,
+        "",
+    ] {
+        let def = EcuDef::from_xml_bytes(src.replace(kw, other).as_bytes()).unwrap();
+        assert!(
+            matches!(
+                def.request("Fault memory")
+                    .unwrap()
+                    .decode_checked(&def, &CAR_58),
+                Err(SpecError::UnexpectedSid {
+                    expected: 0x98,
+                    got: 0x58
+                })
+            ),
+            "{other}"
+        );
+        let mut plus40 = CAR_58;
+        plus40[0] = 0x98;
+        assert!(def
+            .request("Fault memory")
+            .unwrap()
+            .decode_checked(&def, &plus40)
+            .is_ok());
+    }
+}
+
 #[test]
 fn iso8_clear_plan_uses_the_raz_request() {
     let p = fixture().clear_plan();

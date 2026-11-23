@@ -731,11 +731,12 @@ impl Request {
     ///    empty), else [`SpecError::NegativeResponseForOtherSid`]; shorter than 3 bytes:
     ///    [`SpecError::TruncatedNegativeResponse`];
     /// 3. first byte must be `sent[0] + 0x40`: [`SpecError::UnexpectedSid`]
-    ///    ([`SpecError::NoPositiveSid`] if `sent` is empty or its SID is 0xC0 or above). For an
-    ///    ISO8 definition (`<K><ISO8>`) the request SID itself is accepted too: the Bosch 5.3
-    ///    ABS answers `51` with `51 05 ..` and `58` with `58 ..` (car capture 2026-11-23,
-    ///    docs/protocol.md "Bosch 5.3 ABS"), and DDT2000's ISO8 reply parser does not check the
-    ///    SID at all (RE: KWP2000Diag4 ISO8 parser FUN_2304ea50);
+    ///    ([`SpecError::NoPositiveSid`] if `sent` is empty or its SID is 0xC0 or above). For a
+    ///    Bosch 5.3 ABS definition (`<K><ISO8>` with key bytes KW1=220 / KW2=131, `DC 83`) the
+    ///    request SID itself is accepted too: that ABS answers `51` with `51 05 ..` and `58`
+    ///    with `58 ..` (car capture 2026-11-23, docs/protocol.md "Bosch 5.3 ABS"); DDT2000's
+    ///    ISO8 reply parser does not check the SID at all (RE: KWP2000Diag4 ISO8 parser
+    ///    FUN_2304ea50). Other ISO8 definitions (Safir) keep the strict rule;
     /// 4. length must be at least `Received@MinBytes`: [`SpecError::TooShort`]
     ///    (see [`decode_checked_allow_short`](Self::decode_checked_allow_short) to relax this);
     /// 5. KWP2000 local-identifier services (`21`, `30`, `31`, `32`, `33`, `3B`) answer
@@ -757,7 +758,7 @@ impl Request {
         sent: &[u8],
         response: &[u8],
     ) -> Result<Vec<DecodedItem>, SpecError> {
-        self.check_response(is_iso8(ecu), sent, response, true)?;
+        self.check_response(is_bosch_abs_iso8(ecu), sent, response, true)?;
         self.decode_unchecked(ecu, response)
     }
 
@@ -773,13 +774,13 @@ impl Request {
         ecu: &EcuDef,
         response: &[u8],
     ) -> Result<Vec<DecodedItem>, SpecError> {
-        self.check_response(is_iso8(ecu), &self.sent_bytes.0, response, false)?;
+        self.check_response(is_bosch_abs_iso8(ecu), &self.sent_bytes.0, response, false)?;
         self.decode_unchecked(ecu, response)
     }
 
     fn check_response(
         &self,
-        iso8: bool,
+        sid_echo: bool,
         sent: &[u8],
         response: &[u8],
         enforce_min_bytes: bool,
@@ -815,8 +816,8 @@ impl Request {
             .ok_or_else(|| SpecError::NoPositiveSid {
                 request: self.name.clone(),
             })?;
-        let iso8_echo = iso8 && sent.first() == Some(&first);
-        if first != expected && !iso8_echo {
+        let echo = sid_echo && sent.first() == Some(&first);
+        if first != expected && !echo {
             return Err(SpecError::UnexpectedSid {
                 expected,
                 got: first,
@@ -870,9 +871,14 @@ impl Request {
     }
 }
 
-/// Whether `ecu` is an ISO8 definition (`<K><ISO8>` without `<KWP>`).
-fn is_iso8(ecu: &EcuDef) -> bool {
-    ecu.k
-        .as_ref()
-        .is_some_and(|k| k.protocol() == crate::model::KProtocol::Iso8)
+/// Key bytes (KW1, KW2) of the Bosch 5.3 ABS ISO8 definitions (X24_ABS_Bosch5.3,
+/// J64_Bosch5.3_4X4_V2: KW1=220, KW2=131; `55 DC 83` on the car 2026-11-23).
+pub const BOSCH_ABS_KEY_BYTES: (u8, u8) = (0xDC, 0x83);
+
+/// Whether `ecu` is a Bosch 5.3 ABS definition: ISO8 (`<K><ISO8>` without `<KWP>`) with key
+/// bytes [`BOSCH_ABS_KEY_BYTES`]. Only those replies may echo the request SID.
+fn is_bosch_abs_iso8(ecu: &EcuDef) -> bool {
+    ecu.k.as_ref().is_some_and(|k| {
+        k.protocol() == crate::model::KProtocol::Iso8 && k.key_words() == Some(BOSCH_ABS_KEY_BYTES)
+    })
 }
