@@ -573,7 +573,7 @@ fn service_and_config_writes_need_approval() {
     let mut s = sirius_session(0);
     for (p, tier) in [
         (&[0x14, 0x00, 0x00][..], Tier::Service),
-        (&[0x30, 0xD0, 0x00, 0x0A], Tier::Service),
+        (&[0x30, 0x80, 0x00, 0x0A], Tier::Service),
         (&[0x11, 0xFF], Tier::Service),
         (&[0x32, 0xA0, 0x00], Tier::Service),
         (&[0x3B, 0xD0, 0x10], Tier::ConfigWrite),

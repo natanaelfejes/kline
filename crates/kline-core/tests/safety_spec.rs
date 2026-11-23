@@ -31,10 +31,10 @@ const CASES: [Case; 4] = [
         ],
         // Output control, clear DTC, adaptation reset, stop functions. "Fonctions
         // particulieres" 31A000 is `31 fn 00` with its default function 0xA0, injector
-        // inhibition (final critique F02); the other routines stay denied.
-        service: &[
-            "30D0000A", "30D00100", "30D01100", "140000", "11FF", "32A000", "31A000",
-        ],
+        // inhibition (final critique F02); the other routines stay denied. The Output Control
+        // templates 30D0000A/30D00100/30D01100 carry the placeholder id D0, which is not in the
+        // 13-id allowlist: Expert (not classified), audit 2026-11-23.
+        service: &["140000", "11FF", "32A000", "31A000"],
         config_write: &["3BD010"],
         requests: 34,
     },
@@ -216,6 +216,12 @@ fn bmt_code_manuel_routine_template_does_not_block_other_31_requests() {
                     assert!(
                         tier(&p).unwrap_err().reason.is_forbidden(),
                         "{file} {p:02X?}"
+                    );
+                } else if [0xA4, 0xA5].contains(&out) {
+                    assert_eq!(
+                        tier(&p).unwrap(),
+                        Tier::Expert,
+                        "{file} {addr:02X} {p:02X?}"
                     );
                 } else {
                     assert_eq!(

@@ -120,12 +120,14 @@ fn sirius_immobilizer_lids_and_backup_reset_variants_are_forbidden() {
     for p in cases {
         assert!(immo(&SIRIUS, p), "{p:02X?}: {:?}", tier_of(&SIRIUS, p));
     }
-    // Not immobilizer: output control and routines on those byte values.
+    // Not immobilizer: output control and routines on those byte values. `30 A0` is the fan
+    // (allowlisted output); BD/A2/AE are not Sirius output ids: Expert (audit 2026-11-23), still
+    // not forbidden.
     for (p, t) in [
         (&[0x30, 0xA0, 0x00, 0x00][..], Tier::Service),
-        (&[0x30, 0xBD, 0x01], Tier::Service),
-        (&[0x30, 0xA2, 0x01], Tier::Service),
-        (&[0x30, 0xAE, 0x01, 0x02], Tier::Service),
+        (&[0x30, 0xBD, 0x00, 0x01], Tier::Expert),
+        (&[0x30, 0xA2, 0x01, 0x00], Tier::Expert),
+        (&[0x30, 0xAE, 0x01, 0x02], Tier::Expert),
         (&[0x31, 0xA2, 0x00, 0x00, 0x00], Tier::Expert),
         (&[0x31, 0xA2, 0x01, 0x00, 0x00], Tier::Expert),
         (&[0x31, 0xAE], Tier::Expert),
@@ -137,7 +139,7 @@ fn sirius_immobilizer_lids_and_backup_reset_variants_are_forbidden() {
         let r = safety::assess(&SIRIUS, p).unwrap();
         assert_eq!(r.tier, t, "{p:02X?}");
     }
-    assert!(safety::assess(&SIRIUS, &[0x30, 0xA0, 0x01])
+    assert!(safety::assess(&SIRIUS, &[0x30, 0xA0, 0x01, 0x00])
         .unwrap()
         .warnings
         .contains(&safety::Warning::MovesActuator));
@@ -150,10 +152,7 @@ fn sirius_immobilizer_lids_and_backup_reset_variants_are_forbidden() {
         tier_of(&SIRIUS, &[0x32, 0xA0, 0x00]).unwrap(),
         Tier::Service
     );
-    assert_eq!(
-        tier_of(&SIRIUS, &[0x30, 0xD0, 0x01]).unwrap(),
-        Tier::Service
-    );
+    assert_eq!(tier_of(&SIRIUS, &[0x30, 0xD0, 0x01]).unwrap(), Tier::Expert);
     // Reading the immobilizer frames stays Tier 0.
     assert_eq!(tier_of(&SIRIUS, &[0x21, 0xA0]).unwrap(), Tier::Read);
 }
@@ -231,7 +230,7 @@ fn sirius_lid_rules_follow_the_definition_only() {
     assert_eq!(tier_of(&t, &[0x2E, 0xAE, 0x00]).unwrap(), Tier::Expert);
     for g in [&sirius, &DefinitionGuard::default()] {
         assert_eq!(
-            tier_of_in(g, &t, &[0x30, 0xA0, 0x01]).unwrap(),
+            tier_of_in(g, &t, &[0x30, 0xA0, 0x01, 0x00]).unwrap(),
             Tier::Service
         );
         assert_eq!(

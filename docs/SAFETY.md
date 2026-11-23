@@ -22,7 +22,7 @@ Default-deny, decided on exact payload bytes and the target of the init that act
   `10 81`, `10 A0`; Safir `21`, `3350`, `3351`, `3352`, `3354`). The only tier library code
   paths, `--json`, MCP and tests against a real port may execute.
 - **Tier 1 SERVICE** (clear DTC `14`, output tests `30`, adaptation reset `11 FF`/`32`, Sirius
-  `31A000` injector inhibition, BMT `31C7`/`31C8` remote learning and `31 out` actuators), **Tier 2 CONFIG WRITE**
+  `31A000` injector inhibition, BMT `31C7`/`31C8` remote learning and `31 out` actuators; see "Output control ids" below), **Tier 2 CONFIG WRITE**
   (`3B`, with backup read and `21 80` identification in the same session) and **Tier 3 EXPERT**
   (any other non-forbidden request, "unknown effect"): only with a per-request human `Approval`
   that quotes the request's `RiskInfo`.
@@ -54,6 +54,18 @@ Default-deny, decided on exact payload bytes and the target of the init that act
   before the port is opened and again by kline-core); neither ever sends the approved request
   again (final critique F01). If the reply is lost after the write, kline says that the request
   WAS SENT and to read the state before repeating it (exit 13, F06).
+- **Output control ids (audit 2026-11-23).** On a Sirius (address `7A` or a Sirius definition)
+  `30 id cmd cycles` is Tier 1 only when it is exactly 4 bytes, `id` is one of the 13 outputs of
+  the "Output Temporary Control List" of SIRIUS32___EMS3132___Soft_RE1_maj.xml (`80` fuel pump relay,
+  `82` A/C output, `83` idle valve RR, `86` canister purge, `88` upstream O2 heater, `8F` camshaft 1,
+  `94` MIL lamp, `9E` coolant temperature warning lamp, `9F` fan low, `A0` fan high, `A7` downstream
+  O2 heater, `AA` thermo-plunger relay 1, `AC` shift lamp) and `cmd` is `00` start, `01` status or
+  `11` stop. Any other id, command or length (including the definition's placeholder id `D0`) is
+  Tier 3 Expert, not forbidden. `82` stays Tier 1 but its `RiskInfo` says this car has no A/C.
+  Other (non-Sirius, non-BMT) ECUs keep `30 lid` + 1-4 bytes as Tier 1. The S2000 definition lists
+  more ids (`87`, `8B`, `8C`, `B5`..); on a `7A` target they are Expert.
+- **BMT actuator `A4`/`A5`** (unnamed "LO"/"LF" lines) are Tier 3 Expert; the other outputs
+  `A0`..`B3` stay Tier 1, `A6`/`AB`/`AC` stay forbidden, `B4`+ stays Expert.
 - **BMT actuators.** `31 out param count` stays Tier 1; on the lock motors (`A0`/`A1`) and the
   window (`A2`/`A3`) count `FF` carries "count FF = permanent: lock/window motor may run until
   stopped; use 1-3" (final critique F07, not forbidden).

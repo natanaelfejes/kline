@@ -129,8 +129,9 @@ fn tier1_service_actions() {
     for (t, p) in [
         (SIRIUS, &[0x14, 0x00, 0x00][..]),
         (BMT, &[0x14, 0xFF, 0x00]),
-        (SIRIUS, &[0x30, 0xD0, 0x00, 0x0A]),
-        (SIRIUS, &[0x30, 0xD0, 0x01, 0x00]),
+        (SIRIUS, &[0x30, 0x80, 0x00, 0x0A]),
+        (SIRIUS, &[0x30, 0x9F, 0x01, 0x00]),
+        (SIRIUS, &[0x30, 0xA0, 0x11, 0x00]),
         (SIRIUS, &[0x11, 0xFF]),
         (SIRIUS, &[0x32, 0xA0, 0x00]),
         (SIRIUS, &[0x31, 0xA0, 0x00]),
@@ -502,7 +503,6 @@ fn bmt_immobilizer_outputs_and_flash_services_are_forbidden() {
     }
     for p in [
         &[0x31, 0xA0, 0x00, 0x01][..],
-        &[0x31, 0xA5, 0x00, 0x01],
         &[0x31, 0xA7, 0x00, 0x01],
         &[0x31, 0xB3, 0x00, 0x01],
         &[0x31, 0xC7, 0x00, 0x00, 0x00],
@@ -731,4 +731,100 @@ fn bmt_actuator_count_ff_on_lock_and_window_has_a_specific_warning() {
     // Another output with FF: not a lock/window motor, no lock/window text.
     let r = assess(&BMT, &[0x31, 0xA4, 0x00, 0xFF]).unwrap();
     assert!(!r.what_can_go_wrong.contains("count FF"));
+}
+
+const SIRIUS_OUTPUTS: [u8; 13] = [
+    0x80, 0x82, 0x83, 0x86, 0x88, 0x8F, 0x94, 0x9E, 0x9F, 0xA0, 0xA7, 0xAA, 0xAC,
+];
+
+/// Audit 2026-11-23: Sirius `30 id cmd cycles` is Tier 1 only for the 13 ids of the definition's
+/// "Output Temporary Control List" and cmd 00/01/11; every other id or shape is Tier 3 Expert.
+#[test]
+fn sirius_output_control_risk_matrix() {
+    for id in 0u8..=0xFF {
+        for cmd in [0x00u8, 0x01, 0x11] {
+            let p = [0x30, id, cmd, 0x01];
+            let want = if SIRIUS_OUTPUTS.contains(&id) {
+                Tier::Service
+            } else {
+                Tier::Expert
+            };
+            assert_eq!(tier_of(&SIRIUS, &p).unwrap(), want, "{p:02X?}");
+            assert_eq!(assess(&SIRIUS, &p).unwrap().tier, want, "{p:02X?}");
+        }
+    }
+    // Command bytes outside 00/01/11, and any length but 4, on an allowed id: Expert.
+    for p in [
+        &[0x30, 0x80, 0x02, 0x01][..],
+        &[0x30, 0x80, 0x10, 0x01],
+        &[0x30, 0x80, 0xFF, 0x01],
+        &[0x30, 0x80, 0x00],
+        &[0x30, 0x80],
+        &[0x30, 0x80, 0x00, 0x01, 0x00],
+        &[0x30, 0x80, 0x00, 0x01, 0x00, 0x00],
+    ] {
+        assert_eq!(tier_of(&SIRIUS, p).unwrap(), Tier::Expert, "{p:02X?}");
+    }
+    // The definition's placeholder id D0 and a few plausible other ids are Expert.
+    for id in [0xD0u8, 0x00, 0x81, 0x87, 0xB5, 0xA6, 0xAB, 0xC0] {
+        let p = [0x30, id, 0x00, 0x0A];
+        assert_eq!(tier_of(&SIRIUS, &p).unwrap(), Tier::Expert, "{p:02X?}");
+        let r = assess(&SIRIUS, &p).unwrap();
+        assert!(r.warnings.contains(&Warning::UnknownEffect), "{p:02X?}");
+    }
+    // The allowed ones move an actuator.
+    let r = assess(&SIRIUS, &[0x30, 0x9F, 0x00, 0x0A]).unwrap();
+    assert!(r.warnings.contains(&Warning::MovesActuator));
+}
+
+/// This car has no A/C: 0x82 stays Tier 1 but its risk text says so.
+#[test]
+fn sirius_ac_output_warns_the_car_has_no_ac() {
+    let r = assess(&SIRIUS, &[0x30, 0x82, 0x00, 0x0A]).unwrap();
+    assert_eq!(r.tier, Tier::Service);
+    assert!(r.what_it_changes.contains("NO A/C"), "{r:?}");
+    assert!(
+        r.prerequisites.iter().any(|t| t.contains("no A/C")),
+        "{r:?}"
+    );
+    assert!(r.warnings.contains(&Warning::MovesActuator));
+    let other = assess(&SIRIUS, &[0x30, 0x80, 0x00, 0x0A]).unwrap();
+    assert!(!other.what_it_changes.contains("A/C"), "{other:?}");
+}
+
+/// Forbidden ids are unchanged: immobilizer-class outputs stay refused on a BMT, and the Sirius
+/// allowlist does not turn them into anything else.
+#[test]
+fn output_control_forbidden_ids_stay_forbidden() {
+    for id in [0xA6u8, 0xAB, 0xAC, 0xC0, 0xC9] {
+        for svc in [0x30u8, 0x31, 0x32, 0x33] {
+            let p = [svc, id, 0x00, 0x01];
+            assert_eq!(reason(&BMT, &p), Some(DenyReason::Immobilizer), "{p:02X?}");
+        }
+    }
+}
+
+/// Audit 2026-11-23: BMT actuators A4/A5 (unnamed "LO"/"LF" lines) are Expert; the named ones in
+/// A0..=B3 stay Tier 1, A6/AB/AC stay forbidden, B4+ stays Expert.
+#[test]
+fn bmt_actuator_a4_a5_are_expert() {
+    for id in 0xA0u8..=0xB3 {
+        let p = [0x31, id, 0x00, 0x01];
+        match id {
+            0xA6 | 0xAB | 0xAC => {
+                assert_eq!(reason(&BMT, &p), Some(DenyReason::Immobilizer), "{p:02X?}")
+            }
+            0xA4 | 0xA5 => {
+                assert_eq!(tier_of(&BMT, &p).unwrap(), Tier::Expert, "{p:02X?}");
+                let r = assess(&BMT, &p).unwrap();
+                assert_eq!(r.tier, Tier::Expert);
+                assert!(r.warnings.contains(&Warning::UnknownEffect));
+            }
+            _ => assert_eq!(tier_of(&BMT, &p).unwrap(), Tier::Service, "{p:02X?}"),
+        }
+    }
+    for id in [0xB4u8, 0xB5, 0xBF] {
+        let p = [0x31, id, 0x00, 0x01];
+        assert_eq!(tier_of(&BMT, &p).unwrap(), Tier::Expert, "{p:02X?}");
+    }
 }

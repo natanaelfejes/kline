@@ -4,7 +4,7 @@
 //! | Tier | What | Who can send it |
 //! |---|---|---|
 //! | [`Tier::Read`] | documented reads, `10 81`/`10 A0`, `3E` | anyone: [`check`] / `Session::request` (CLI, `--json`, MCP) |
-//! | [`Tier::Service`] | clear DTC, output tests, adaptation reset, Sirius `31 A0 00`, BMT remote learning and actuators | a human, one typed `Approval` per request |
+//! | [`Tier::Service`] | clear DTC, output tests (Sirius: the 13 listed output ids only), adaptation reset, Sirius `31 A0 00`, BMT remote learning and actuators (not `A4`/`A5`) | a human, one typed `Approval` per request |
 //! | [`Tier::ConfigWrite`] | `3B` config writes | a human `Approval`, after the backup read and (BMT) the `21 80` identification the definition was chosen from |
 //! | [`Tier::Expert`] | any other request that is not forbidden: undocumented services and identifiers, security access `27`, download/upload/transfer `34`-`37` and flash erase/checksum `31 81`/`31 82` (not on a BMT), other `10 xx` sessions, memory/routine-by-address services on non-immobilizer ECUs (with specific warnings such as [`Warning::MayBrickEcu`]) | a human expert `Approval` that shows the risk |
 //! | forbidden | the immobilizer line only (owner decision 2026-11-22, final): on a BMT/UCH/decoder (address `26`/`A6` or a BMT/UCH/decoder definition, [`DefinitionGuard`]) `3D`, `38`-`3A`, `2C`, `34`-`37`, `31`-`33` `81`/`82` (flash erase/checksum), `30`-`33` with `C0`-`C9` (except exact `31C7000000`/`31C8000000`) or with the immobilizer outputs `A6`/`AB`/`AC` ([`BMT_IMMOBILIZER_OUTPUTS`]), `2E`/`2F`, `3B` other than `3B D2` and `3B D2 x2` (AP1CLE, also with a high nibble), `21 A4` with extra bytes; on every other ECU routines `31`-`33`/`38`-`3A` on `A0 A3`; on a Sirius (`7A` or a Sirius definition) also `31`-`33 A3 ..` (function 0xA3, reset of the backed-up memory) and writes `2E`/`2F`/`3B` to the frames `A0`/`A2`/`AE`/`BD`; definition requests named like immobilizer/transponder/key ([`DenyReason::ImmobilizerNamed`]) | nobody, never |
@@ -56,6 +56,27 @@ pub const BMT_REMOTE_LEARNING: [[u8; 5]; 2] = [
 /// BMT actuator outputs for `31 out param count` (lock motors, window). Capability catalogue
 /// 9.1 / 7 #14: 0xA0..=0xB3 are the documented outputs.
 pub const BMT_ACTUATOR_OUTPUTS: core::ops::RangeInclusive<u8> = 0xA0..=0xB3;
+/// BMT outputs inside [`BMT_ACTUATOR_OUTPUTS`] whose "sortie a activer" entries are unnamed
+/// ("LO"/"LF" lines of unknown meaning): Tier 3 Expert, not Tier 1 (audit 2026-11-23). The
+/// immobilizer outputs `A6`/`AB`/`AC` ([`BMT_IMMOBILIZER_OUTPUTS`]) are forbidden, `B4`+ is
+/// outside the range (Expert).
+pub const BMT_UNKNOWN_ACTUATOR_OUTPUTS: [u8; 2] = [0xA4, 0xA5];
+/// Sirius output control `30 id cmd cycles` ("Output Control", `30D0000A`): the 13 output ids of
+/// the "Output Temporary Control List" of SIRIUS32___EMS3132___Soft_RE1_maj.xml, byte 2 of the
+/// request. Any other id on a Sirius is Tier 3 Expert (audit 2026-11-23): 0x80 fuel pump
+/// relay, 0x82 A/C output (this car has no A/C), 0x83 idle valve RR, 0x86 canister purge, 0x88
+/// upstream O2 heater, 0x8F camshaft 1, 0x94 MIL lamp, 0x9E coolant temperature warning lamp,
+/// 0x9F fan low, 0xA0 fan high, 0xA7 downstream O2 heater, 0xAA thermo-plunger relay 1, 0xAC
+/// shift lamp. (The S2000 definition lists other ids too; they stay Expert.)
+pub const SIRIUS_OUTPUT_IDS: [u8; 13] = [
+    0x80, 0x82, 0x83, 0x86, 0x88, 0x8F, 0x94, 0x9E, 0x9F, 0xA0, 0xA7, 0xAA, 0xAC,
+];
+/// The A/C output in [`SIRIUS_OUTPUT_IDS`]: allowed, but this car has no A/C (warning text).
+pub const SIRIUS_OUTPUT_AC: u8 = 0x82;
+/// "Output Control Command" values (byte 3): 0 "Start Temporary" (`30 id 00 cycles`), 1 "Status"
+/// (`30 id 01 00`), 17 = 0x11 "Stop" (`30 id 11 00`) (S2000 definition list; Sirius 32 lists
+/// only 0, its Status/Stop requests are `30D00100` and `30D01100`).
+pub const SIRIUS_OUTPUT_COMMANDS: [u8; 3] = [0x00, 0x01, 0x11];
 /// BMT actuator outputs `A0`/`A1` (door lock motors) and `A2`/`A3` (window) of `31 out param
 /// count`: a count of `FF` is permanent activation (final critique F07; record BLOCKED.md item 7,
 /// CAR-KNOWLEDGE.md: locks get 1-3 cycles).
@@ -672,6 +693,12 @@ fn classify_bytes(
         (Kwp, 0x14) => (len == 3).then_some(Service),
         // Tier 1: InputOutputControlByLocalIdentifier (Sirius 30D0xxxx). The BMT definitions
         // have no `30`, `11` or `32`: Expert there (re-review M2 finding 2).
+        // On a Sirius only the exact 4-byte `30 id cmd cycles` with a listed id and command;
+        // everything else is Expert (audit 2026-11-23).
+        (Kwp, 0x30) if !bmt && is_sirius_ecu(guard, target) => (len == 4
+            && p1.is_some_and(|b| SIRIUS_OUTPUT_IDS.contains(&b))
+            && SIRIUS_OUTPUT_COMMANDS.contains(&payload[2]))
+        .then_some(Service),
         (Kwp, 0x30) if !bmt => (3..=6).contains(&len).then_some(Service),
         // Tier 1: Renault "Reinit apprentissages" (adaptation reset), only `11 FF`.
         (Kwp, 0x11) if !bmt => (p1 == Some(0xFF) && len == 2).then_some(Service),
@@ -683,7 +710,10 @@ fn classify_bytes(
         // Tier 1, BMT: remote learning, and the actuator command `31 out param count`
         // ("COMMANDE DES ACTUATEURS" 31000000).
         (Kwp, 0x31) if bmt => (is_remote_learning(payload)
-            || (len == 4 && p1.is_some_and(|b| BMT_ACTUATOR_OUTPUTS.contains(&b))))
+            || (len == 4
+                && p1.is_some_and(|b| {
+                    BMT_ACTUATOR_OUTPUTS.contains(&b) && !BMT_UNKNOWN_ACTUATOR_OUTPUTS.contains(&b)
+                })))
         .then_some(Service),
         // Tier 1, other KWP ECUs (Sirius): only injector inhibition `31 A0 00`.
         (Kwp, 0x31) => (payload == [0x31, SIRIUS_INJECTOR_INHIBITION, SIRIUS_FUNCTION_START])
@@ -801,6 +831,17 @@ fn risk_info(bmt: bool, payload: &[u8], tier: Tier) -> RiskInfo {
             false,
             &["read and save the fault frames first"],
             &[Warning::ErasesFaultMemory],
+        ),
+        (Tier::Service, [0x30, SIRIUS_OUTPUT_AC, ..]) => r(
+            "drives the A/C output (relay) while the test runs; THIS CAR HAS NO A/C, so nothing is connected to it",
+            "no useful effect on this car; the ECU may log an output fault or energise an unconnected line",
+            true,
+            &[
+                "this car has no A/C: you probably do not want this output",
+                "engine off, ignition on",
+                "send the stop variant after",
+            ],
+            &[Warning::MovesActuator],
         ),
         (Tier::Service, [0x30, ..]) => r(
             "drives an output (fuel pump relay, fan, valve, lamp) while the test runs",
