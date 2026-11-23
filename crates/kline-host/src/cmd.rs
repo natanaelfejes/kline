@@ -75,6 +75,10 @@ pub struct GlobalArgs {
     /// DTR themselves. Whether the KKL cable uses DTR is NOT VERIFIED.
     #[arg(long, global = true, value_enum, default_value_t = DtrArg::High)]
     pub dtr: DtrArg,
+    /// Init rounds over all variants (default 3, DDT2000; 500 ms apart). Global: it may stand
+    /// before or after the command (`kline --init-attempts 1 connect`).
+    #[arg(long, global = true, value_name = "N")]
+    pub init_attempts: Option<u8>,
 }
 
 /// `--dtr` ([`kline_core::DtrMode`]).
@@ -188,9 +192,6 @@ pub struct LinkArgs {
     /// Diagnostic session to open after the init.
     #[arg(long, value_enum, default_value_t = SessionArg::Auto)]
     pub session: SessionArg,
-    /// Init rounds over all variants (DDT2000: 3, 500 ms apart).
-    #[arg(long, default_value_t = kline_core::RetryPolicy::default().init_attempts)]
-    pub init_attempts: u8,
     /// Tries of a request answered with NRC 21/23 (DDT2000 identification: 10; 200/500 ms).
     #[arg(long, default_value_t = kline_core::RetryPolicy::default().nrc_tries)]
     pub nrc_tries: u8,
@@ -212,7 +213,6 @@ impl Default for LinkArgs {
             ecu: EcuArgs::default(),
             variant: VariantArg::Auto,
             session: SessionArg::Auto,
-            init_attempts: p.init_attempts,
             nrc_tries: p.nrc_tries,
             periodic_tester_present: false,
             strict_loopback: false,
@@ -221,10 +221,14 @@ impl Default for LinkArgs {
 }
 
 impl LinkArgs {
-    /// The retry policy these options select (DDT2000 defaults otherwise).
-    pub fn retry_policy(&self) -> kline_core::RetryPolicy {
+    /// The retry policy these options and the global `--init-attempts` select (DDT2000
+    /// defaults otherwise).
+    pub fn retry_policy(&self, g: &GlobalArgs) -> kline_core::RetryPolicy {
         kline_core::RetryPolicy {
-            init_attempts: self.init_attempts.max(1),
+            init_attempts: g
+                .init_attempts
+                .unwrap_or(kline_core::RetryPolicy::default().init_attempts)
+                .max(1),
             nrc_tries: self.nrc_tries.max(1),
             ..kline_core::RetryPolicy::default()
         }
@@ -246,10 +250,12 @@ impl LinkArgs {
 pub struct ReadArgs {
     #[command(flatten)]
     pub link: LinkArgs,
-    /// Request name from the definition, or hex bytes (e.g. 21A9).
-    pub request: String,
+    /// Request names from the definition, or hex bytes (e.g. 2180 21F0 21F1). Several are read
+    /// one after the other in the same session, each decoded; every one must be a Tier 0 read.
+    #[arg(required = true, value_name = "REQUEST")]
+    pub request: Vec<String>,
     /// Set a sent data item of the named request (repeatable): `ITEM=VALUE`, VALUE a number
-    /// (physical units), a list label, or `hex:..` raw bytes.
+    /// (physical units), a list label, or `hex:..` raw bytes. Only with a single request.
     #[arg(long = "set", value_name = "ITEM=VALUE")]
     pub set: Vec<String>,
 }
@@ -264,14 +270,20 @@ pub struct LiveArgs {
     /// Cycles per second (all frames once per cycle).
     #[arg(long, default_value_t = 2.0)]
     pub rate: f64,
-    /// Stop after this many cycles (default: until Ctrl-C).
-    #[arg(long)]
-    pub count: Option<u64>,
+    /// Stop after this many cycles, all --frames once per cycle (default: until Ctrl-C). `--count`
+    /// is the old name of this option, not an item filter (that is --items).
+    #[arg(long, visible_alias = "count", value_name = "N")]
+    pub cycles: Option<u64>,
+    /// Stop after this many seconds (counted from the first cycle; the cycle running then is
+    /// finished). With --cycles, whichever comes first.
+    #[arg(long, value_name = "SECS", value_parser = clap::value_parser!(u64).range(1..))]
+    pub duration: Option<u64>,
     /// Show only these decoded items (comma-separated names, case-insensitive), also in JSON.
     #[arg(long, value_name = "NAME[,NAME..]")]
     pub items: Option<String>,
-    /// One line per cycle: the --items values, or without --items the values that changed
-    /// since the previous cycle (all of them in the first). Human output only.
+    /// One line per cycle with only the values that changed since the previous cycle (all of
+    /// them in the first), also with --items (then only the selected items are compared);
+    /// `(no change)` otherwise. Human output only.
     #[arg(long)]
     pub compact: bool,
 }
@@ -565,7 +577,7 @@ pub fn open_session(
     }
     cfg.strict_break_loopback = args.strict_loopback;
     ctx.g.apply(&mut cfg);
-    let policy = args.retry_policy();
+    let policy = args.retry_policy(ctx.g);
     let spec = ctx.port_spec()?;
     let tracer = if ctx.g.trace {
         Tracer::to(ctx.env.stderr.clone())
@@ -1429,11 +1441,48 @@ fn precheck_read(ecu: &Ecu, payload: &[u8]) -> Result<(), CliError> {
 
 pub fn read(ctx: &mut Ctx, a: &ReadArgs) -> Result<(), CliError> {
     let ecu = Ecu::resolve(&a.link.ecu, &ctx.g.defs_dir())?;
-    let r = defs::resolve_request_with(ecu.def(), &a.request, &a.set)?;
-    precheck_read(&ecu, &r.payload)?;
+    if a.request.len() > 1 && !a.set.is_empty() {
+        return Err(CliError::usage(
+            "--set sets items of ONE named request: give a single request with --set",
+        ));
+    }
+    // Every request is resolved and checked before anything is opened or sent: one that is
+    // not a read refuses the whole command (kline-core refuses again when it is sent).
+    let reqs: Vec<defs::Resolved> = a
+        .request
+        .iter()
+        .map(|q| defs::resolve_request_with(ecu.def(), q, &a.set))
+        .collect::<Result<_, _>>()?;
+    for r in &reqs {
+        precheck_read(&ecu, &r.payload)?;
+    }
     with_session(ctx, &a.link, "read", |ctx, o| {
         definition_choice_notice(ctx, o);
-        read_one(ctx, o, &r.payload, &r.names).map(drop)
+        // One session, the requests in the given order. A request the ECU answers negatively
+        // or that does not decode does not end the others; a line problem does. The exit
+        // code is that of the first failure.
+        let mut first: Option<CliError> = None;
+        for (i, r) in reqs.iter().enumerate() {
+            // Ctrl-C between requests: the rest is not sent (the first always is, as before).
+            if i > 0 && ctx.stopped() {
+                break;
+            }
+            match read_one(ctx, o, &r.payload, &r.names) {
+                Ok(_) => {}
+                Err(e) if matches!(e.code, exit::NEGATIVE | exit::DECODE) => {
+                    // A single request reports through the exit path, as before.
+                    if reqs.len() > 1 {
+                        ctx.out.emit(
+                        json!({"event": "read_error", "request": hex(&r.payload), "kind": e.kind, "message": e.message}),
+                            format!("{}: {}", hex_sp(&r.payload), e.message),
+                        );
+                    }
+                    first.get_or_insert(e);
+                }
+                Err(e) => return Err(first.unwrap_or(e)),
+            }
+        }
+        first.map_or(Ok(()), Err)
     })
 }
 
@@ -1468,7 +1517,7 @@ fn decode_ident(def: &kline_spec::EcuDef, p: &[u8], reply: &[u8]) -> (Decoded, b
 /// ladder when the candidates have `<AutoIdents>` and the reply has the Renault layout, else the
 /// first candidate whose key bytes match and whose identification requests decode.
 pub fn ident(ctx: &mut Ctx, a: &LinkArgs) -> Result<(), CliError> {
-    let policy = a.retry_policy();
+    let policy = a.retry_policy(ctx.g);
     with_session(ctx, a, "ident", |ctx, o| {
         let t = o.target();
         let reqs = defs::ident_requests(o.ecu.def(), &t);
@@ -1677,12 +1726,16 @@ pub fn live(ctx: &mut Ctx, a: &LiveArgs) -> Result<(), CliError> {
             .collect()
     };
     let period = (1000.0 / a.rate) as u64;
-    let policy = a.link.retry_policy();
+    let policy = a.link.retry_policy(ctx.g);
     with_session(ctx, &a.link, "live", |ctx, o| {
         definition_choice_notice(ctx, o);
         // --compact: the last shown text of every item (to print only what changed).
         let mut last: std::collections::HashMap<String, String> = Default::default();
         let mut cycle = 0u64;
+        let deadline = a.duration.map(|d| o.link.now_ms() + d.saturating_mul(1000));
+        let done = |cycle: u64, now: u64| {
+            a.cycles.is_some_and(|c| cycle >= c) || deadline.is_some_and(|d| now >= d)
+        };
         // DDT2000 screen refresh (RE: DdtDiagScrXml 0x5204ce50): only a cycle in which EVERY
         // request failed counts; it is retried after 400 ms, at most 3 times, then "Fatal error,
         // No communication with ECU".
@@ -1691,7 +1744,7 @@ pub fn live(ctx: &mut Ctx, a: &LiveArgs) -> Result<(), CliError> {
         // negatively? Then the line works and "no communication" would be wrong (item 8).
         let mut streak_negative = true;
         let mut streak_nrcs: Vec<(u8, u8)> = Vec::new();
-        while a.count.is_none_or(|c| cycle < c) && !ctx.stopped() {
+        while !done(cycle, o.link.now_ms()) && !ctx.stopped() {
             let start = o.link.now_ms();
             let mut any_ok = false;
             let mut line: Vec<String> = Vec::new();
@@ -1719,7 +1772,7 @@ pub fn live(ctx: &mut Ctx, a: &LiveArgs) -> Result<(), CliError> {
                                     }
                                     let changed =
                                         last.insert(i.name.clone(), t.clone()).as_ref() != Some(&t);
-                                    if changed || selected.is_some() {
+                                    if changed {
                                         line.push(t);
                                     }
                                 }
@@ -1824,8 +1877,11 @@ pub fn live(ctx: &mut Ctx, a: &LiveArgs) -> Result<(), CliError> {
             retries = 0;
             streak_negative = true;
             streak_nrcs.clear();
-            if a.count.is_none_or(|c| cycle < c) {
-                let next = start + period;
+            if !done(cycle, o.link.now_ms()) {
+                let mut next = start + period;
+                if let Some(d) = deadline {
+                    next = next.min(d);
+                }
                 let now = o.link.now_ms();
                 if !idle(ctx, o, next.saturating_sub(now))? {
                     break;

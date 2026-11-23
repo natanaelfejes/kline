@@ -61,7 +61,7 @@ pub enum Command {
     Connect(LinkArgs),
     /// Read 21 80 and choose the definition that fits the identification.
     Ident(LinkArgs),
-    /// One read request (name or hex), decoded. Tier 0 only.
+    /// One or more read requests (name or hex) in one session, each decoded. Tier 0 only.
     Read(ReadArgs),
     /// Read frames repeatedly, decoded (Ctrl-C to stop).
     Live(LiveArgs),

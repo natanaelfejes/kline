@@ -431,6 +431,20 @@ pub struct Opts {
     /// Ctrl-C pressed this many ms after the first write that contains these bytes
     /// ([`CtrlCAfterTx`]).
     pub ctrl_c_after_tx: Option<(Vec<u8>, u64)>,
+    /// How the capture directory is given (default: global option before the command).
+    pub capture: CaptureArg,
+}
+
+/// Where a test run passes the capture directory.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CaptureArg {
+    /// `kline --capture-dir DIR <command> ..`
+    BeforeCommand,
+    /// `kline <command> .. --capture-dir DIR`
+    AfterCommand,
+    /// Only `$KLINE_CAPTURE_DIR` (set for the run; the other tests always pass the option,
+    /// which wins over the variable, so they do not see it).
+    Env,
 }
 
 impl Default for Opts {
@@ -443,6 +457,7 @@ impl Default for Opts {
             ctrl_c: false,
             ports: Vec::new(),
             ctrl_c_after_tx: None,
+            capture: CaptureArg::BeforeCommand,
         }
     }
 }
@@ -566,15 +581,22 @@ fn run_line_inner(line: VirtualLine, port: &str, args: &[&str], o: Opts, blind: 
             }) as Box<dyn Prompt>)
         }),
     };
-    let mut full: Vec<String> = vec![
-        "kline".into(),
-        "--port".into(),
-        port.into(),
-        "--capture-dir".into(),
-        capture_dir.display().to_string(),
-    ];
+    let mut full: Vec<String> = vec!["kline".into(), "--port".into(), port.into()];
+    if o.capture == CaptureArg::BeforeCommand {
+        full.extend(["--capture-dir".into(), capture_dir.display().to_string()]);
+    }
     full.extend(args.iter().map(|s| s.to_string()));
+    match o.capture {
+        CaptureArg::BeforeCommand => {}
+        CaptureArg::AfterCommand => {
+            full.extend(["--capture-dir".into(), capture_dir.display().to_string()])
+        }
+        CaptureArg::Env => std::env::set_var("KLINE_CAPTURE_DIR", &capture_dir),
+    }
     let code = kline_cli::run_args(full, &mut env);
+    if o.capture == CaptureArg::Env {
+        std::env::remove_var("KLINE_CAPTURE_DIR");
+    }
     let s = |b: &Arc<Mutex<Vec<u8>>>| String::from_utf8(b.lock().unwrap().clone()).unwrap();
     let r = Run {
         code,

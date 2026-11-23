@@ -2060,14 +2060,14 @@ fn live_items_filter_and_compact_lines() {
         lines[0]
     );
     assert!(lines[1].ends_with("(no change)"), "{}", lines[1]);
-    // Compact with --items: the selected values every cycle.
+    // Compact with --items: only the selected values, and only when they changed (all of
+    // them in the first cycle), like without --items (car session: every line was printed).
     let r = with(&["--compact", "--items", "Engine speed"], false);
     let lines: Vec<&str> = r.stdout.lines().filter(|l| l.starts_with('#')).collect();
     assert_eq!(lines.len(), 2, "{}", r.stdout);
-    assert!(
-        lines.iter().all(|l| l.ends_with("Engine speed=850 rpm")),
-        "{lines:?}"
-    );
+    assert!(lines[0].ends_with("Engine speed=850 rpm"), "{lines:?}");
+    assert!(!lines[0].contains("Coolant"), "{lines:?}");
+    assert!(lines[1].ends_with("(no change)"), "{lines:?}");
     // Unknown item: exit 8 before the port is opened.
     let r = with(&["--items", "Engine sped"], false);
     assert_eq!(r.code, 8, "{}", r.stderr);
