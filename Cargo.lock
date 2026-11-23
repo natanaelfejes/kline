@@ -387,6 +387,7 @@ dependencies = [
  "anyhow",
  "clap",
  "ctrlc",
+ "kline-bridge",
  "kline-core",
  "kline-host",
  "kline-sim",
@@ -410,6 +411,7 @@ name = "kline-host"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "kline-bridge",
  "kline-core",
  "kline-sim",
  "kline-spec",

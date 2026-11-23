@@ -7,7 +7,13 @@ license.workspace = true
 authors.workspace = true
 description = "Host-side runtime shared by `kline` and `kline-agent`: serial/sim transports, link runner, JSONL capture, trace, Tier 0 commands. Never enables kline-core's approved-routines."
 
+[features]
+# `--transport ble`: reads through the Clio Link bridge (docs/bridge-protocol.md). kline-bridge
+# is used without default features plus `std`: never its `approvals`.
+ble = ["dep:kline-bridge"]
+
 [dependencies]
+kline-bridge = { path = "../kline-bridge", default-features = false, features = ["std"], optional = true }
 # No `approved-routines` here, ever (SAFETY.md rule 2): kline-agent depends on this crate.
 kline-core = { path = "../kline-core", features = ["spec"] }
 kline-spec = { path = "../kline-spec" }
@@ -22,3 +28,4 @@ nix = { version = "0.26", default-features = false, features = ["term"] }
 
 [dev-dependencies]
 kline-sim = { path = "../kline-sim" }
+kline-bridge = { path = "../kline-bridge", default-features = false, features = ["std"] }

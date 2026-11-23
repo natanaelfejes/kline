@@ -14,6 +14,8 @@
 // Only `hrtimer`'s Windows `timeBeginPeriod` FFI is allowed unsafe code (two integer calls).
 #![deny(unsafe_code)]
 
+#[cfg(feature = "ble")]
+pub mod ble;
 pub mod capture;
 pub mod cmd;
 #[cfg(unix)]

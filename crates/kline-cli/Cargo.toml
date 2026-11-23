@@ -11,6 +11,10 @@ description = "`kline`: interactive K-line diagnostic CLI for Renault K-line ECU
 name = "kline"
 path = "src/main.rs"
 
+[features]
+# `--transport ble` (docs/bridge-protocol.md "Host transport"). The BLE link is Tier 0 only.
+ble = ["kline-host/ble"]
+
 [dependencies]
 kline-host = { path = "../kline-host" }
 # SAFETY.md rule 2: the interactive `kline` CLI is the only binary that may enable approvals.
@@ -23,4 +27,5 @@ serde_json = "1.0.154"
 
 [dev-dependencies]
 kline-sim = { path = "../kline-sim" }
+kline-bridge = { path = "../kline-bridge", default-features = false, features = ["std"] }
 serialport = { version = "4.10.1", default-features = false }

@@ -495,6 +495,9 @@ pub struct Opts {
     pub ctrl_c_after_tx: Option<(Vec<u8>, u64)>,
     /// How the capture directory is given (default: global option before the command).
     pub capture: CaptureArg,
+    /// The BLE link for `--transport ble` (feature `ble`).
+    #[cfg(feature = "ble")]
+    pub ble: kline_host::cmd::BleOpener,
 }
 
 /// Where a test run passes the capture directory.
@@ -520,6 +523,8 @@ impl Default for Opts {
             ports: Vec::new(),
             ctrl_c_after_tx: None,
             capture: CaptureArg::BeforeCommand,
+            #[cfg(feature = "ble")]
+            ble: None,
         }
     }
 }
@@ -635,6 +640,8 @@ fn run_line_inner(line: VirtualLine, port: &str, args: &[&str], o: Opts, blind: 
             }),
             sys_root: sys_root.clone(),
             capture_dir_env: (o.capture == CaptureArg::Env).then(|| capture_dir.clone()),
+            #[cfg(feature = "ble")]
+            ble: o.ble,
         },
         interactive: o.interactive,
         tty: Box::new(move || {

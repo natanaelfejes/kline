@@ -80,7 +80,25 @@ pub struct GlobalArgs {
     /// session (ports, replay, risk, setup, selftest) ignore it.
     #[arg(long, global = true, value_name = "N")]
     pub init_attempts: Option<u8>,
+    /// `serial` (default): the KKL cable or the simulator pty. `ble`: through the Clio Link
+    /// bridge, `read` only, Tier 0 only (docs/bridge-protocol.md "Host transport"); needs a
+    /// build with the cargo feature `ble`.
+    #[arg(long, global = true, value_enum, default_value_t = TransportArg::Serial)]
+    pub transport: TransportArg,
 }
+
+/// `--transport`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum TransportArg {
+    #[default]
+    Serial,
+    Ble,
+}
+
+/// Opens the BLE link to the bridge (feature `ble`). `None`: this build has no BLE radio
+/// backend (docs/bridge-protocol.md "Host transport").
+#[cfg(feature = "ble")]
+pub type BleOpener = Option<Box<dyn FnMut() -> io::Result<Box<dyn crate::ble::BleLink>>>>;
 
 /// `--dtr` ([`kline_core::DtrMode`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
@@ -434,6 +452,9 @@ pub struct Env {
     /// `$KLINE_CAPTURE_DIR` (real: read from the process environment once; tests set it here
     /// instead of mutating the shared process environment).
     pub capture_dir_env: Option<PathBuf>,
+    /// The BLE link for `--transport ble`.
+    #[cfg(feature = "ble")]
+    pub ble: BleOpener,
 }
 
 impl Env {
@@ -447,6 +468,8 @@ impl Env {
             host_clock: Box::new(|| Box::new(SystemClock::new())),
             sys_root: PathBuf::from(crate::latency::SYS_ROOT),
             capture_dir_env: std::env::var_os("KLINE_CAPTURE_DIR").map(PathBuf::from),
+            #[cfg(feature = "ble")]
+            ble: None,
         }
     }
 }
@@ -512,6 +535,12 @@ impl<'a> Ctx<'a> {
     }
 
     pub fn port_spec(&self) -> Result<PortSpec, CliError> {
+        if self.g.transport == TransportArg::Ble {
+            return Err(CliError::usage(
+                "--transport ble supports `read` only (the bridge owns the K line; see \
+                 docs/bridge-protocol.md)",
+            ));
+        }
         if let Some(control) = &self.g.sim_control {
             let tty = self
                 .g
@@ -1455,6 +1484,14 @@ fn precheck_read(ecu: &Ecu, payload: &[u8]) -> Result<(), CliError> {
 }
 
 pub fn read(ctx: &mut Ctx, a: &ReadArgs) -> Result<(), CliError> {
+    if ctx.g.transport == TransportArg::Ble {
+        #[cfg(feature = "ble")]
+        return read_ble(ctx, a);
+        #[cfg(not(feature = "ble"))]
+        return Err(CliError::usage(
+            "this build has no BLE transport (cargo feature `ble`)",
+        ));
+    }
     let ecu = Ecu::resolve(&a.link.ecu, &ctx.g.defs_dir())?;
     if a.request.len() > 1 && !a.set.is_empty() {
         return Err(CliError::usage(
@@ -2644,6 +2681,89 @@ fn emit_exchange(ctx: &Ctx, ecu: Option<&Ecu>, x: &Exchange) {
 /// Tier name for messages.
 pub fn tier_label(t: Tier) -> &'static str {
     tier_name(t)
+}
+
+/// `read` over `--transport ble`: every request is checked as a read here, then sent through
+/// the bridge, which checks it again (agent role: Tier 0 only) and runs it on its own session.
+#[cfg(feature = "ble")]
+fn read_ble(ctx: &mut Ctx, a: &ReadArgs) -> Result<(), CliError> {
+    use crate::ble::{BleError, BridgeClient};
+    use kline_bridge::gatt::ResultCode;
+    use kline_bridge::profile::EcuId;
+
+    let ecu = Ecu::resolve(&a.link.ecu, &ctx.g.defs_dir())?;
+    let target = ecu.target()?;
+    let id = EcuId::from_address(target.ecu_address).ok_or_else(|| {
+        CliError::usage(format!(
+            "over BLE only the injection (0x7A) and the BMT (0x26) are reachable, not {:#04x}",
+            target.ecu_address
+        ))
+    })?;
+    if a.request.len() > 1 && !a.set.is_empty() {
+        return Err(CliError::usage(
+            "--set sets items of ONE named request: give a single request with --set",
+        ));
+    }
+    let reqs: Vec<defs::Resolved> = a
+        .request
+        .iter()
+        .map(|q| defs::resolve_request_with(ecu.def(), q, &a.set))
+        .collect::<Result<_, _>>()?;
+    for r in &reqs {
+        precheck_read(&ecu, &r.payload)?;
+    }
+    let link =
+        match ctx.env.ble.as_mut() {
+            Some(open) => open().map_err(|e| CliError::port(format!("BLE: {e}")))?,
+            None => return Err(CliError::port(
+                "this build has no BLE radio backend (docs/bridge-protocol.md \"Host transport\")",
+            )),
+        };
+    let mut client = BridgeClient::new(link);
+    let mut first: Option<CliError> = None;
+    for r in &reqs {
+        match client.read(id, &r.payload) {
+            Ok(reply) => {
+                let decoded = defs::decode_reply(ecu.def(), &r.payload, &reply);
+                ctx.out.emit(
+                    json!({"event": "read", "transport": "ble", "request": hex(&r.payload),
+                           "names": r.names, "reply": hex(&reply),
+                           "decoded": defs::decoded_json(&decoded)}),
+                    format!(
+                        "{} -> {}\n{}",
+                        hex_sp(&r.payload),
+                        hex_sp(&reply),
+                        defs::decoded_human(&decoded)
+                    )
+                    .trim_end(),
+                );
+            }
+            Err(e) => {
+                let err = match &e {
+                    BleError::NotRead { .. } => CliError::refused(e.to_string()),
+                    BleError::Bridge {
+                        code: ResultCode::NegativeReply,
+                        ..
+                    } => CliError::new(exit::NEGATIVE, "negative", e.to_string()),
+                    BleError::Bridge {
+                        code:
+                            ResultCode::Forbidden
+                            | ResultCode::NotAllowedForRole
+                            | ResultCode::ApprovalRequired,
+                        ..
+                    } => CliError::refused(e.to_string()),
+                    _ => CliError::new(exit::COMM, "comm", e.to_string()),
+                };
+                ctx.out.emit(
+                    json!({"event": "read_error", "transport": "ble", "request": hex(&r.payload),
+                           "kind": err.kind, "message": err.message}),
+                    format!("{}: {}", hex_sp(&r.payload), err.message),
+                );
+                first.get_or_insert(err);
+            }
+        }
+    }
+    first.map_or(Ok(()), Err)
 }
 
 #[cfg(test)]
