@@ -33,6 +33,22 @@ Default-deny, decided on exact payload bytes and the target of the init that act
   `/dev/tty`, never with `--json`. MCP/`--json` binaries must never enable it; automated and MCP
   callers may only prepare a request (print `RiskInfo` and the exact command for a human).
   `kline-agent` refuses to start if the feature was unified into it.
+- **Bridge firmware (owner decision 2026-11-23).** The Clio Link bridge firmware
+  (`kline-bridge` feature `approvals`, off by default) may also enable `approved-routines`. The
+  code goes over the encrypted BLE link to the bonded **owner** phone only, which shows the
+  `RiskInfo` and sends back what the owner typed; the same anti-accident gate as `/dev/tty`. The
+  agent bond (the Mac, `kline --transport ble`) is Tier 0 only and can never prepare or confirm.
+  Over BLE the bridge applies the car's name guard as compiled byte prefixes and decides every
+  request of the car's definitions exactly as the CLI does (`kline-bridge`
+  `tests/definition_parity.rs`); non-reads are refused while the car moves.
+- **Standing self-approval, D37 only (owner decision 2026-11-23).** With `kline-bridge` feature
+  `standing-lock` (off by default) and only in the bridge firmware, lock-when-moving may send the
+  two exact BMT requests `31 A0 00 01` (lock) and `31 A1 00 01` (unlock) to the BMT `0x26`
+  without a per-request code: only after the owner armed it in the app by confirming one
+  kline-core challenge for each of the two requests, only while armed (until the owner disarms;
+  a reset disarms), and only when kline-core's challenge is for exactly that payload, that target
+  and the `RiskInfo` the owner confirmed. No other payload, ECU or binary may do this. The owner
+  accepts that the remote's lock state may get out of step with the doors.
 - **What the code is.** The `/dev/tty` code is an **anti-accident gate**, not an
   authentication: it stops a pipe, `--json`, a script or a non-interactive agent from sending by
   mistake. An automated agent that drives a terminal (pty) can read and type the code; the owner

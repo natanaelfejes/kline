@@ -3,9 +3,11 @@
 //!
 //! What runs here today: the kline-bridge state machine over the real UART and GPIOs, the fob
 //! output driver (low before anything else), the RTC watchdog, the K-line power switch, the
-//! battery divider on the ADC. What is not here yet (W7): BLE (the `BleSink` below drops
-//! notifications; `--features bench` prints live samples on the USB serial console instead),
-//! light sleep with the 32 kHz crystal, NVS for the command counters.
+//! battery divider on the ADC, light sleep in watchdog-fed slices, the TX pin held low while the
+//! transceiver is off. What is not here yet (W7): BLE (the `BleSink` below drops notifications;
+//! `--features bench` prints live samples on the USB serial console instead), BLE wake-up and
+//! the 32 kHz crystal, NVS for the command counters and the yield holder
+//! (`Bridge::restore_counters`, `Bridge::restore_yield` are ready for it).
 //!
 //! 5-baud init: the L9637D TX input is driven by UART1 TX through 1 kOhm, and `BREAK_N`
 //! (open drain) pulls that node low. kline-core's `SetBreak(true)` / `SetBreak(false)` with its
@@ -19,12 +21,13 @@ extern crate alloc;
 
 use esp_hal::analog::adc::{Adc, AdcConfig, AdcPin, Attenuation};
 use esp_hal::gpio::{DriveMode, Level, Output, OutputConfig};
-use esp_hal::peripherals::{ADC1, GPIO3};
+use esp_hal::peripherals::{ADC1, GPIO3, GPIO4, GPIO5, GPIO6, GPIO7, UART1};
+use esp_hal::rtc_cntl::sleep::{LowPower, RtcSleepConfig};
 use esp_hal::rtc_cntl::{Rtc, Rwdt, RwdtStage};
 use esp_hal::time::{Duration, Instant};
 use esp_hal::uart::{Config as UartConfig, Uart};
 use esp_hal::{main, Blocking};
-use kline_bridge::bridge::{Bridge, BridgeConfig};
+use kline_bridge::bridge::{Bridge, BridgeConfig, SleepReason};
 use kline_bridge::fob::{FobDriver, FobTiming};
 use kline_bridge::gatt::Channel;
 use kline_bridge::hal::{BleSink, Clock, KLinePort, OutputPin, PortError, Power, Watchdog};
@@ -33,6 +36,25 @@ use kline_bridge::runner::{self, Stepped};
 use kline_core::{Action, Event};
 
 esp_bootloader_esp_idf::esp_app_desc!();
+
+/// kline-core's approval codes and nonces come from getrandom; on the C3 they come from the
+/// hardware RNG. True randomness needs an entropy source running (the radio once BLE is up in
+/// W7; NOT VERIFIED here).
+///
+/// # Safety
+///
+/// getrandom calls this with a valid, writable `dest` of `len` bytes.
+#[cfg(feature = "approvals")]
+#[unsafe(no_mangle)]
+unsafe extern "Rust" fn __getrandom_v03_custom(
+    dest: *mut u8,
+    len: usize,
+) -> Result<(), getrandom::Error> {
+    // SAFETY: the caller guarantees `dest` is valid for `len` writable bytes.
+    let buf = unsafe { core::slice::from_raw_parts_mut(dest, len) };
+    esp_hal::rng::Rng::new().read(buf);
+    Ok(())
+}
 
 /// K-line UART speed: 10400 8N1 (docs/protocol.md "Line settings").
 const K_BAUD: u32 = 10_400;
@@ -45,14 +67,28 @@ const WATCHDOG_MS: u64 = 8_000;
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
+    // First the fob output low: on the target a panic does not unwind, so `FobDriver`'s Drop
+    // never runs (MASTER-PLAN-v2 3.1 rule 3). The K line is released too.
+    // SAFETY: the program is ending; nothing else uses these pins after this point, and
+    // driving them low is the safe state of both outputs.
+    let (_fob, _k_pwr) = unsafe {
+        (
+            Output::new(GPIO7::steal(), Level::Low, OutputConfig::default()),
+            Output::new(GPIO6::steal(), Level::Low, OutputConfig::default()),
+        )
+    };
     esp_println::println!("panic: {info}");
-    // Let the watchdog reset the chip; the fob GPIO floats to its pull-down meanwhile.
+    // Let the watchdog reset the chip; the pull-downs hold both outputs off meanwhile.
     loop {}
 }
 
 /// UART1 + BREAK_N + K_PWR around the L9637D.
 struct KLine<'d> {
-    uart: Uart<'d, Blocking>,
+    /// UART1 on GPIO5 (TX) / GPIO4 (RX) while the transceiver is powered.
+    uart: Option<Uart<'static, Blocking>>,
+    /// GPIO5 driven low while the transceiver is off, so the TX pin never back-powers the
+    /// unpowered L9637D through its TX input (review minor, docs/bridge-hardware.md).
+    tx_low: Option<Output<'static>>,
     break_n: Output<'d>,
     k_pwr: Output<'d>,
     /// Bytes seen on RX since the last break started (break loopback, docs/protocol.md
@@ -63,10 +99,13 @@ struct KLine<'d> {
 
 impl KLine<'_> {
     fn drain(&mut self) -> usize {
+        let Some(uart) = self.uart.as_mut() else {
+            return 0;
+        };
         let mut buf = [0u8; 32];
         let mut n = 0;
-        while self.uart.read_ready() {
-            match self.uart.read_buffered(&mut buf) {
+        while uart.read_ready() {
+            match uart.read_buffered(&mut buf) {
                 Ok(0) => break,
                 Ok(k) => n += k,
                 // A break reads as a framing error: that is the loopback we look for.
@@ -118,17 +157,18 @@ impl KLinePort for KLine<'_> {
                 inter_byte_ms,
             } => {
                 let bytes = frame.bytes();
+                let uart = self.uart.as_mut().ok_or(PortError)?;
                 if *inter_byte_ms == 0 {
-                    write_all(&mut self.uart, bytes)?;
+                    write_all(uart, bytes)?;
                 } else {
                     for (i, b) in bytes.iter().enumerate() {
                         if i > 0 {
                             busy_ms(u64::from(*inter_byte_ms));
                         }
-                        write_all(&mut self.uart, core::slice::from_ref(b))?;
+                        write_all(uart, core::slice::from_ref(b))?;
                     }
                 }
-                self.uart.flush().map_err(|_| PortError)?;
+                uart.flush().map_err(|_| PortError)?;
                 Event::Done
             }
             Action::Read { count, timeout_ms } => {
@@ -136,9 +176,10 @@ impl KLinePort for KLine<'_> {
                 let end = Instant::now() + Duration::from_millis(u64::from(*timeout_ms));
                 let mut out = alloc::vec::Vec::with_capacity(*count);
                 let mut b = [0u8; 1];
+                let uart = self.uart.as_mut().ok_or(PortError)?;
                 while out.len() < *count && Instant::now() < end {
-                    if self.uart.read_ready() {
-                        if let Ok(1) = self.uart.read_buffered(&mut b) {
+                    if uart.read_ready() {
+                        if let Ok(1) = uart.read_buffered(&mut b) {
                             out.push(b[0]);
                         }
                     }
@@ -152,13 +193,45 @@ impl KLinePort for KLine<'_> {
         })
     }
 
+    /// On: release the TX pin, UART1 back (TX idles high), then K_PWR. Off: K_PWR first, then
+    /// the UART away and TX low. The order keeps K recessive and the unpowered transceiver's TX
+    /// input low.
     fn set_power(&mut self, on: bool) {
         if on {
+            if self.uart.is_none() {
+                self.tx_low = None;
+                self.uart = Some(new_uart());
+            }
             self.k_pwr.set_high();
         } else {
             self.k_pwr.set_low();
+            self.uart = None;
+            if self.tx_low.is_none() {
+                self.tx_low = Some(tx_pin_low());
+            }
         }
     }
+}
+
+/// UART1 on GPIO5/GPIO4 at 10400 8N1.
+fn new_uart() -> Uart<'static, Blocking> {
+    // SAFETY: `main` gives up UART1, GPIO4 and GPIO5 at start, and the only other user of
+    // these pins (`tx_low`) has been dropped before this call (`KLine::set_power`).
+    let (uart, tx, rx) = unsafe { (UART1::steal(), GPIO5::steal(), GPIO4::steal()) };
+    Uart::new(uart, UartConfig::default().with_baudrate(K_BAUD))
+        .expect("UART1 config")
+        .with_tx(tx)
+        .with_rx(rx)
+}
+
+/// GPIO5 as a plain output driven low.
+fn tx_pin_low() -> Output<'static> {
+    // SAFETY: the UART that owned GPIO5 has been dropped before this call.
+    Output::new(
+        unsafe { GPIO5::steal() },
+        Level::Low,
+        OutputConfig::default(),
+    )
 }
 
 fn write_all(uart: &mut Uart<'_, Blocking>, mut bytes: &[u8]) -> Result<(), PortError> {
@@ -178,6 +251,7 @@ fn busy_ms(ms: u64) {
 struct Board<'d> {
     kline: KLine<'d>,
     rwdt: Rwdt,
+    low_power: LowPower<'d>,
 }
 
 impl KLinePort for Board<'_> {
@@ -224,11 +298,24 @@ impl Watchdog for Board<'_> {
     }
 }
 
+/// Light-sleep slice: the RTC watchdog keeps running in light sleep, so the bridge wakes to
+/// feed it. ours: half the watchdog time.
+const SLEEP_SLICE_MS: u64 = WATCHDOG_MS / 2;
+
 impl Power for Board<'_> {
-    fn sleep(&mut self, wake_after_ms: Option<u64>) {
-        // W7: light sleep with BLE advertising. For now: wait, feeding the watchdog.
-        let t = self.now_ms() + wake_after_ms.unwrap_or(1_000);
-        self.wait_until(t);
+    /// Light sleep in slices of [`SLEEP_SLICE_MS`] (never a busy-wait), feeding the watchdog
+    /// between slices. W7: wake on a BLE connection too, and deep sleep for the long low-battery
+    /// sleep.
+    fn sleep(&mut self, wake_after_ms: Option<u64>, reason: SleepReason) {
+        esp_println::println!("sleep {reason:?} {wake_after_ms:?}");
+        let end = self.now_ms() + wake_after_ms.unwrap_or(1_000);
+        while self.now_ms() < end {
+            let slice = (end - self.now_ms()).min(SLEEP_SLICE_MS);
+            self.low_power
+                .set_wakeup_deadline(Instant::now() + Duration::from_millis(slice));
+            self.low_power.sleep_light(RtcSleepConfig::default());
+            self.rwdt.feed();
+        }
     }
 }
 
@@ -294,10 +381,10 @@ fn main() -> ! {
         .set_timeout(RwdtStage::Stage0, Duration::from_millis(WATCHDOG_MS));
     rtc.rwdt.enable();
 
-    let uart = Uart::new(p.UART1, UartConfig::default().with_baudrate(K_BAUD))
-        .expect("UART1 config")
-        .with_tx(p.GPIO5)
-        .with_rx(p.GPIO4);
+    // UART1, GPIO4 and GPIO5 are taken over by `KLine::set_power` (see `new_uart`). The
+    // transceiver starts off, so the TX pin starts low.
+    let _ = (p.UART1, p.GPIO4, p.GPIO5);
+    let tx_low = tx_pin_low();
 
     let mut adc_cfg = AdcConfig::new();
     let pin = adc_cfg.enable_pin(p.GPIO3, Attenuation::_11dB);
@@ -308,13 +395,15 @@ fn main() -> ! {
 
     let mut board = Board {
         kline: KLine {
-            uart,
+            uart: None,
+            tx_low: Some(tx_low),
             break_n,
             k_pwr,
             rx_during_break: false,
             in_break: false,
         },
         rwdt: rtc.rwdt,
+        low_power: LowPower::new(p.LPWR),
     };
     let mut fob = fob;
     let mut bridge = Bridge::new(BridgeConfig::default(), board.now_ms());

@@ -110,23 +110,25 @@ bridge accepted from this bond ([counters](#roles-pairing-counters-rate-limits))
 
 | Opcode | Name | Arguments | Who | What |
 |---|---|---|---|---|
-| `01` | START_LIVE | profile u8 (1 drive, 2 parked) | owner, agent | poll this profile continuously |
+| `01` | START_LIVE | profile u8 (1 drive, 2 parked) | owner, agent | poll this profile continuously (parked: `LwmActive` while lock-when-moving needs the Sirius) |
 | `02` | STOP_LIVE | | owner, agent | stop polling |
-| `03` | REQUEST | ecu u8 (`7A` or `26`), payload (1..32 bytes) | owner, agent | one request; must be Tier 0 |
-| `04` | PREPARE | ecu u8, payload | owner | approval challenge for one Tier 1 request |
+| `03` | REQUEST | ecu u8 (`7A`, `26`, `01`, `2C`), payload (1..32 bytes) | owner, agent | one request; must be Tier 0 |
+| `04` | PREPARE | ecu u8, payload | owner | approval challenge for one Tier 1, 2 or 3 request |
 | `05` | CONFIRM | challenge id u32, code (1..16 printable ASCII) | owner | send the prepared request |
 | `06` | LOCK | | owner | lock the parked car with the fob output |
 | `07` | UNLOCK | | owner | unlock the parked car with the fob output |
-| `08` | YIELD_KLINE | | owner, agent | Stop the session, switch the transceiver off (`Busy` while lock-when-moving owes an unlock) |
-| `09` | RESUME_KLINE | | owner, agent | take the K line back |
+| `08` | YIELD_KLINE | | owner, agent | take a lease on the line: `Accepted`, then `Ok` once the session is stopped and the transceiver is off (`LwmActive` while lock-when-moving needs the Sirius) |
+| `09` | RESUME_KLINE | | the client that yielded, or an owner | end the lease, take the K line back |
 | `0A` | SET_TIME | Unix seconds u32 | owner, agent | for logs only |
 | `0B` | LWM_ARM | | owner | arm lock-when-moving (two challenges) |
 | `0C` | LWM_DISARM | | owner | disarm |
 | `0D` | RAW_STREAM | 0 or 1 | owner, agent | Raw notifications off or on |
 | `0E` | GET_STATUS | | owner, agent | Status frame in the Response data |
 
-An ECU byte other than `7A` (Sirius) or `26` (BMT) does not decode: the airbag ECU and
-everything else stay on the cable CLI in v1.
+ECU bytes: `7A` Sirius, `26` BMT, `01` Bosch 5.3 ABS (ISO8), `2C` airbag (owner decision
+2026-11-23: BLE scope v1 is everything the CLI can do for these four). Any other byte does not
+decode. While lock-when-moving needs the Sirius (armed with the engine running, or an unlock
+owed), REQUEST and PREPARE for another ECU answer `LwmActive`.
 
 ## Response and result codes
 
@@ -151,9 +153,15 @@ same counter and the final result.
 | `0C` | NegativeReply | the ECU's `7F sid nrc` |
 | `0D` | Yielded | |
 | `0E` | LockNotConfirmed | lock state unknown, or `21A3` did not follow the pulse |
-| `0F` | Unsupported | not in this build, or not over BLE (Tier 2/3, PREPARE of a read) |
-| `10` | Challenge | challenge id u32, tier u8 (1), code ASCII |
+| `0F` | Unsupported | not in this build (no `approvals`, no `standing-lock`), or PREPARE of a read |
+| `10` | Challenge | challenge id u32, tier u8 (1 service, 2 config write, 3 expert), code ASCII (6 characters, 10 for expert) |
 | `11` | IgnitionOn | fob path refused: engine running or charging voltage |
+| `12` | VehicleMoving | a non-read while a fresh Sirius speed is above 0, or on the Sirius with the engine running and no fresh speed |
+| `13` | LwmActive | lock-when-moving needs the Sirius now |
+| `14` | ReplyTooLong | the ECU reply does not fit one Response frame (never truncated) |
+
+A Response never carries more than 170 data bytes; a longer reply gives `ReplyTooLong`. Raw
+splits long reads into several frames.
 
 ## Raw
 
@@ -172,20 +180,35 @@ kline JSONL capture line (rx includes the echo). Broadcast to every client that 
 - **Counters**: per bond, strictly increasing; the bridge refuses a counter that is not
   greater than the last accepted one (`StaleCounter`). The firmware stores the last accepted
   value per bond in NVS (`Bridge::counters`, `restore_counters`; W7), so a recorded write
-  cannot be replayed after a reset. The host client starts at the Unix time in seconds.
+  cannot be replayed after a reset. The host client starts at the Unix time in seconds. A bond
+  that reached `u32::MAX` accepts nothing more until it bonds again (`Bridge::on_bond` forgets
+  its counter).
+- **Unbonded peers** are not clients: no notification is addressed to them and they do not
+  keep the bridge awake. The firmware sends broadcast notifications to bonded, subscribed peers
+  only.
+- **Yield lease**: `YIELD_KLINE` records who yielded. Only that client or an owner can
+  `RESUME_KLINE`; a running engine never takes the line back by itself. The firmware saves the
+  holder in NVS and restores it at boot (`Bridge::yield_holder`, `restore_yield`; W7), so a
+  reset never makes a second master on the line.
 - **Rate limits** (ours): 20 commands per second in total; LOCK/UNLOCK at most 6 per 10 minutes
   and at least 5 s apart (MASTER-PLAN-v2 3.1 rule 4).
 
-## Approvals (Tier 1 from the phone)
+## Approvals (Tier 1 to 3 from the phone)
 
-Build feature `approvals` (off by default, see [kline-core changes needed](#kline-core-changes-needed)).
+Build feature `approvals` (off by default; SAFETY.md rule 2 "Bridge firmware"). Owner decision
+2026-11-23: the owner gets Tier 1, Tier 2 and Expert over BLE with the same codes and flow as the
+CLI; forbidden stays forbidden; the agent stays Tier 0.
 
-1. Owner writes `PREPARE ecu payload`. The bridge checks: owner role, kline-core tier is
-   exactly Tier 1 (Tier 2/3 are `Unsupported` over BLE in v1, forbidden is `Forbidden`), and
-   battery at or above 12.0 V (MASTER-PLAN-v2 P6).
-2. The bridge opens (or keeps) a session with that ECU and calls kline-core
-   `Session::service_challenge(payload)`. kline-core makes a random 6-character code bound to
-   that session, request id, target, bytes, tier and `RiskInfo`.
+1. Owner writes `PREPARE ecu payload`. The bridge checks: owner role, the kline-core tier with
+   the bridge's guard ([Limits](#limits)) is 1, 2 or 3 (forbidden is `Forbidden`), battery at
+   or above 12.0 V (MASTER-PLAN-v2 P6), and the car is not moving (`VehicleMoving`).
+2. The bridge opens (or keeps) a session with that ECU and asks kline-core for the challenge
+   of the request's tier on the session's real target: `service_challenge`,
+   `config_write_challenge` (Tier 2; the identification is the session's latest `21 80`
+   reply, so the app reads `21 80` and the backup `21 xx` with REQUEST first and chooses its
+   definition from that reply, like the CLI) or `expert_challenge` (10-character code).
+   kline-core binds the code to that session, request id, target, key bytes, bytes, tier and
+   `RiskInfo`.
 3. Response `Challenge`: id, tier, code, to the owner's phone only (never broadcast, never in
    Raw). The app shows the exact bytes, the `RiskInfo` text (the app computes it with the same
    kline-core function, `safety::assess`) and the code; the owner types the code.
@@ -219,29 +242,36 @@ drop, and has an external pull-down for the time the GPIO floats in a reset
 
 ## Lock-when-moving
 
-Automaton `kline_bridge::lwm` (MASTER-PLAN-v2 3.1): lock once when speed (Sirius `21A9`) is
-above 15 km/h for 3 s; lock again only after more than 60 s at speed 0 or after an owner
-UNLOCK and a new drive-off; unlock when rpm is 0 or the Sirius has been silent for 3 s; 5 s
-between actuations; off by default. Once it has locked, it still unlocks at engine stop after
-a disarm (ours: the unlock is the accident mitigation of 3.1 rule 2). A failed lock is not
-retried; a failed unlock is retried up to 3 times. The bridge's own detour to the BMT (two
-inits, ~5 s) does not count as "Sirius silent": silence counts from 8 s after an actuation.
-While an unlock is owed the bridge keeps the drive profile even without a charging voltage (so
-a Sirius that stops answering is seen) and refuses `YIELD_KLINE` (`Busy`). Below 11.8 V it
-still shuts down at once (P6), unlock or not.
+Automaton `kline_bridge::lwm` (MASTER-PLAN-v2 3.1):
 
-Execution, decision D37 as given for W4 (build feature `standing-lock`, off by default): the
-bridge stops the Sirius session, opens the BMT, sends `31 A0 00 01` (lock) or `31 A1 00 01`
-(unlock), stops the BMT and goes back to the Sirius. Both are Tier 1 BMT actuator requests.
-Arming (`LWM_ARM`) needs the owner's code for each of the two requests (two challenges on a BMT
-session, nothing is sent then). Later the bridge answers kline-core's challenge itself, and
-only when the challenge is for exactly the armed bytes, target `26` and the `RiskInfo` the owner
-confirmed. Arming lives in RAM: a reset disarms.
+- Lock once when the Sirius `21A9` speed is above 15 km/h for 3 s, from fresh samples only (a
+  gap of more than 1.5 s between samples restarts the 3 s; review M5).
+- Lock again only after more than 60 s at speed 0, or after an owner UNLOCK and a new
+  drive-off.
+- Unlock when rpm is 0, or when the bridge has *tried* the Sirius and failed for 3 s with no
+  sample in between (ignition off). Samples that simply stop because the bridge is busy
+  elsewhere do not count (review B1).
+- 5 s between actuations; off by default; armed until the owner disarms in the app (owner
+  decision 2026-11-23; a reset disarms, since arming is in RAM).
+- Once it has (possibly) locked, it still unlocks at engine stop after a disarm. A lock that was
+  written but whose reply is lost counts as possibly executed and keeps the unlock duty (review
+  M4); a lock that was not written or that the BMT refused is not retried. A failed unlock is
+  retried up to 3 times.
+- While it needs the Sirius (armed with the engine running, or an unlock owed) the bridge stays
+  on the drive profile even without a charging voltage and refuses parked START_LIVE, REQUEST or
+  PREPARE for another ECU and YIELD_KLINE (`LwmActive`), so no client can make it leave the
+  Sirius and toggle the locks (review B1). It never sleeps on a low battery while an unlock is
+  owed.
 
-This is an automated Tier 1 send without a per-request human code, which kline-core's design
-does not foresee. It is behind its own feature until the owner decides
-([open questions](#not-verified)); the clean place for a "standing approval" is kline-core
-([changes needed](#kline-core-changes-needed)).
+Execution, decision D37 (owner decision, recorded in the owner's DECISIONS.md; build feature
+`standing-lock`, off by default): the bridge stops the Sirius session, opens the BMT, sends
+`31 A0 00 01` (lock) or `31 A1 00 01` (unlock), stops the BMT and goes back to the Sirius. Both
+are Tier 1 BMT actuator requests. Arming (`LWM_ARM`) needs the owner's code for each of the two
+requests (two challenges on a BMT session, nothing is sent then). Later the bridge answers
+kline-core's challenge itself, only for exactly those payloads, on the BMT, with the `RiskInfo`
+the owner confirmed (`standing_allows`; SAFETY.md rule 2 "Standing self-approval"). The owner
+accepts that the remote's lock state may get out of step. The parked fob path stays available
+for when remote B is repaired.
 
 ## Bridge behaviour
 
@@ -250,13 +280,22 @@ does not foresee. It is behind its own feature until the owner decides
   needs it). Drive is chosen by itself when the battery reads 13.2 V or more or the engine
   runs.
 - **One master**: one kline-core `Session` at a time; a session with another ECU starts only
-  after `82` StopCommunication. `YIELD_KLINE` stops and switches the transceiver off.
+  after `82` StopCommunication. After a session that ended without a clean Stop (link errors,
+  port failure) the next init of any ECU waits P3max (5 s), so the old ECU has timed out.
+  `YIELD_KLINE` stops and switches the transceiver off, and a yield always wins over the
+  automatic drive profile.
 - **Keep-alive**: kline-core's TesterPresent when idle (3 s).
 - **Reconnect**: after a failed init 0.5 s doubling to 10 s, or P3max 5 s when the ECU
   answered; after 3 failed exchanges in a row the session is dropped and re-initialised.
-- **Sleep**: below 12.0 V with the engine off (wake after 1 h), below 11.8 V at once
-  (MASTER-PLAN-v2 P6), and after 2 min with no client and nothing to do (wake after 60 s). Not
-  while lock-when-moving still owes an unlock.
+- **Sleep** (`Output::Sleep` carries the reason): below 12.0 V for 10 s with the engine off
+  (`LowBattery`, wake after 1 h), below 11.8 V for 5 s (`CriticalBattery`, MASTER-PLAN-v2 P6),
+  and after 2 min with no client and nothing to do (`Idle`, wake after 60 s). The debounce
+  ignores cranking dips and ADC noise (review M3). Never with the engine running and never while
+  lock-when-moving owes an unlock. The firmware sleeps in light-sleep slices that feed the
+  watchdog, never in a busy-wait.
+- **Moving**: no non-read to any ECU while a fresh (2 s) Sirius speed is above 0, and none to
+  the Sirius while the engine runs without a fresh speed (`VehicleMoving`; Sirius `31 A0 00`
+  injector inhibition, `30 80` fuel pump and the like). The D37 requests are the exception.
 
 ## Host transport (`kline --transport ble`)
 
@@ -296,30 +335,29 @@ Checked by `crates/kline-bridge/tests/vectors.rs`; the CRCs were cross-checked w
 
 ## Limits
 
-- The firmware has no Renault definition, so kline-core's **name guard** (refusal of Tier 1-3
-  requests whose definition names look immobilizer related) does not apply on the bridge. The
-  byte and address rules do (BMT class on `26`, Sirius class on `7A`). Over BLE only Tier 1
-  exists besides reads, and kline-core's Tier 1 lists are byte-exact.
-- Tier 2 (config write) and Tier 3 (expert) are not offered over BLE in v1.
+- The firmware has no Renault definition. kline-core's **name guard** (Tier 1-3 requests whose
+  definition names look immobilizer related) is compiled in as byte prefixes per ECU address,
+  the union over the definitions the CLI loads for this car (`kline_bridge::guard_rules`; no
+  names, no XML). `tests/definition_parity.rs` rebuilds the table from `ddt-xml/` and checks
+  that the bridge decides every request of those definitions (and its non-read variant with one
+  more byte) exactly as the CLI with the definitions loaded: 504 requests on 2026-11-23. It is
+  skipped when `ddt-xml/` is absent; when the owner adds a definition, run it again.
+- The link settings (`EcuId::link_config`) are the definitions' `<K>` values, checked by the
+  same test (airbag: AB70's, the slower one).
 - The decoders in `kline_bridge::live` are hand-coded positions for this car's ECUs.
 
-## kline-core changes needed
+## kline-core changes (made in this round)
 
-Not made in this work item (kline-core is changed on another branch):
+1. `approved-routines` no longer implies `std` (`approved-routines = ["dep:getrandom"]`). The
+   firmware builds with `--cfg getrandom_backend="custom"` and provides
+   `__getrandom_v03_custom` from the ESP32-C3 hardware RNG (`firmware/esp32c3`, feature
+   `approvals`; true randomness needs an entropy source running, the radio in W7, NOT
+   VERIFIED).
+2. `DefinitionGuard::flagged()`: read access to the flagged prefixes, for the parity test.
 
-1. **`approved-routines` without `std`.** Today the feature implies `std` and uses
-   `getrandom` with the OS backend, so the firmware (`no_std`) cannot have approvals at all.
-   Proposed: `approved-routines = ["dep:getrandom"]` (no `std`), and the firmware builds with
-   `--cfg getrandom_backend="custom"` and provides `__getrandom_v03_custom` from the ESP32-C3
-   hardware RNG (esp-hal `Rng`; needs the radio or the SAR ADC clock on for true randomness).
-2. **A standing approval** for lock-when-moving, if the owner keeps D37: e.g.
-   `Session::request_standing(payload, &StandingApproval, now)` where a `StandingApproval` is
-   made once from a human-confirmed challenge for a fixed, short list of exact payloads on one
-   target, cannot be cloned, and is checked against the current `RiskInfo` on every use. Then
-   the bridge would not answer kline-core's challenge itself.
-3. SAFETY.md rule 2 and SAFETY.md say only the `kline` CLI may enable `approved-routines`; the
-   bridge's `approvals` feature needs the owner to extend that rule (MASTER-PLAN-v2 P2/P3 says
-   the owner confirms Tier 1 with a code on the phone).
+Not made: a kline-core `StandingApproval` type. The owner allowed the bridge's standing
+self-approval for exactly the two D37 payloads (SAFETY.md rule 2); a core type would move that
+check into kline-core and is a possible later cleanup.
 
 ## Not verified
 

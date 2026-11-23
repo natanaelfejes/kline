@@ -13,6 +13,10 @@ description = "Clio Link bridge firmware skeleton for the ESP32-C3 (esp-hal, no_
 # Bench mode (docs/bridge-hardware.md "Bench test"): a built-in agent client starts the drive
 # profile at boot and the live frames are printed on the USB serial console.
 bench = []
+# Owner approvals (Tier 1-3) and the D37 standing lock, see docs/bridge-protocol.md. Needs the
+# getrandom custom backend below (`.cargo/config.toml` sets `getrandom_backend="custom"`).
+approvals = ["kline-bridge/approvals", "dep:getrandom"]
+standing-lock = ["approvals", "kline-bridge/standing-lock"]
 
 [dependencies]
 kline-bridge = { path = "../../crates/kline-bridge", default-features = false }
@@ -22,6 +26,7 @@ esp-alloc = { version = "0.11.0", features = ["esp32c3"] }
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32c3"] }
 esp-println = { version = "0.18.0", features = ["esp32c3"] }
 nb = "1.1.0"
+getrandom = { version = "0.4.3", optional = true }
 
 [profile.dev]
 opt-level = "s"

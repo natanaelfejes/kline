@@ -52,7 +52,7 @@ therefore never used for an output that moves anything.
 | 2 | (strapping) | | not connected | boot mode strap |
 | 3 | VBAT | ADC1_CH3 in | divider 1 MOhm (rail) / 180 kOhm (GND), 100 nF at the pin | ADC1 channel; 15 V -> 2.29 V (PLAN-RESEARCH B5) |
 | 4 | K_RX | UART1 RX in | L9637D RX (pin 1) | free, not strapping; RX of L9637D has its own pull-up to VCC |
-| 5 | K_TX | UART1 TX out | 1 kOhm -> TX node -> L9637D TX (pin 4) | free, not strapping |
+| 5 | K_TX | UART1 TX out; plain output low while K_PWR is off | 1 kOhm -> TX node -> L9637D TX (pin 4) | free, not strapping; low when the transceiver is off, so it never back-powers it |
 | 6 | K_PWR | out, low at boot | L9637D VCC (pin 3, 100 nF to GND) and 330 Ohm -> AQY212EH #3 LED (pull-up switch); **10 kOhm pull-down to GND** | one pin powers the transceiver and the K pull-up together; low = K released, transceiver unpowered (< 1 uA, PLAN-RESEARCH B2) |
 | 7 | FOB | out, low at boot | 330 Ohm -> AQY212EH #1 LED; **10 kOhm pull-down to GND** | the pull-down keeps the PhotoMOS off while the pin floats during reset (MASTER-PLAN-v2 3.1 rule 3) |
 | 8 | (strapping) | | not connected (onboard LED on some boards) | |
@@ -67,6 +67,17 @@ input never floats low while the transceiver is powered), L9637D TX. With BREAK_
 is low (UART TX high only pushes 3.3 mA through the 1 kOhm). kline-core's `SetBreak` therefore
 maps to BREAK_N, and its 200 ms `Sleep`s bit-bang the 5-baud address byte
 (`firmware/esp32c3/src/main.rs`).
+
+**No back-powering of the transceiver.** With K_PWR off the L9637D has no VCC; a TX pin idling
+high (UART idle) would push current through R5 into its TX input and power the chip through its
+input protection. The firmware therefore detaches UART1 and drives GPIO5 low whenever K_PWR is
+off, and only gives the pin back to the UART before K_PWR goes on again (`KLine::set_power`:
+on = UART first, then K_PWR; off = K_PWR first, then TX low). At boot the transceiver is off
+and GPIO5 starts low. R6 then pulls nothing (its VCC end is unpowered).
+
+**Panic and reset.** On the target a panic does not unwind, so no `Drop` runs; the panic
+handler drives GPIO7 (fob) and GPIO6 (K_PWR) low before anything else, then the watchdog
+resets the chip; during the reset the pull-downs R9 and R10 hold both off.
 
 **Not enough pins for CPE button emulation** (MASTER-PLAN-v2 3.1, two outputs for lock and
 unlock): only GPIO20 is left. If the owner chooses that path, it needs an I/O expander or a
@@ -146,7 +157,9 @@ needs is on that list; nothing extra has to be bought.
 | AQY212EH LED (K1) | ~6 mA | 0 |
 | Divider | 12 uA | 12 uA |
 | Fob PhotoMOS | 6 mA only during a 300 ms pulse | 0 |
-| **Total from 12 V** | ~25 to 35 mA *estimate* | **~0.3 to 0.7 mA** *estimate*, budget 2 mA (MASTER-PLAN-v2 M8) |
+| TX node, R6, R10, R9 | 0 (TX low, K_PWR low, fob low: no resistor carries current) | 0 |
+| Watchdog wake-ups | | the firmware wakes every 4 s from light sleep to feed the RTC watchdog: ~1 ms at ~20 mA, about 5 uA on average *estimate* |
+| **Total from 12 V** | ~25 to 35 mA *estimate* | **~0.3 to 0.7 mA** *estimate* (recomputed with the TX-low and watchdog-slice changes: unchanged within the estimate), budget 2 mA (MASTER-PLAN-v2 M8) |
 
 At 0.5 mA asleep the bridge takes 12 mAh a day, about 0.36 Ah a month, under 1 % of the 52 Ah
 battery (PLAN-RESEARCH B8). The K-line pull-up leakage with the ignition off (G15) is the one
@@ -162,12 +175,12 @@ cargo build --release --features bench # + drive profile at boot, live samples o
 espflash flash --monitor --chip esp32c3 target/riscv32imc-unknown-none-elf/release/clio-link-esp32c3
 ```
 
-Built here on 2026-11-23 with esp-hal 1.2.2 (debug and `--release --features bench`); not
-flashed. The firmware is not a workspace member (`exclude = ["firmware"]`). What the skeleton
+Built here on 2026-11-23 with esp-hal 1.2.2 (`--release`, and `--release --features
+standing-lock,bench`); not flashed. `--features approvals` (or `standing-lock`) adds the owner
+approvals; the approval codes come from the C3 hardware RNG through getrandom's custom backend. The firmware is not a workspace member (`exclude = ["firmware"]`). What the skeleton
 does and does not do is at the top of `src/main.rs`; BLE (NimBLE via esp-idf, or esp-radio +
-TrouBLE), light sleep with the 32 kHz crystal and NVS are W7. kline-core's approvals do not
-build without `std` yet ([bridge-protocol.md](bridge-protocol.md#kline-core-changes-needed)), so
-the firmware is Tier 0 only for now.
+TrouBLE), BLE wake-up from light sleep, deep sleep with the 32 kHz crystal and NVS (counters,
+yield holder) are W7. The default build has no approvals (Tier 0 only).
 
 ## Bench test
 
@@ -178,19 +191,22 @@ Power from the 12 V bench supply through the fuse; no car, no ECU.
 2. **Boot safety of the fob output.** Scope or logic analyzer on GPIO7 and on the PhotoMOS
    output (ohmmeter). Power-cycle 20 times, press reset 20 times, flash once: the output never
    closes. Then let the watchdog fire (a debug build that hangs in a step): still never closes.
-3. **K line released at boot.** Pull K up to 12 V through 510 Ohm on the bench (a second
+3. **No back-powering.** K_PWR off (bench build idle): voltage on L9637D VCC (pin 3) below
+   0.3 V and GPIO5 at 0 V; current from the 3V3 rail into the TX node 0 within the meter's
+   resolution.
+4. **K line released at boot.** Pull K up to 12 V through 510 Ohm on the bench (a second
    510 Ohm to the supply): K stays at 12 V through power-up and reset, also with GPIO6
    floating.
-4. **5-baud waveform.** `--features bench` build, K pulled up as in 3, nothing else on K. On
+5. **5-baud waveform.** `--features bench` build, K pulled up as in 4, nothing else on K. On
    the scope: 300 ms idle, then 0x7A as 10 bits of 200 ms (start low, bits LSB first
    0,1,0,1,1,1,1,0, stop high), each edge within +-10 ms of the 200 ms grid (ISO 9141-2, as
    kline-sim's strict mode checks). The init then fails with no keywords (no ECU): expected.
-5. **UART level.** Connect the KKL cable to the same K node through the female OBD socket and
+6. **UART level.** Connect the KKL cable to the same K node through the female OBD socket and
    watch the bridge's frames with a serial terminal at 10400 on the Mac: the bytes match the
    Raw notifications (once BLE exists) or the bench console.
-6. **Fob pulse.** Remote B on the PhotoMOS, a LOCK command (W7) or a debug build that pulses
+7. **Fob pulse.** Remote B on the PhotoMOS, a LOCK command (W7) or a debug build that pulses
    once: one press, 300 ms, then nothing for 5 s.
-7. **Sleep current** (W7): advertising only, 32 kHz crystal fitted, below 1.0 mA; else the
+8. **Sleep current** (W7): advertising only, 32 kHz crystal fitted, below 1.0 mA; else the
    nRF52840 fallback (MASTER-PLAN-v2 G14, item 67).
 
 A simulator-backed bench test (the bridge against kline-sim through the KKL cable) needs an
