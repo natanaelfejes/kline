@@ -1706,6 +1706,24 @@ fn idle(ctx: &Ctx, o: &mut Open, ms: u64) -> Result<bool, CliError> {
     }
 }
 
+/// Why `live` got no answered cycle: the ECU rejected every request (all answers negative) or
+/// there was no communication.
+fn silent_message(streak_negative: bool, nrcs: &[(u8, u8)], n: u64, ending: &str) -> String {
+    if streak_negative && !nrcs.is_empty() {
+        format!(
+            "ECU rejected every request ({}) in {n} cycles; {ending} (the line works; the ECU does not offer these frames in this session)",
+            nrcs.iter()
+                .map(|(sid, nrc)| format!("7F {sid:02X} {nrc:02X} {}", link::nrc_name(*nrc)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else {
+        format!(
+            "no communication with the ECU: every request failed in {n} cycles in a row; {ending}"
+        )
+    }
+}
+
 pub fn live(ctx: &mut Ctx, a: &LiveArgs) -> Result<(), CliError> {
     let ecu = Ecu::resolve(&a.link.ecu, &ctx.g.defs_dir())?;
     let frames: Vec<defs::Resolved> = a
@@ -1892,23 +1910,8 @@ pub fn live(ctx: &mut Ctx, a: &LiveArgs) -> Result<(), CliError> {
             if !any_ok {
                 if retries >= policy.cycle_retries {
                     let n = retries + 1;
-                    let message = if streak_negative && !streak_nrcs.is_empty() {
-                        format!(
-                            "ECU rejected every request ({}) in {n} cycles; stopping (the line works; the ECU does not offer these frames in this session)",
-                            streak_nrcs
-                                .iter()
-                                .map(|(sid, nrc)| format!(
-                                    "7F {sid:02X} {nrc:02X} {}",
-                                    link::nrc_name(*nrc)
-                                ))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )
-                    } else {
-                        format!(
-                            "no communication with the ECU: every request failed in {n} cycles in a row; stopping"
-                        )
-                    };
+                    let message =
+                        silent_message(streak_negative, &streak_nrcs, u64::from(n), "stopping");
                     return Err(CliError::new(exit::COMM, "comm", message));
                 }
                 retries += 1;
@@ -1942,13 +1945,15 @@ pub fn live(ctx: &mut Ctx, a: &LiveArgs) -> Result<(), CliError> {
             }
         }
         if !ever_ok && cycle > 0 && !ctx.stopped() {
-            return Err(CliError::new(
-                exit::COMM,
-                "comm",
-                format!(
-                    "no communication with the ECU: no cycle got an answer in {cycle} cycle(s) before --duration/--cycles ended"
-                ),
-            ));
+            // The same verdict as four failed cycles in a row (exit 5): every answer negative
+            // means the line works and the ECU does not offer these frames.
+            let message = silent_message(
+                streak_negative,
+                &streak_nrcs,
+                cycle,
+                "--duration/--cycles ended",
+            );
+            return Err(CliError::new(exit::COMM, "comm", message));
         }
         Ok(())
     })

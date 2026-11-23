@@ -433,3 +433,20 @@ fn global_init_attempts_is_carried_into_the_printed_command() {
     assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
     assert!(r.stdout.contains("--init-attempts 1"), "{}", r.stdout);
 }
+
+#[test]
+fn live_duration_with_every_answer_negative_says_the_ecu_rejected_them() {
+    let sx = xml("sirius_cli.xml");
+    // 21B0: the fixture's ECU answers 7F 21 12 (the line works).
+    let (r, _) = run(
+        sirius_ecu(),
+        &live_args(&sx, &["--frames", "21B0", "--duration", "1"]),
+    );
+    assert_eq!(r.code, 5, "{}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("ECU rejected every request (7F 21 12"),
+        "{}",
+        r.stdout
+    );
+    assert!(!r.stdout.contains("no communication"), "{}", r.stdout);
+}
