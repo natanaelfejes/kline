@@ -91,6 +91,7 @@ If `~/.local/bin` is not in `PATH`: `export PATH="$HOME/.local/bin:$PATH"` (add 
 | `--dtr high\|low\|leave` | DTR after the port is opened, before the first init (also `selftest`, to compare the loopback with DTR high and low, final critique F15). `high` (default, unchanged behaviour), `low`, or `leave` it as the OS opened the port; traced as `PORT dtr=1`, `dtr=0` or `dtr=left as opened`. The inits drive DTR themselves afterwards (low during the 5-baud bits, high before fast init). Whether the KKL cable uses DTR is NOT VERIFIED |
 | `--capture-dir DIR` (alias `--captures`) | default `$KLINE_CAPTURE_DIR`, else `~/.local/share/kline/captures` (Windows `%APPDATA%\kline\captures`) |
 | `--defs DIR` | definitions for `--ecu`. Default `$KLINE_DDT_XML` (deprecated fallback `$CLIO_DDT_XML`, read for one release), else `~/.local/share/kline/ecus` |
+| `--transport serial\|ble` | `serial` (default): the KKL cable or the simulator pty. `ble`: `read` through the Clio Link bridge, Tier 0 only, decoded with the definition as usual, JSON events with `"transport": "ble"`; only the injection (0x7A) and the BMT (0x26); every other command is exit 2. Needs a build with the cargo feature `ble` (else exit 2) and a BLE radio backend, which is not in this build yet (exit 3). [bridge-protocol.md](bridge-protocol.md#host-transport-kline---transport-ble) |
 
 ## Selecting the ECU
 

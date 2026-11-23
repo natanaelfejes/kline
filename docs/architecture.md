@@ -24,10 +24,13 @@ policy sits, and how the simulator tests the whole chain without a car.
 | `kline-cli` | the interactive `kline` binary: everything in `kline-host` plus `exec`, `clear-dtc` and `scan`, and the terminal prompt for approvals | terminal |
 | `kline-agent` | the read-only `kline-agent` binary: reads plus `prepare`, always JSON | none beyond `kline-host` |
 | `kline-sim` | an ECU simulator: a virtual K line with echo and wake-up detection, ECUs that answer from a definition, replay of captures | in-process or a pty |
+| `kline-bridge` | the Clio Link bridge logic for the ESP32-C3: profiles, scheduler, BLE GATT codec, BLE roles on top of the kline-core policy, lock-when-moving, fob output ([bridge-protocol.md](bridge-protocol.md)) | none: sans-IO, `no_std` + `alloc`; the firmware in `firmware/esp32c3/` and the host tests drive it |
 
 Dependencies point one way: `kline-spec` <- `kline-core` <- `kline-host` <- `kline-cli` /
 `kline-agent`. `kline-sim` depends on `kline-core` and `kline-spec` and is only a
-dev-dependency of the others.
+dev-dependency of the others. `kline-bridge` depends on `kline-core` only (without its
+`approved-routines` unless its own `approvals` feature is asked for); `kline-host` uses it,
+without default features, for `--transport ble`.
 
 ```mermaid
 flowchart LR

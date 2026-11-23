@@ -1,5 +1,7 @@
 [workspace]
 resolver = "2"
+# firmware/esp32c3 is built on its own for riscv32imc-unknown-none-elf (docs/bridge-hardware.md).
+exclude = ["firmware"]
 members = [
     "crates/kline-spec",
     "crates/kline-core",
