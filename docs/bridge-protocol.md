@@ -99,7 +99,7 @@ Notified on change and every second while a client is connected; also the answer
 | 4 | profile | u8 | 0 off, 1 drive, 2 parked, 3 diagnostics |
 | 5 | batt_cv | u16 | bridge's own divider, centivolts, 0 = not measured |
 | 7 | lock | u8 | 0 unknown, 1 locked, 2 unlocked (BMT `21A3` d0 bit 7) |
-| 8 | flags | u8 | 0x01 lwm armed, 0x02 lwm locked, 0x04 engine running, 0x08 approvals in this build, 0x10 front door open, 0x20 rear door open, 0x40 battery below 12.0 V |
+| 8 | flags | u8 | 0x01 lwm armed, 0x02 lwm locked, 0x04 engine running, 0x08 approvals in this build, 0x10 front door open, 0x20 rear door open, 0x40 battery below 12.0 V, 0x80 lock-when-moving gave up an unlock and disarmed itself (doors may be locked; cleared by arming again or a lock-state read showing unlocked) |
 | 9 | last_error | u8 | last non-OK [result code](#response-and-result-codes) |
 | 10 | uptime_s | u32 | |
 
@@ -120,8 +120,8 @@ bridge accepted from this bond ([counters](#roles-pairing-counters-rate-limits))
 | `08` | YIELD_KLINE | | owner, agent | take a lease on the line: `Accepted`, then `Ok` once the session is stopped and the transceiver is off (`LwmActive` while lock-when-moving needs the Sirius) |
 | `09` | RESUME_KLINE | | the client that yielded, or an owner | end the lease, take the K line back |
 | `0A` | SET_TIME | Unix seconds u32 | owner, agent | for logs only |
-| `0B` | LWM_ARM | | owner | arm lock-when-moving (two challenges); `LwmActive` while armed or while an unlock is owed (disarm first, and wait for the unlock), `VehicleMoving` while the car may move |
-| `0C` | LWM_DISARM | | owner | disarm |
+| `0B` | LWM_ARM | | owner | arm lock-when-moving (two challenges); `LwmActive` while armed or while an unlock is owed (disarm first, and wait for the unlock), `VehicleMoving` unless parked with the engine off (the moving rule for a BMT request) |
+| `0C` | LWM_DISARM | | owner | disarm; with an unlock owed the bridge then reads BMT `21A3` once, and a positive read showing the doors unlocked ends the duty |
 | `0D` | RAW_STREAM | 0 or 1 | owner, agent | Raw notifications off or on |
 | `0E` | GET_STATUS | | owner, agent | Status frame in the Response data |
 | `0F` | PREPARE_WRITE | ecu u8, identification length u8 (1..64), identification (the `61 80 ..` reply the app chose its definition from), payload | owner | approval challenge for one Tier 2 config write |
@@ -157,8 +157,8 @@ same counter and the final result.
 | `0F` | Unsupported | not in this build (no `approvals`, no `standing-lock`), or PREPARE of a read |
 | `10` | Challenge | challenge id u32, tier u8 (1 service, 2 config write, 3 expert), code ASCII (6 characters, 10 for expert) |
 | `11` | IgnitionOn | fob path refused: engine running or charging voltage |
-| `12` | VehicleMoving | a non-read while a fresh Sirius speed is above 0, or with no fresh speed while the engine may be running (charging voltage, or rpm above 0 seen in the last 120 s), on any ECU, at PREPARE and again at CONFIRM |
-| `13` | LwmActive | lock-when-moving needs the Sirius now |
+| `12` | VehicleMoving | a non-read while the car may move or the engine may run, by the moving rule ([Bridge behaviour](#bridge-behaviour)), at PREPARE, when its job runs and again at CONFIRM; also when the Sirius sample taken before a PREPARE does not come |
+| `13` | LwmActive | lock-when-moving needs the Sirius now; also the CONFIRM of a challenge dropped because the car may have started while armed |
 | `14` | ReplyTooLong | the ECU reply does not fit one Response frame (never truncated) |
 | `15` | SessionLost | the session the challenge was made on ended (line error, keep-alive lost); nothing was sent, PREPARE again |
 | `16` | IdentificationRequired | a Tier 2 config write needs PREPARE_WRITE |
@@ -204,7 +204,8 @@ CLI; forbidden stays forbidden; the agent stays Tier 0.
 
 1. Owner writes `PREPARE ecu payload`. The bridge checks: owner role, the kline-core tier with
    the bridge's guard ([Limits](#limits)) is 1, 2 or 3 (forbidden is `Forbidden`), battery at
-   or above 12.0 V (MASTER-PLAN-v2 P6), and the car is not moving (`VehicleMoving`).
+   or above 12.0 V (MASTER-PLAN-v2 P6), and the moving rule (`VehicleMoving`; when nothing
+   recent decides it, the job first reads `21A9` from the Sirius).
 2. The bridge opens (or keeps) a session with that ECU and asks kline-core for the challenge
    of the request's tier on the session's real target: `service_challenge`,
    `config_write_challenge` (Tier 2, from PREPARE_WRITE: the app reads `21 80` and the backup
@@ -222,7 +223,9 @@ CLI; forbidden stays forbidden; the agent stays Tier 0.
    While it is pending the session stays open on that ECU with the definition's keep-alive
    interval (3 s KWP, 7 s for the ABS). If that session ends anyway, CONFIRM answers
    `SessionLost` and writes nothing: a challenge never carries over to a new session. CONFIRM
-   checks the battery and the moving rule again.
+   checks the battery and the moving rule again. While lock-when-moving is armed, a challenge
+   for another ECU is dropped as soon as the car may have started (its CONFIRM gets
+   `LwmActive`), so the bridge goes back to the Sirius.
 
 **What the code is:** the same anti-accident gate as the CLI's `/dev/tty` code (docs/SAFETY.md rule
 2): it stops the app, a script or the agent link from sending a Tier 1 request by mistake. It
@@ -259,11 +262,18 @@ Automaton `kline_bridge::lwm` (MASTER-PLAN-v2 3.1):
   sample in between (ignition off). Samples that simply stop because the bridge is busy
   elsewhere do not count (review B1).
 - 5 s between actuations; off by default; armed until the owner disarms in the app (owner
-  decision 2026-11-23; a reset disarms, since arming is in RAM).
+  decision 2026-11-23; a reset disarms, since arming is in RAM). Arming allows a lock on the
+  next drive-off.
 - Once it has (possibly) locked, it still unlocks at engine stop after a disarm. A lock that was
   written but whose reply is lost counts as possibly executed and keeps the unlock duty (review
   M4); a lock that was not written or that the BMT refused is not retried. A failed unlock is
-  retried up to 3 times.
+  retried up to 3 times; every lock starts with all 3 (review B-3). After the third failure the
+  automaton gives up: it disarms itself and sets status flag `0x80`; no lock follows until the
+  owner arms again.
+- A positive BMT `21A3` read showing the doors unlocked ends an owed unlock (the owner unlocked
+  by hand or with the verified app UNLOCK). After LWM_DISARM with an unlock owed the bridge reads
+  `21A3` once for this. So nothing stays stuck: an owed unlock ends by the unlock, by the
+  give-up, or by such a read.
 - While it needs the Sirius (armed with the engine running, or an unlock owed) the bridge stays
   on the drive profile even without a charging voltage and refuses parked START_LIVE, REQUEST or
   PREPARE for another ECU and YIELD_KLINE (`LwmActive`), so no client can make it leave the
@@ -300,15 +310,26 @@ for when remote B is repaired.
   ignores cranking dips and ADC noise (review M3). Never with the engine running and never while
   lock-when-moving owes an unlock. The firmware sleeps in light-sleep slices that feed the
   watchdog, never in a busy-wait.
-- **Moving** (review M-1): no non-read to any ECU while a fresh (2 s) Sirius speed is above 0,
-  or while there is no fresh speed and the engine may be running (charging voltage, or rpm above
-  0 seen in the last 120 s), checked at PREPARE and again at CONFIRM (`VehicleMoving`). While
-  the bridge sits on another ECU for a challenge it sees no speed, so with the engine running
-  only a Sirius request at a confirmed standstill goes through; for the ABS, BMT or airbag,
-  switch the engine off (and wait until the voltage is below 13.2 V or 2 minutes passed). The
-  D37 requests are the exception.
-- **Arming** (review B-1/B-2): LWM_ARM only when not armed, no unlock owed and the car is not
-  moving by the rule above (in practice: parked, engine off). The confirmed lock risk is kept
+- **Moving** (reviews M-1 and r3): no non-read while a fresh (2 s) Sirius speed is above 0. A
+  fresh standstill is enough for a Sirius request (its CONFIRM runs on the Sirius). For the ABS,
+  BMT and airbag (their CONFIRM runs on their own session, without a speed) the engine must be
+  known off: a Sirius `21A9` with 0 km/h and 0 rpm in the last 120 s and nothing since that says
+  the engine started (no battery reading below 12.0 V, the dip of a start; no rise to a
+  charging voltage), or no sign at all that the engine runs (no charging voltage, no rpm above 0
+  in the last 120 s). Checked at PREPARE, when its job runs and again at CONFIRM
+  (`VehicleMoving`). When nothing recent decides it at PREPARE, the job first reads `21A9` from
+  the Sirius; if the Sirius does not answer, `VehicleMoving`. So with the engine idling, only a
+  Sirius request goes through; switch the engine off for the others. The D37 requests are the
+  exception.
+- **Battery charger**: parked with a charger holding 13.2 V or more, the voltage says nothing,
+  so the bridge relies on the Sirius `21A9` (engine off: 0 rpm). With the ignition on (engine
+  off) this works for prepare and confirm. With the ignition off the Sirius does not answer and
+  non-reads are refused (`VehicleMoving`): turn the ignition on, or disconnect the charger. A
+  start is seen only as a battery reading below 12.0 V; the firmware reads the battery every
+  100 ms (NOT VERIFIED that every start on this car dips that far for that long).
+- **Arming** (reviews B-1/B-2, r3 minor 5): LWM_ARM only when not armed, no unlock owed and
+  the moving rule for a BMT request allows it, that is parked with the engine off (an idling
+  engine at a standstill is refused). The confirmed lock risk is kept
   apart until the unlock code is confirmed too; only then are both armed together. A wrong code
   leaves the previous state untouched.
 

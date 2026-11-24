@@ -55,8 +55,12 @@ Default-deny, decided on exact payload bytes and the target of the init that act
   a reset disarms), and only when kline-core's challenge is for exactly that payload, that target
   and the `RiskInfo` the owner confirmed. The unlock is also sent after a disarm when the bridge
   has (possibly) locked and the engine stops (by design: the unlock is the accident
-  mitigation). Arming is refused while armed, while an unlock is owed and while the car may
-  move. No other payload, ECU or binary may do this. The owner accepts that the remote's lock
+  mitigation). Arming is refused while armed, while an unlock is owed and unless the car is
+  parked with the engine off. When the unlock attempts are used up (3 refused or unanswered),
+  the bridge gives up: it disarms itself, drops the armed risks and reports it in its status
+  (`LWM_GAVE_UP`); no lock is sent again until the owner arms again with two new codes. A
+  positive BMT lock-state read showing the doors unlocked (after LWM_DISARM or the owner's
+  verified app UNLOCK) ends an owed unlock. No other payload, ECU or binary may do this. The owner accepts that the remote's lock
   state may get out of step with the doors.
 - **What the code is.** The `/dev/tty` code is an **anti-accident gate**, not an
   authentication: it stops a pipe, `--json`, a script or a non-interactive agent from sending by

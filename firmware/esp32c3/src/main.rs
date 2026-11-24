@@ -78,6 +78,10 @@ const DIVIDER_DEN: u32 = 180;
 /// Watchdog: a step that blocks longer than this resets the chip. ours: the longest blocking
 /// action is a 5000 ms responsePending read (kline-core `RESPONSE_PENDING_TIMEOUT_MS`).
 const WATCHDOG_MS: u64 = 8_000;
+/// Battery reading period. ours: a start (cranking, about 1-2 s) must show up as a reading
+/// below 12.0 V, which voids the bridge's engine-off sample (docs/bridge-protocol.md "Battery
+/// charger"); 100 ms sees even a short one. NOT VERIFIED on the car.
+const BATTERY_PERIOD_MS: u64 = 100;
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
@@ -440,7 +444,7 @@ fn main() -> ! {
     let mut last_battery = 0u64;
     loop {
         let now = board.now_ms();
-        if now.saturating_sub(last_battery) >= 1_000 {
+        if now.saturating_sub(last_battery) >= BATTERY_PERIOD_MS {
             last_battery = now;
             if let Some(mv) = battery_millivolts() {
                 bridge.on_battery_mv(mv, now);
