@@ -8,11 +8,29 @@ confirmed or contradicted them, the last section says so.
 
 ## Contents
 
+- [Running it](#running-it)
 - [Pieces](#pieces)
 - [Wire behaviour](#wire-behaviour)
 - [pty transport: how break and DTR are represented](#pty-transport-how-break-and-dtr-are-represented)
 - [Replay log (JSONL)](#replay-log-jsonl)
 - [What the simulator proves and what it cannot](#what-the-simulator-proves-and-what-it-cannot)
+
+## Running it
+
+There is no standalone simulator binary yet. The simulator runs inside the test suite, and a
+car capture can be decoded with `kline replay`:
+
+```
+cargo test --workspace                     # every kline command against the simulator
+cargo test -p kline-cli --test pty         # the real serial code path over a pty (Linux, macOS)
+kline replay crates/kline-sim/tests/fixtures/abs_car_58.jsonl --xml crates/kline-cli/tests/fixtures/bosch_abs_iso8.xml
+kline selftest                             # the cable plugged into the computer only
+```
+
+`abs_car_58.jsonl` is the Clio's ABS session of 2026-11-23; `bosch_abs_iso8.xml` is a
+hand-written definition with English item names, so the replay needs no Renault file. To drive
+the `kline` binary against the pty simulator yourself, see
+[Running against the simulator](cli.md#running-against-the-simulator).
 
 ## Pieces
 

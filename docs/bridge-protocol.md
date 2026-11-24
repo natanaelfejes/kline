@@ -197,8 +197,8 @@ kline JSONL capture line (rx includes the echo). Broadcast to every client that 
 
 ## Approvals (Tier 1 to 3 from the phone)
 
-Build feature `approvals` (off by default; SAFETY.md rule 2 "Bridge firmware"). Owner decision
-2026-11-23: the owner gets Tier 1, Tier 2 and Expert over BLE with the same codes and flow as the
+Build feature `approvals` (off by default; SAFETY.md rule 2 "Bridge firmware"). By design
+(2026-11-23): the owner gets Tier 1, Tier 2 and Expert over BLE with the same codes and flow as the
 CLI; forbidden stays forbidden; the agent stays Tier 0.
 
 1. Owner writes `PREPARE ecu payload`. The bridge checks: owner role, the kline-core tier with
@@ -254,24 +254,23 @@ drop, and has an external pull-down for the time the GPIO floats in a reset
 Automaton `kline_bridge::lwm`:
 
 - Lock once when the Sirius `21A9` speed is above 15 km/h for 3 s, from fresh samples only (a
-  gap of more than 1.5 s between samples restarts the 3 s; review M5).
+  gap of more than 1.5 s between samples restarts the 3 s).
 - Lock again only after more than 60 s at speed 0, or after an owner UNLOCK and a new
   drive-off.
 - Unlock when rpm is 0, or when the bridge has *tried* the Sirius and failed for 3 s with no
   sample in between (ignition off). Samples that stop because the bridge is busy
-  elsewhere do not count (review B1).
+  elsewhere do not count.
 - 5 s between actuations; off by default; armed until the owner disarms in the app (owner
   decision 2026-11-23; a reset disarms, since arming is in RAM). Arming allows a lock on the
   next drive-off.
 - Once it has (possibly) locked, it still unlocks at engine stop after a disarm. A lock that was
-  written but whose reply is lost counts as possibly executed and keeps the unlock duty (review
-  M4); a lock that was not written or that the BMT refused is not retried. A failed unlock is
-  retried up to 3 times; every lock starts with all 3 (review B-3). After the third failure the
+  written but whose reply is lost counts as possibly executed and keeps the unlock duty; a lock that was not written or that the BMT refused is not retried. A failed unlock is
+  retried up to 3 times; every lock starts with all 3. After the third failure the
   automaton gives up: it disarms itself and sets status flag `0x80`; no lock follows until the
   owner arms again. The flag stays until the owner arms again or sends LWM_ACK; lock-state
   reads never clear it.
 - The BMT lock memory may not follow the K-line `31 A0`/`31 A1` and its polarity is NOT
-  VERIFIED, so a bare "unlocked" read proves nothing (review B4-1). An owed unlock ends only by
+  VERIFIED, so a bare "unlocked" read proves nothing. An owed unlock ends only by
   a positive reply to `31 A1 00 01`, by the give-up, or by an observed change: after our lock
   completed, a positive `21A3` read shows "locked" and a later one "unlocked" (the owner unlocked
   by hand, or the app UNLOCK read "locked", pulsed and saw the bit change). An app UNLOCK that
@@ -283,7 +282,7 @@ Automaton `kline_bridge::lwm`:
 - While it needs the Sirius (armed with the engine running, or an unlock owed) the bridge stays
   on the drive profile even without a charging voltage and refuses parked START_LIVE, REQUEST or
   PREPARE for another ECU and YIELD_KLINE (`LwmActive`), so no client can make it leave the
-  Sirius and toggle the locks (review B1). It never sleeps on a low battery while an unlock is
+  Sirius and toggle the locks. It never sleeps on a low battery while an unlock is
   owed.
 
 Execution (lock-when-moving, maintainer decision 2026-11-23; build feature
@@ -313,10 +312,10 @@ for when remote B is repaired.
 - **Sleep** (`Output::Sleep` carries the reason): below 12.0 V for 10 s with the engine off
   (`LowBattery`, wake after 1 h), below 11.8 V for 5 s (`CriticalBattery`),
   and after 2 min with no client and nothing to do (`Idle`, wake after 60 s). The debounce
-  ignores cranking dips and ADC noise (review M3). Never with the engine running and never while
+  ignores cranking dips and ADC noise. Never with the engine running and never while
   lock-when-moving owes an unlock. The firmware sleeps in light-sleep slices that feed the
   watchdog, never in a busy-wait.
-- **Moving** (reviews M-1 and r3): no non-read while a fresh (2 s) Sirius speed is above 0. A
+- **Moving**: no non-read while a fresh (2 s) Sirius speed is above 0. A
   fresh standstill is enough for a Sirius request (its CONFIRM runs on the Sirius). For the ABS,
   BMT and airbag (their CONFIRM runs on their own session, without a speed) the engine must be
   known off: a Sirius `21A9` with 0 km/h and 0 rpm in the last 120 s and nothing since that says
@@ -334,10 +333,10 @@ for when remote B is repaired.
   start is seen as a battery reading below 12.0 V (the cranking dip) or as a rise by more than
   300 mV over the voltage of the engine-off sample (the alternator). The firmware reads the
   battery every 100 ms, also inside blocking K-line actions (a 5-baud init blocks for about
-  2 s), and hands the lowest reading of an action to the bridge right after it (review M4-1).
+  2 s), and hands the lowest reading of an action to the bridge right after it.
   NOT VERIFIED: that every start on this car dips that far for that long, and the divider's
   reading noise (a noisy rise voids the sample: the safe side).
-- **Arming** (reviews B-1/B-2, r3 minor 5): LWM_ARM only when not armed, no unlock owed and
+- **Arming**: LWM_ARM only when not armed, no unlock owed and
   the moving rule for a BMT request allows it, that is parked with the engine off (an idling
   engine at a standstill is refused). The confirmed lock risk is kept
   apart until the unlock code is confirmed too; only then are both armed together. A wrong code

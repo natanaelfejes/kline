@@ -150,7 +150,7 @@ pub fn deny_text(r: &DenyReason) -> String {
             if *service == 0x41 { "41 RAM download" } else { "71 routine run" }
         ),
         DenyReason::SafetySystemForbidden { name } => format!(
-            "{name}: permanently forbidden on this safety-system ECU (owner decision 2026-11-23); use a garage (SAFETY.md \"Airbag ECU\" / \"ABS / brake ECU\")"
+            "{name}: permanently forbidden on this safety-system ECU, in every tier; use a garage (SAFETY.md \"Airbag ECU\" / \"ABS / brake ECU\")"
         ),
         DenyReason::OneApprovedRequestPerSession => {
             "one approved request per session on the ISO8 unit at 01 (ABS): close this session (Stop), read 58, then start a new one".into()

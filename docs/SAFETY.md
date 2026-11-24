@@ -125,30 +125,27 @@ airbag).
 - **On a BMT/UCH/decoder** (address `0x26`/`0xA6`, or any ECU whose loaded definition is a
   BMT/UCH/decoder: `kline_core::spec::definition_guard`): `3D`, `38`-`3A`, `2C`;
   download/upload/transfer `34`-`37` and flash erase/checksum `31`/`32`/`33` `81`/`82` (they
-  overwrite or erase the key-code EEPROM); `30`/`31`/`32`/`33` C0-C9
-  (except exact `31C7000000`/`31C8000000`) or with the immobilizer actuator outputs `A6`
-  "Ligne Transpondeur", `AB` "Led Verlog", `AC` "Ligne ECM" (both BMT definitions);
-  any `2E`/`2F`; any `3B` except `3B D2`, and `3B D2` index 2 (AP1CLE) or any index whose low
-  nibble is 2 (`12`, `22`, .. `F2`: an alias of AP1CLE if the firmware masks the index, NOT
-  VERIFIED); `21A4` with extra
+  overwrite or erase the key memory); `30`/`31`/`32`/`33` C0-C9
+  (except exact `31C7000000`/`31C8000000`) or with the immobilizer outputs `A6`, `AB`, `AC`
+  (both BMT definitions); any `2E`/`2F`; any `3B` except `3B D2`, and `3B D2` index 2 (key
+  related) or any index whose low nibble is 2 (`12`, `22`, .. `F2`: an alias of index 2 if the
+  firmware masks the index, NOT VERIFIED); `21A4` with extra
   bytes. `3B D2` index 3 (TRF) is the remote type, RF or infrared, not key related: Tier 2 with
   a specific warning (`ChangesRemoteType`); a value other than 0/1 is also Tier 2 with that
   warning and the text "unknown TRF value".
 - **On non-immobilizer ECUs**: `31 A0 A3` (and `32`/`33`/`38`-`3A` `A0 A3`), an earlier
   reading of the backed-up memory reset, kept refused.
 - **On a Sirius** (0x7A or a Sirius definition): `31 A3 ..`, `32 A3 ..` and `33 A3 ..`, the
-  real backed-up memory reset ("Reinit memoire sauvegardee", function 0xA3; the backed-up
-  memory holds the verrou logiciel). In the Sirius 32 definition "Fonctions particulieres" is
-  `31A000` with the function number at FirstByte 2 (1-based), so a request is `31 fn 00`
-  ("Arret fonctions" `32 fn 00`, "Status fonctions" `31 fn 01`); injector inhibition is
-  `31 A0 00` (Tier 1) and `32 A0 00` ends it. The other functions (A1
+  reset of the backed-up memory (function 0xA3; that memory holds immobilizer data). In the
+  Sirius 32 definition the special-functions request is `31A000` with the function number at
+  FirstByte 2 (1-based), so a start is `31 fn 00`, a stop `32 fn 00` and a status `31 fn 01`;
+  injector inhibition is `31 A0 00` (Tier 1) and `32 A0 00` ends it. The other functions (A1
   power latch stop, A2 OBDFC tests, A4, A6 static test, A7 fuel pump priming) stay Expert.
   Also writes `2E`/`2F`/`3B` to the frame
-  identifiers `A0`/`A2`/`AE`/`BD` (the `21` frames that carry the immobilizer / "verrou
-  logiciel" fields). Output control `30` and routines `31`-`33`/`38`-`3A` whose byte 2 is one
-  of those values are other number spaces (`30 A0` is the fast radiator fan, `31 A2 00 00 00`
-  "SRBLI start test sav", `31 A2 01 00 00` "Status tests OBDFC") and keep their normal tiers. On other ECUs those numbers mean other things, so the write rule is
-  Sirius only.
+  identifiers `A0`/`A2`/`AE`/`BD` (the `21` frames that carry the immobilizer fields). Output control `30` and routines `31`-`33`/`38`-`3A` whose byte 2 is one
+  of those values are other number spaces (`30 A0` is the fast radiator fan, `31 A2 00 00 00` and
+  `31 A2 01 00 00` start and query the OBD tests) and keep their normal tiers. On other ECUs
+  those numbers mean other things, so the write rule is Sirius only.
 - **Name guard**: a Tier 1-3 request whose definition names look immobilizer/transponder/key
   related, applied by `Session` in kline-core ([cli.md](cli.md#name-guard)). The texts of an
   enumerated sent parameter count too: the value whose text has such a word is refused (fixed
@@ -156,7 +153,7 @@ airbag).
   needs at least two distinguishing bytes (the fixed prefix, else the whole SentBytes
   template); a service byte alone never flags. Non-read variants of a flagged read are refused
   on purpose: a `21 xx` with extra bytes can write (BMT `21 A1`
-  with a third byte writes CALTERMI), so on a read flagged by its received items only the exact
+  with a third byte can write configuration), so on a read flagged by its received items only the exact
   two-byte read stays allowed (Tier 0).
 - **Allowed**: reading transponder *status* (BMT `21A4`, exactly 2 bytes) is Tier 0.
 
@@ -217,22 +214,22 @@ then.
 
 ### Airbag ECU (address `0x2C`, any protocol, with or without a definition)
 
-**Why.** Owner policy: airbag faults are not cleared yet, and nothing touches the firing
+**Why.** By design: airbag faults are not cleared yet, and nothing touches the firing
 lines or the crash data. Before this rule `3B D0`/`3B D6`/`3B E0` were refused only by
-name-guard false positives ("verrou", "cle"), `30 80` and `14 FF 00` were Tier 1, `10 A0` was
+name-guard false positives, `30 80` and `14 FF 00` were Tier 1, `10 A0` was
 Tier 0 and `3B D2`/`D3`/`D7`, `10 80` were Expert.
 
-| Name (AB70 / AB80) | Bytes | Purpose | Why forbidden |
+| Request (AB70 / AB80) | Bytes | Purpose | Why forbidden |
 |---|---|---|---|
-| Verrouillage / Deverrouillage MAF; Inhibition-Reactivation AB_PSG | `3B D0 ..` (`00` unlock, `FF` lock, `55` / `AA` passenger airbag active / inhibited) | firing line lock state, passenger airbag inhibit | a locked line or an inhibited airbag does not fire, silently |
-| Correction impedances lignes (frontales) | `3B D2 ..` | squib line impedance windows | a broken firing line can look healthy (lamp off, airbag cannot fire) |
-| Correction impedances lignes laterales | `3B D3 ..` | side squib line impedance windows | same |
-| Configuration 2 du systeme | `3B D6 ..` | which airbags, pretensioners, crash output exist | SANS for a present component stops monitoring and firing it |
-| ResetCptRobust | `3B D7 ..` | robustness counter reset | crash-record related, effect unknown |
-| Reset compteur crash / ResetBE | `3B E0 ..` | crash counter reset, supplier mode | erases crash evidence |
-| ClearDiagInfo / Reinitialisation EEPROM | `14 ..` (any) | fault memory clear; on AB80 `14 FF 00` resets the EEPROM | no airbag fault clear yet (maintainer decision); EEPROM reset can unconfigure the airbags |
-| Activation sortie crash | `30 ..` (any; AB80 `30 80 00`/`01`/`12`) | drives the crash output line | simulates a crash signal to the other ECUs |
-| StartDiagSession other than `10 81` | `10 80` supplier, `10 A0` BE (engineering), `10 B0` production, `10 C0` after-sales, and any `10` other than exactly `10 81` | privileged sessions | gate of the forbidden writes; `10 A0` is the engineering session on this ECU, not a read |
+| firing line lock / unlock; passenger airbag inhibit | `3B D0 ..` (`00` unlock, `FF` lock, `55` / `AA` passenger airbag active / inhibited) | firing line lock state, passenger airbag inhibit | a locked line or an inhibited airbag does not fire, silently |
+| front firing line impedance correction | `3B D2 ..` | squib line impedance windows | a broken firing line can look healthy (lamp off, airbag cannot fire) |
+| side firing line impedance correction | `3B D3 ..` | side squib line impedance windows | same |
+| system configuration 2 | `3B D6 ..` | which airbags, pretensioners, crash output exist | SANS for a present component stops monitoring and firing it |
+| robustness counter reset | `3B D7 ..` | robustness counter reset | crash-record related, effect unknown |
+| crash counter reset | `3B E0 ..` | crash counter reset, supplier mode | erases crash evidence |
+| fault clear / EEPROM reset | `14 ..` (any) | fault memory clear; on AB80 `14 FF 00` resets the EEPROM | no airbag fault clear yet (maintainer decision); EEPROM reset can unconfigure the airbags |
+| crash output activation | `30 ..` (any; AB80 `30 80 00`/`01`/`12`) | drives the crash output line | simulates a crash signal to the other ECUs |
+| sessions other than `10 81` | `10 80` supplier, `10 A0` BE (engineering), `10 B0` production, `10 C0` after-sales, and any `10` other than exactly `10 81` | privileged sessions | gate of the forbidden writes; `10 A0` is the engineering session on this ECU, not a read |
 | generic engine forms | `11 FF`, `31 A0 00`, `32 A0 00` | adaptation reset / injector inhibition elsewhere | no airbag requests |
 
 Tier 0 on the airbag stays the reads: `21 xx`, `1A xx`, `17`/`18`, `3E`, `10 81`. Only the

@@ -1,9 +1,13 @@
-# kline
+# kline: Renault K-line diagnostics over a KKL cable
 
-**Open-source Renault K-line diagnostics: read fault codes, live data and ECU identification
-from late-1990s and early-2000s Renaults over a cheap KKL USB cable, without DDT2000.**
+**An open-source, command-line DDT2000 alternative: read fault codes, live data and ECU
+identification from late-1990s and early-2000s Renaults over a cheap KKL USB cable.**
 Built and tested on a 1999 Clio II (Siemens Sirius 32 engine ECU, Sagem BMT body computer,
-Bosch ABS and airbag). It uses the DDT2000 ECU definitions you already have.
+Bosch ABS, airbag). kline ships no Renault data: it decodes with the DDT2000 XML definition
+files from your own installation.
+
+**Tested on** a 1999 Clio II phase 1. **Likely related:** other K-line Renaults and Dacias of
+about 1996 to 2004 (untested). **Not for** CAN-only cars or ELM327 adapters.
 
 [![CI](https://github.com/natanaelfejes/kline/actions/workflows/ci.yml/badge.svg)](https://github.com/natanaelfejes/kline/actions/workflows/ci.yml)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
@@ -14,12 +18,32 @@ init fast   fast init not answered (normal for many Renault K-line ECUs), trying
 init single byte 7A: ok
 connected: sirius at 7A (kwp, kwp 5-baud) with variant single; sync 55 KW D0 8F, ~address 85, key bytes match the definition
 session 10 A0: ok 50
+
+$ kline dtc --xml X24_ABS_Bosch5.3.xml --variant single
+init single byte 01: ok
+connected: X24_ABS_Bosch5.3 at 01 (iso8, iso8 5-baud) with variant single; sync 55 KW DC 83, key bytes match the definition
+note: Failures Id=0 "Ne contient pas de pannes": DDT2000 shows no fault list for this definition; non-zero fault-named items (panne/defaut/fault) of its Tier 0 reads instead
+MES_DIAG (58): 1 set
+    Défaut mémoire 1 = signal capteur AVG  (compteur mémoire 1 1, Etat contacteur stop 1 Pédale relâchée, Etat régulateur ABS 1 Inactif, Tension 1 13.56 V, Vitesse de référence 1 16. km/h)
+1 fault flag(s) set
 ```
+
+That is the Clio's engine ECU waking up, and its ABS reporting one stored fault (front left
+wheel sensor signal, at 16 km/h and 13.56 V). Item names come from Renault's definition files,
+so they are in French.
 
 kline is a command-line tool written in Rust. It runs on macOS, Linux and Windows. It speaks
 KWP2000 (ISO 14230) and Renault's "ISO8" variant of ISO 9141, does the 5-baud and fast inits
 itself, and decodes replies with the DDT2000 XML definition of the ECU. It is not a generic
 OBD-II code reader.
+
+| Term | Meaning |
+|---|---|
+| BMT / UCH | the body computer: central locking, remote, lights, wipers, immobilizer |
+| ISO8 | DDT2000's name for Renault's ISO 9141 framing (length byte, data, checksum) |
+| `21 80` | the KWP2000 request that reads an ECU's identification |
+| Tier | kline's risk class of a request, from 0 (read) to 3 (expert), plus forbidden |
+| X65 | Renault's project code for the Clio II |
 
 ## Contents
 
@@ -67,24 +91,17 @@ implemented and the definition decodes. These ECUs were checked on a 1999 Clio I
 |---|---|---|---|
 | Siemens Sirius 32 engine ECU | 0x7A | KWP2000, 5-baud init (`D0 8F`) | init, identification (exact AutoIdent match), live data while driving, fault codes, read-only scan, output tests (fuel pump, fans, warning lamps) |
 | Sagem BMT N2 body computer (UCH) | 0x26 | KWP2000, 5-baud init (`D0 8F`) | init (also with the ignition off), identification, inputs and outputs, fault codes and fault clear, remote-key learning, door lock and unlock outputs, indicator, wiper, courtesy light and buzzer tests |
-| Bosch airbag | 0x2C | KWP2000, 5-baud init | identification, fault reads, impedance and status reads; nothing was written or cleared ([why](docs/SAFETY.md#airbag-ecu-address-0x2c-any-protocol-with-or-without-a-definition)) |
+| Airbag | 0x2C | KWP2000, 5-baud init | identification, fault reads, impedance and status reads; nothing was written or cleared ([why](docs/SAFETY.md#airbag-ecu-address-0x2c-any-protocol-with-or-without-a-definition)) |
 | Bosch 5.3 ABS | 0x01 | ISO8 5-baud (`DC 83`) | identification (`51`) and fault memory (`58`). The fault clear `45` exists (Tier 1) but has not been sent on the car |
 | Sagem Safir 1 / 2 engine ECU | 0x7A | ISO8 5-baud (`1C 86` / `C2 85`) | not on a car; simulator only |
 | KWP2000 fast-init ECUs | per definition | KWP2000 fast init | not on a car; simulator only |
 | CAN-only ECUs | | | refused: a KKL cable cannot talk CAN |
 
-Details per ECU, including what did **not** work, are in
-[protocol.md "What the car confirmed"](docs/protocol.md#what-the-car-confirmed). Two examples:
-the Clio's BMT answers `7F 31 12` to the window and door-lamp output tests (this unit has no
-such outputs), and its stored lock state does not follow the K-line lock outputs. The airbag's
-`21 80` decodes with two definitions (`AB70_X65`, `AB80_X65_X90_V1`), so which one fits is
-still open.
-
-The ddt4all database shipped by default has no definition for this BMT. kline reads it with
-the DDT2000 definitions `BMT_X65_ph1_p.xml` and `BMT_SAGEM.xml`.
+What worked and what did not on each ECU is in
+[protocol.md "What the car confirmed"](docs/protocol.md#what-the-car-confirmed).
 
 **Other cars.** Renaults of the same era (roughly 1996 to 2004: Clio II, Kangoo, Megane I,
-Scenic I, Twingo, Laguna, and Dacias built on the same parts) use related K-line ECUs. They are
+Scenic I, Twingo, Laguna I, and Dacias built on the same parts) use related K-line ECUs. They are
 **untested**. They may work if you have the definition for your ECU and it speaks one of the
 protocols above. Reports are welcome.
 
@@ -100,8 +117,8 @@ pulse, and reads back every byte it sends.
 | Chip | Status |
 |---|---|
 | FTDI FT232R / FT232RL | used on the car from macOS; measured with `selftest` on macOS and in a Windows VM |
-| Other FTDI chips (vendor id `0403`) | auto-detected on Linux and Windows; untested |
-| CH340, CP2102 and other USB serial chips | not auto-detected (pass `--port`); untested, break timing may differ |
+| Other FTDI chips (vendor id `0403`) | auto-detected; untested |
+| Other USB serial chips (CH340, CP2102, PL2303) | untested, break timing may differ. On macOS any `/dev/cu.usbserial-*` port is picked automatically; other macOS names (`cu.wchusbserial*`, `cu.SLAB_USBtoUART`) and every non-FTDI port on Linux and Windows need `--port` |
 | ELM327 (USB, Bluetooth, Wi-Fi) | not supported, see the [FAQ](#does-it-work-with-an-elm327-adapter) |
 
 Some cheap cables carry counterfeit FT232 chips, which some FTDI driver versions disable.
@@ -130,6 +147,12 @@ cargo build --release -p kline-cli      # target/release/kline (kline.exe on Win
 cargo build --release -p kline-agent    # optional: target/release/kline-agent (read-only)
 ```
 
+To put `kline` on your `PATH` instead (in `~/.cargo/bin`):
+
+```
+cargo install --path crates/kline-cli
+```
+
 macOS needs the Xcode command line tools; Windows needs Visual Studio Build Tools with
 "Desktop development with C++". Build `kline-agent` in its own `cargo build` as shown: built
 together with `kline-cli`, it gets the approval feature and refuses to start (exit 7).
@@ -140,7 +163,7 @@ Per-OS setup before first use:
 |---|---|---|---|
 | Linux | `/dev/ttyUSB0` | `ftdi_sio` (in the kernel) | join the `dialout` group (`uucp` on Arch); optionally `kline selftest --set-latency 1` |
 | macOS | `/dev/cu.usbserial-*` | AppleUSBFTDI (built in) | nothing; kline refuses `/dev/tty.*`, use the `cu` device |
-| Windows | `COM3`, `COM12`, ... | FTDI VCP (Windows Update or ftdichip.com) | Device Manager > Port > Advanced > Latency Timer 1 ms |
+| Windows | `COM3`, `COM12`, ... | FTDI VCP (Windows Update or ftdichip.com) | Device Manager > Ports (COM & LPT) > USB Serial Port > Properties > Port Settings > Advanced > Latency Timer 1 ms |
 
 Then copy your DDT2000 definitions in once ([below](#ecu-definitions-bring-your-own)):
 
@@ -174,22 +197,21 @@ session 10 A0: ok 50
 
 The failed fast init is expected on this car; the 5-baud init takes about 2 seconds.
 
-**3. Read the fault codes.** `dtc` only reads.
+**3. Read the fault codes.** `dtc` only reads: `kline dtc --ecu sirius` for the engine ECU,
+or, for the Clio's ABS:
 
 ```
-$ kline dtc --ecu sirius
-```
-
-Each fault frame prints `N set (present: a, memorized: b)` and one line per set flag. This is
-the Clio's ABS, which had one stored fault (read with `--xml X24_ABS_Bosch5.3.xml`):
-
-```
+$ kline dtc --xml X24_ABS_Bosch5.3.xml --variant single
+...
 MES_DIAG (58): 1 set
     Défaut mémoire 1 = signal capteur AVG  (compteur mémoire 1 1, Etat contacteur stop 1 Pédale relâchée, Etat régulateur ABS 1 Inactif, Tension 1 13.56 V, Vitesse de référence 1 16. km/h)
 1 fault flag(s) set
 ```
 
-The item names come from the definition, so they are in French for Renault's files.
+Each fault frame prints a header with the number of set flags, then one line per set flag.
+When the item names say which faults are present and which are memorized, the header reads
+`N set (present: a, memorized: b)`; the ABS definition does not say, so it is only `1 set`. The
+last line counts the set flags over all frames.
 
 **4. Watch live data.** Ctrl-C stops and closes the session.
 
@@ -229,8 +251,16 @@ kline --xml /path/to/one-ecu.xml ...    # or use a single file
 ```
 
 The default directory is `~/.local/share/kline/ecus` (Linux, macOS) or `%APPDATA%\kline\ecus`
-(Windows). `--ecu sirius`, `--ecu bmt`, `--ecu bmt-ph1p` and `--ecu bmt-sagem` are shortcuts for
-the Clio II file names. Not sure which file is your ECU? Give `kline ident` several
+(Windows). Shortcuts for the Clio II files in that directory:
+
+| `--ecu` | File |
+|---|---|
+| `sirius` | `SIRIUS32___EMS3132___Soft_RE1_maj.xml` |
+| `bmt` | `BMT_X65_ph1_p.xml`, plus `BMT_SAGEM.xml` as a second candidate if present |
+| `bmt-ph1p` | `BMT_X65_ph1_p.xml` only |
+| `bmt-sagem` | `BMT_SAGEM.xml` only |
+
+Not sure which file is your ECU? Give `kline ident` several
 candidates for the same address (`--xml a.xml --xml b.xml`; the first sets up the link) and it
 picks the one whose identification matches. How kline decodes a definition, and where it
 differs from ddt4all, is in
@@ -267,8 +297,29 @@ The full rules are in [docs/SAFETY.md](docs/SAFETY.md); the exact bytes per tier
 from a definition. The test suite runs every command against it, in-process on all three
 operating systems and over a pseudo-terminal on Linux and macOS. The simulator keeps its own log
 of anything that would change the ECU, and the tests check that it stays empty where it should.
-Car captures can be replayed as the ECU. What the simulator cannot prove is in
-[docs/sim.md](docs/sim.md).
+
+There is no standalone simulator binary yet. What you can run without a car:
+
+```
+cargo test --workspace                     # every command against the simulator
+kline replay crates/kline-sim/tests/fixtures/abs_car_58.jsonl --xml crates/kline-cli/tests/fixtures/bosch_abs_iso8.xml
+kline selftest                             # cable plugged into the computer only
+```
+
+The `replay` line decodes the Clio's ABS session with a hand-written test definition:
+
+```
+t=8119 ms 58 -> 58 08 00 10 BF 01 00 00 00 00 00 00 00 00 00 00
+  [Fault memory]
+    Fault code 1       front left sensor signal
+    Stop switch 1      released
+    Reference speed 1  16  km/h
+    Voltage 1          13.56  V
+    Counter 1          1
+...
+```
+
+What the simulator cannot prove is in [docs/sim.md](docs/sim.md).
 
 ## ESP32 Bluetooth bridge (experimental)
 
@@ -294,7 +345,11 @@ a BLE radio backend that is not in this build. See
 
 Use kline if you have a K-line Renault from before CAN and want a small, scriptable tool that
 records every byte. Use DDT2000 or ddt4all if you need screens, CAN, or an ELM327. kline's
-decoder can run in ddt4all's mode, and that is how it is cross-checked.
+decoder can run in ddt4all's mode, and that is how it is cross-checked (by the author's script,
+not in this repository).
+
+The ddt4all database shipped by default has no definition for the Clio II phase 1 BMT. kline
+reads that body computer with the DDT2000 definitions `BMT_X65_ph1_p.xml` and `BMT_SAGEM.xml`.
 
 ## FAQ
 

@@ -105,7 +105,7 @@ Two sessions on a 1999 Clio II phase 1 (D7F engine), FTDI FT232R cable on macOS:
 | Sirius 32 (0x7A) init | fast init not answered; 5-baud `7A` (`SingleEcu`) answered `55 D0 8F`, ~address `85` |
 | BMT (0x26) init | same: 5-baud `26`, `55 D0 8F`, ~address `D9`; it also answers with the ignition off |
 | Bosch 5.3 ABS (0x01) init | ISO8 5-baud `01`, `55 DC 83`, no handshake ([below](#bosch-53-abs-0x01-iso8)) |
-| Airbag (0x2C) | KWP 5-baud; the key bytes match `AB70_X65.xml`, but `AB80_X65_X90_V1.xml` decodes `21 80` too, so the definition choice is open. Identification, fault reads (present and memorized faults decoded) and the impedance and status blocks `21 80`..`21 8A`, `21 B0`, `21 C0`, `21 C1` answered. Nothing was written or cleared |
+| Airbag (0x2C) | Bosch (0 285 001 312 by part number cross-reference, not checked on the label). KWP 5-baud; the key bytes match `AB70_X65.xml`, but `AB80_X65_X90_V1.xml` decodes `21 80` too, so the definition choice is open. Identification, fault reads (present and memorized faults decoded) and the impedance and status blocks `21 80`..`21 8A`, `21 B0`, `21 C0`, `21 C1` answered. Nothing was written or cleared |
 | Sessions | the Sirius accepts `10 A0` and answers `50` (one byte, no `A0`); `10 81` gets `7F 10 11`. The BMT definition has no session request. StopCommunication is answered `C2` |
 | Link quality | about 20 000 requests over two drives with the engine running: no negative reply, no checksum error, no timeout |
 | Throughput | one KWP request every 45 to 48 ms (about 21 per second); reply latency 26 to 43 ms. The 16 ms steps in the latency come from the macOS FTDI latency timer |
@@ -136,7 +136,7 @@ before the 5-baud init that works (`--variant single` skips it).
 |---|---|---|
 | Baud | **10400** 8N1, even when the XML says 10417 (Safir). Configurable (`KTiming::baud`) | RE: IOTBD32V3 Setup; the XML baud is never applied before the worker starts. Multipoint forces 10400 (RE: KWP2000Diag4 KWP2000Ecu) |
 | DTR | high while idle, low during the 5-baud bits | RE: IOTBD32V3 5-baud routine |
-| RTS | DDT2000: not driven (DCB RTS control disabled, so deasserted on Windows); kline: `--rts leave` (default) leaves it as the OS opens the port, `--rts low` raises DTR and then drops RTS once after open (`LinkConfig::rts`, `RtsMode`). NOT VERIFIED whether the KKL cable uses it | RE: IOTBD32V3 Setup 0x10001e9a / 0x10001f0e |
+| RTS | DDT2000: not driven (DCB RTS control disabled, so deasserted on Windows); kline: `--rts leave` (default) leaves it as the OS opens the port, `--rts low` raises DTR and then drops RTS once after open (`LinkConfig::rts`, `RtsMode`). NOT VERIFIED whether the KKL cable uses it | RE: IOTBD32V3 Setup |
 | Tester address | 0xF1 | RE: KWP2000Diag4 KWP2000Ecu default ToolAddress |
 
 ## Timing values (`KTiming`)
@@ -199,7 +199,7 @@ From RE: IOTBD32V3 5-baud routine:
 1. (ours) idle 300 ms.
 2. DTR low. Break on (K low) for 200 ms: the start bit.
 3. Check that RX saw the break (the KKL cable loops TX to RX). DDT2000 waits for the
-   Windows `EV_BREAK` event and aborts with 0x3F0 without it (RE: IOTBD32V3 FUN_10001380).
+   Windows `EV_BREAK` event and aborts with 0x3F0 without it (RE: IOTBD32V3).
    We can only infer the break from a byte on RX (a POSIX tty has no portable break event;
    the port is opened with `IGNBRK`, `BRKINT` and `PARMRK` cleared so a break reads as one
    `00`), so by default a missing loopback is a logged warning and the init goes on (ours).
@@ -230,7 +230,7 @@ It depends on the transport flag DDT2000 sets (RE: IOTBD32V3 worker; the nested
 - **KWP 5-baud (Sirius 32, BMT), any variant:** wait `kw2_delay_ms`, send ~KW2
   (one byte, 0x70 for KW2 0x8F), read 2 bytes within the same window: the echo of ~KW2 (must
   match, else **collision**; no byte at all is also **collision**, RE: IOTBD32V3
-  FUN_100014f0 returns 0x3ED when the echo count is 0) and ~address (logged, **not**
+  returns 0x3ED when the echo count is 0) and ~address (logged, **not**
   validated; echo but no ~address is error **no address complement**). Wait
   `first_request_ms`. Done.
 
@@ -238,7 +238,7 @@ It depends on the transport flag DDT2000 sets (RE: IOTBD32V3 worker; the nested
 
 Addresses with bit 7 set are refused by both init machines (`AliasedAddress`): such a byte is
 the Multipoint wake byte of `address & 0x7F` (0xA6 wakes the BMT), so the ECU that answers
-could differ from the one the policy checks (found in a security review). The init result
+could differ from the one the policy checks. The init result
 (`InitOutcome`) is opaque, carries the config, init kind and target (derived from the
 bit-banged byte, or the StartCommunication header target), and is consumed by `Session::new`.
 
@@ -273,7 +273,7 @@ Both keep the ~KW2 handshake and the 25 ms / 20 ms waits.
 
 On the 1999 Clio II both KWP ECUs need `SingleEcu`. `--variant auto` order (alone on the
 line): **FastInit, then SingleEcu** (DDT2000's own detection order for 0x7A and 0x26: DiagScanXml
-0x5004ee50 walks the function's `<ProtocolList>` of x65_addressing.xml in file order, Code 4
+walks the function's `<ProtocolList>` of x65_addressing.xml in file order, Code 4
 "KWP2000 FastInit MonoPoint" then Code 2 "KWP2000 Init 5 Baud Type I", `MultiPoint="0"`), then
 our MultiEcu fallback; ISO8 (Safir) only SingleEcu. The whole list is tried up to 3 rounds,
 500 ms apart (DDT2000 "Init retry n/3"; `--init-attempts`). Constants:
@@ -301,9 +301,9 @@ RE: IOTBD32V3 fast init: (ours) idle 300 ms, DTR high, 1 ms, break 25 ms, break 
 then the StartCommunication exchange below with payload `81`. With KW1 still unknown, the
 length goes in the format byte (RE: KWP2000Diag4 LenInFmt default): `81 7A F1 81 6D` for the
 Sirius. The reply must be positive `C1 KW1 KW2`; anything else is an error. Then wait
-`first_request_ms` (RE: IOTBD32V3 FUN_100015a0 sleeps FirstRequestDelay after
-StartCommunication), like the 5-baud init. DDT2000's fast-init reader (RE: IOTBD32V3
-FUN_10001290) only handles a length in the format byte; we also accept a separate length byte
+`first_request_ms` (RE: IOTBD32V3 sleeps FirstRequestDelay after
+StartCommunication), like the 5-baud init. DDT2000's fast-init reader (RE: IOTBD32V3) only
+handles a length in the format byte; we also accept a separate length byte
 there, as DDT2000's normal request reader does.
 
 ## Framing and checksum: ISO 9141 and KWP2000
@@ -369,7 +369,7 @@ Examples:
 | StopCommunication `82` | `81 26 F1 82 1A` |
 
 Reply checks: format byte must be physical (`fmt & 0xC0 == 0x80`, ours: stricter than
-DDT2000, whose parser KWP2000Diag4 0x2305d230 checks only the two address bytes; another
+DDT2000, whose parser KWP2000Diag4 checks only the two address bytes; another
 address mode has a different header layout, and Renault ECUs answer physically), checksum,
 byte 2 = 0xF1, byte 3 = ECU address, length consistent with the format or length byte.
 
@@ -391,12 +391,12 @@ Payloads returned to callers start at the response SID.
    - ISO8: read `N` more bytes.
    - KWP, `fmt & 0x3F != 0`: read `(fmt & 0x3F) + 3` more bytes (RE: IOTBD32V3).
    - KWP, `fmt & 0x3F == 0`: read 3 (`tgt src len`), then `len + 1` (RE: IOTBD32V3
-     FUN_100015a0 cmd 0x404 and KWP2000Diag4 0x2305d230 do the same; only IOTBD32V3's
-     fast-init reader FUN_10001290 does not).
+     and KWP2000Diag4 do the same; only IOTBD32V3's
+     fast-init reader does not).
    A read that stops short: **incomplete reply**.
 6. Decode and classify: `7F SID NRC` is a negative reply; **`7F SID 78` (responsePending)
    restarts step 5 without a new request**, with a 5000 ms first-byte timeout, at most 10
-   times (ours: DDT2000 treats 0x78 as a plain error: RE: KWP2000Diag4 NRC jump table 0x2305f8a4
+   times (ours: DDT2000 treats 0x78 as a plain error: RE: KWP2000Diag4 NRC jump table
    sends it to the default error 0x7F8, and nothing reads on; on its D-PDU/VCI path the driver
    handles P2*, independent RE 2 only, not the KKL path).
 
@@ -416,12 +416,12 @@ Payloads returned to callers start at the response SID.
 - Stop: `3F` for ISO8, StopCommunication `82` for KWP. The session is closed afterwards.
 - The engine sends neither StartCommunication nor StartDiagnosticSession by itself after a
   5-baud init; the CLI decides (Sirius 32 definition: `10 A0`). DDT2000 does the same: on the
-  5-baud branch of KWP2000Ecu init (RE: KWP2000Diag4 0x2305a370, `local_8 = 0x5d`) it only
+  5-baud branch of KWP2000Ecu init (RE: KWP2000Diag4) it only
   fetches the key bytes; `81` and the KW1 length-byte rule (separate length byte unless KW1 is
   0xD0 or odd) exist only on the fast-init branch. So after a 5-baud init the length stays in
   the format byte whatever KW1 is (`Session::new`).
 - Optional `TesterPresentMode::DDT2000_PERIODIC` (`--periodic-tester-present`): `3E` every
-  2000 ms since the last TP whatever else is sent, reply required (RE: DdtDiagScrXml 0x520484a0,
+  2000 ms since the last TP whatever else is sent, reply required (RE: DdtDiagScrXml,
   "Enable or disable physical TesterPresent request, when idle", `TesterPresent.WithResponse`).
 
 ## DDT2000 retry behaviour
@@ -430,9 +430,9 @@ Not in DDT2000's protocol layer but in its application; defaults of `kline_core:
 
 | What | Rule | RE |
 |---|---|---|
-| NRC 0x21 / 0x23 | wait 200 / 500 ms and send again, at most 10 tries (`kline ident`; `--nrc-tries`) | DiagScanXml 0x5007c790 |
-| init | whole variant list up to 3 rounds, 500 ms apart | DdtDiagScrXml 0x520484a0 (`[0x32] = 0x1F4`), DiagFailures 0x2404f410 |
-| refresh cycle (`live`) | only a cycle where every request failed counts; retry after 400 ms, at most 3 times, then exit 5 | DdtDiagScrXml 0x5204ce50 |
+| NRC 0x21 / 0x23 | wait 200 / 500 ms and send again, at most 10 tries (`kline ident`; `--nrc-tries`) | DiagScanXml |
+| init | whole variant list up to 3 rounds, 500 ms apart | DdtDiagScrXml, DiagFailures |
+| refresh cycle (`live`) | only a cycle where every request failed counts; retry after 400 ms, at most 3 times, then exit 5 | DdtDiagScrXml |
 
 ## Sans-IO contract
 
@@ -470,26 +470,24 @@ not safety rules:
 - BMT/UCH/decoder: address 0x26 or 0xA6, or a definition whose `Target@Name`/`<Function Name>`
   says BMT/UCH/UCBIC/decoder/anti-demarrage/immobilizer (`kline_core::spec::ecu_class`), at any
   address and protocol claim: `3D`, `38`, `39`, `3A`, `2C` (memory write / routine by address /
-  dynamic define: EEPROM with key codes); `30`/`31`/`32`/`33` with byte 2 in 0xC0..=0xC9 except
-  the two exact remote-learning routines (C0-C8 immobilizer in the capability notes, C9 added by
-  maintainer decision); `30`/`31`/`32`/`33` with byte 2 = actuator output `A6` (Ligne
-  Transpondeur), `AB` (Led Verlog) or `AC` (Ligne ECM) (both BMT definitions);
-  transfer `34`-`37` and flash erase/checksum `31`/`32`/`33` `81`/`82` (key-code EEPROM; memory read `23` stays Expert); every `2E`/`2F`; every `3B`
-  except `3B D2`; `3B D2 02 ..` (AP1CLE, key related) and `3B D2 x2 ..` (`12`, `22`, .. `F2`:
-  an alias of AP1CLE if the BMT firmware masks the index to its low nibble,
+  dynamic define: key memory); `30`/`31`/`32`/`33` with byte 2 in 0xC0..=0xC9 except
+  the two exact remote-learning routines; `30`/`31`/`32`/`33` with byte 2 = one of the immobilizer
+  outputs `A6`, `AB`, `AC` (both BMT definitions);
+  transfer `34`-`37` and flash erase/checksum `31`/`32`/`33` `81`/`82` (key memory; memory read `23` stays Expert); every `2E`/`2F`; every `3B`
+  except `3B D2`; `3B D2 02 ..` (key related) and `3B D2 x2 ..` (`12`, `22`, .. `F2`:
+  an alias of index 2 if the BMT firmware masks the index to its low nibble,
   NOT VERIFIED; other indices above 0x0F stay Expert); `21 A4` with anything after it.
 - Not BMT, any protocol claim (an ISO8 target at 0x7A included, found in a review):
   `31`/`32`/`33`/`38`-`3A` with `A0 A3` (an earlier reading of the backed-up memory reset, kept
   refused).
 - Sirius (0x7A or a Sirius definition): `31`/`32`/`33` with `A3` at byte 2, whatever follows
-  (function 0xA3 "Reinit memoire sauvegardee", reset of the backed-up memory, may touch the
-  "verrou logiciel" area). The Sirius request layout is `31 fn 00` start, `32 fn 00` stop,
+  (function 0xA3, reset of the backed-up memory, may touch the immobilizer data). The Sirius request layout is `31 fn 00` start, `32 fn 00` stop,
   `31 fn 01` status, from `31A000`/`32A000`/`31A001` with the function at FirstByte 2.
 - Sirius (0x7A or a Sirius definition): `2E`/`2F`/`3B` on `A0`, `A2`, `AE`, `BD` (the `21`
-  frames carrying immobilizer / verrou fields). Output control `30` and routines
+  frames carrying immobilizer fields). Output control `30` and routines
   `31`-`33`/`38`-`3A` with byte 2 = `A0`/`A2`/`AE`/`BD` are not refused: those are I/O,
   routine and address numbers, not frame identifiers (`30 A0` fast radiator fan, `31 A2 00 00
-  00` "SRBLI start test sav", `31 A2 01 00 00` "Status tests OBDFC"). They
+  00` / `31 A2 01 00 00` start and query the OBD tests). They
   get their normal tier (`30 lid` Tier 1, other routines Expert). The write rule is Sirius
   only: on other ECUs those identifiers mean other things.
 - Name guard (`DefinitionGuard`, set on the `Session` by the CLI): Tier 1-3 requests of the loaded
@@ -551,7 +549,7 @@ speed), like the airbag rule.
 
 Every non-read request has a machine-readable `RiskInfo { tier, what_it_changes,
 what_can_go_wrong, safety_system, reversible, prerequisites, warnings }` (`safety::assess`), from the
-definitions and the capability catalogue. Examples: clear DTC "erases the stored fault
+definitions and kline-core's own risk texts. Examples: clear DTC "erases the stored fault
 codes", `reversible: false`, `ErasesFaultMemory`; BMT `3B D2` "rewrites one BMT configuration
 option", `reversible: true` (write the old value from the `21 A1` backup), `EepromWrite`.
 `warnings` and `prerequisites` are short inline lists (`StaticList`), so the airbag ECU

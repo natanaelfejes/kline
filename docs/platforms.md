@@ -188,7 +188,7 @@ break calls. A pulse is the time between two deadlines plus the difference betwe
 its closing and its opening break call. The two break calls of TiniL are the same ioctl, so
 that difference is their jitter only: RX is drained (a `bytes_to_read` ioctl, a USB round trip
 on some drivers) at the chain's DTR edge, before the 1 ms pre-sleep, not inside the break-on
-edge (code review L9; a unit test checks that a 3 ms drain does not shorten TiniL).
+edge (a unit test checks that a 3 ms drain does not shorten TiniL).
 
 During an init (`Link::init`) a guard checks the sleeps whose lateness corrupts the wake-up:
 the 5-baud start and data bits (+-10 ms, ISO 9141-2) and the fast-init TiniL and TWuP (2 ms
