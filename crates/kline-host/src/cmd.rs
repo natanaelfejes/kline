@@ -618,6 +618,7 @@ pub fn open_session(
     ctx.g.apply(&mut cfg);
     let policy = args.retry_policy(ctx.g);
     let spec = ctx.port_spec()?;
+    defs::refuse_sim_builtin_on_real_port(&ecu, matches!(spec, PortSpec::Sim { .. }))?;
     let tracer = if ctx.g.trace {
         Tracer::to(ctx.env.stderr.clone())
     } else {
@@ -2421,6 +2422,17 @@ pub fn assessment_human(a: &Assessment) -> String {
 
 pub fn risk(ctx: &mut Ctx, a: &RiskArgs) -> Result<(), CliError> {
     let ecu = Ecu::resolve(&a.ecu, &ctx.g.defs_dir())?;
+    if let Some(d) = defs::sim_builtin(&ecu) {
+        let m = format!(
+            "{} is a kline-sim built-in definition (not for a car): this assessment is for the \
+             simulator; at the car use the car's definitions",
+            d.path.display()
+        );
+        ctx.out.emit(
+            json!({"event": "warning", "kind": "sim_builtin_definition", "message": m}),
+            format!("warning: {m}"),
+        );
+    }
     let asx = assess(&ecu, &a.request, &a.set)?;
     let watch = a.hold.watch_read(&ecu)?;
     let mut j = assessment_json(&asx);

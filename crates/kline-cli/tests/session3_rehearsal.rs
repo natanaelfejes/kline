@@ -16,7 +16,10 @@
 //!   `KLINE_SESSION_COMMANDS=FILE` to run another list in the same format (`## Section`
 //!   headers, `# comments`, one `kline ...` command per line).
 //!
-//! One test per section, each with its own simulator, so the sections run in parallel.
+//! One test per section, each with its own simulator, so the sections run in parallel. The
+//! section tests take about two minutes and are `#[ignore]`d in the normal run; the owner runs
+//! them with `cargo test -p kline-cli --test session3_rehearsal -- --ignored`. The other tests
+//! here (lock memory, presence, faults, replay) always run.
 #![cfg(unix)]
 
 mod common;
@@ -381,6 +384,7 @@ fn no_writes_except(sim: &Sim, allowed: &[&[u8]]) {
 }
 
 #[test]
+#[ignore = "about 2 minutes: cargo test -p kline-cli --test session3_rehearsal -- --ignored"]
 fn v0_reads_only() {
     if let Some(s) = rehearse("V0") {
         no_writes_except(&s, &[]);
@@ -388,6 +392,7 @@ fn v0_reads_only() {
 }
 
 #[test]
+#[ignore = "about 2 minutes: cargo test -p kline-cli --test session3_rehearsal -- --ignored"]
 fn home_risk_and_selftest() {
     if let Some(s) = rehearse("Home") {
         no_writes_except(&s, &[]);
@@ -395,6 +400,7 @@ fn home_risk_and_selftest() {
 }
 
 #[test]
+#[ignore = "about 2 minutes: cargo test -p kline-cli --test session3_rehearsal -- --ignored"]
 fn b_bmt_reads() {
     if let Some(s) = rehearse("B") {
         no_writes_except(&s, &[]);
@@ -402,6 +408,7 @@ fn b_bmt_reads() {
 }
 
 #[test]
+#[ignore = "about 2 minutes: cargo test -p kline-cli --test session3_rehearsal -- --ignored"]
 fn c_bmt_lock_outputs() {
     if let Some(s) = rehearse("C") {
         let bmt = &s.run.journals.iter().find(|j| j.0 == 0x26).unwrap().2;
@@ -429,6 +436,7 @@ fn c_bmt_lock_outputs() {
 }
 
 #[test]
+#[ignore = "about 2 minutes: cargo test -p kline-cli --test session3_rehearsal -- --ignored"]
 fn d_airbag_abs_sirius() {
     if let Some(s) = rehearse("D") {
         no_writes_except(&s, &[]);
@@ -436,6 +444,7 @@ fn d_airbag_abs_sirius() {
 }
 
 #[test]
+#[ignore = "about 2 minutes: cargo test -p kline-cli --test session3_rehearsal -- --ignored"]
 fn k_long_live_and_abs() {
     if let Some(s) = rehearse("K") {
         no_writes_except(&s, &[]);
@@ -443,6 +452,7 @@ fn k_long_live_and_abs() {
 }
 
 #[test]
+#[ignore = "about 2 minutes: cargo test -p kline-cli --test session3_rehearsal -- --ignored"]
 fn f_bmt_live() {
     if let Some(s) = rehearse("F") {
         no_writes_except(&s, &[]);
@@ -450,6 +460,7 @@ fn f_bmt_live() {
 }
 
 #[test]
+#[ignore = "about 2 minutes: cargo test -p kline-cli --test session3_rehearsal -- --ignored"]
 fn e1_sirius_output_test() {
     if let Some(s) = rehearse("E1") {
         no_writes_except(&s, &[&[0x30, 0x94, 0x00, 0x01], &[0x30, 0x94, 0x11, 0x00]]);
@@ -457,6 +468,7 @@ fn e1_sirius_output_test() {
 }
 
 #[test]
+#[ignore = "about 2 minutes: cargo test -p kline-cli --test session3_rehearsal -- --ignored"]
 fn h_fault_reads() {
     if let Some(s) = rehearse("H") {
         no_writes_except(&s, &[]);
@@ -464,6 +476,7 @@ fn h_fault_reads() {
 }
 
 #[test]
+#[ignore = "about 2 minutes: cargo test -p kline-cli --test session3_rehearsal -- --ignored"]
 fn j_after_repair() {
     if let Some(s) = rehearse("J") {
         no_writes_except(&s, &[&[0x30, 0x94, 0x00, 0x01], &[0x30, 0x94, 0x11, 0x00]]);
@@ -471,6 +484,7 @@ fn j_after_repair() {
 }
 
 #[test]
+#[ignore = "about 2 minutes: cargo test -p kline-cli --test session3_rehearsal -- --ignored"]
 fn n_sirius_expert_requests() {
     if let Some(s) = rehearse("N") {
         no_writes_except(
@@ -485,6 +499,7 @@ fn n_sirius_expert_requests() {
 }
 
 #[test]
+#[ignore = "about 2 minutes: cargo test -p kline-cli --test session3_rehearsal -- --ignored"]
 fn m_last_live_and_captures() {
     if let Some(s) = rehearse("M") {
         no_writes_except(&s, &[]);

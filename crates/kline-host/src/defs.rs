@@ -121,6 +121,33 @@ pub struct Ecu {
     pub choice_unresolved: bool,
 }
 
+/// Start of the `<Target Name>` of the `kline-sim` runner's built-in definitions
+/// (crates/kline-sim/tests/fixtures/builtin, docs/sim.md "Running it"). They only look like the
+/// car's ECUs (invented positions and scalings), so kline uses them only against the simulator.
+pub const SIM_BUILTIN_NAME_PREFIX: &str = "kline-sim built-in";
+
+/// The first loaded definition that is a `kline-sim` built-in, if any.
+pub fn sim_builtin(ecu: &Ecu) -> Option<&LoadedDef> {
+    ecu.defs
+        .iter()
+        .find(|d| d.def.name.starts_with(SIM_BUILTIN_NAME_PREFIX))
+}
+
+/// Exit 2 when a `kline-sim` built-in definition would be used on a real port (anything but the
+/// simulator, `--sim-control`): its decoding would be wrong on a car. Checked before the port
+/// is opened.
+pub fn refuse_sim_builtin_on_real_port(ecu: &Ecu, simulator: bool) -> Result<(), CliError> {
+    match sim_builtin(ecu) {
+        Some(d) if !simulator => Err(CliError::usage(format!(
+            "{} is a kline-sim built-in definition (not for a car); it is used only with \
+             --sim-control (the simulator). Use the car's definitions (--defs, $KLINE_DDT_XML); \
+             nothing was sent",
+            d.path.display()
+        ))),
+        _ => Ok(()),
+    }
+}
+
 pub fn default_defs_dir() -> PathBuf {
     if let Some(p) = std::env::var_os("KLINE_DDT_XML") {
         return PathBuf::from(p);

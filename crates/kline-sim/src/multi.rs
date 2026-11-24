@@ -50,6 +50,12 @@ impl Transcript {
         Transcript(Arc::new(Mutex::new(Box::new(w))))
     }
 
+    /// Send the following lines to `w` instead (the binary opens its file only once the
+    /// simulator has started).
+    pub fn redirect(&self, w: impl Write + Send + 'static) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Box::new(w);
+    }
+
     /// One line `t=<ms> ms <text>`, flushed at once so a killed simulator keeps it.
     pub fn line(&self, t_ms: u64, text: &str) {
         let mut w = self.0.lock().unwrap_or_else(|e| e.into_inner());

@@ -552,6 +552,18 @@ pub struct Control {
 }
 
 impl Control {
+    /// [`Control::command`] on the running line: an ECU taken off the line also loses the
+    /// reply bytes it had queued but not yet sent.
+    pub fn command_on(&self, line: &str, bus: &mut Bus, t: u64) -> Option<String> {
+        let up = line.trim().to_ascii_uppercase();
+        let w: Vec<&str> = up.split_whitespace().collect();
+        let r = self.command(line);
+        if r.as_deref() == Some("OK") && matches!(w.as_slice(), ["ECU", _, "OFF"]) {
+            bus.drop_pending(t);
+        }
+        r
+    }
+
     /// Answer one control command (case-insensitive), None: not a runner command.
     pub fn command(&self, line: &str) -> Option<String> {
         let up = line.trim().to_ascii_uppercase();
@@ -598,6 +610,22 @@ pub struct Running {
     pub journals: Vec<(u8, String, Journal)>,
 }
 
+/// The definitions directory `kline --defs` should use with this simulator: the
+/// `--write-defs` directory, else the directory of the first `--ecu PATH.xml`, else None.
+pub fn defs_dir_in_use(cfg: &Config) -> Option<PathBuf> {
+    if let Some(d) = &cfg.write_defs {
+        return Some(d.clone());
+    }
+    cfg.ecus.iter().find_map(|e| match &e.source {
+        Source::Xml(p) => Some(
+            p.parent()
+                .filter(|d| !d.as_os_str().is_empty())
+                .map_or_else(|| PathBuf::from("."), Path::to_path_buf),
+        ),
+        _ => None,
+    })
+}
+
 /// Default control socket path.
 pub fn default_control_path() -> PathBuf {
     std::env::temp_dir().join("kline-sim.ctl")
@@ -638,7 +666,7 @@ pub fn start(cfg: &Config, transcript: Option<Transcript>) -> Result<Running, Ru
     let sim = crate::pty::PtySim::spawn_with_control(
         built.bus,
         &ctl,
-        Box::new(move |line| c2.command(line)),
+        Box::new(move |line, bus, t| c2.command_on(line, bus, t)),
     )
     .map_err(|e| RunnerError::Setup(format!("cannot open a pty / control socket: {e}")))?;
     Ok(Running {

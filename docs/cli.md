@@ -319,7 +319,9 @@ kline-sim --write-defs ~/kline-sim-defs --control /tmp/kline-sim.ctl   # termina
 kline --port /dev/ttys004 --sim-control /tmp/kline-sim.ctl --defs ~/kline-sim-defs read --ecu bmt 21A3   # terminal 2
 ```
 
-Every command behaves as at the car, `exec` with its confirmation code included. The tests start
+Every command behaves as at the car, `exec` with its confirmation code included. A definition
+whose target name starts with `kline-sim built-in` (the simulator's) is refused on any other
+port (exit 2, nothing opened) and `risk` warns about it. The tests start
 `kline_sim::pty::PtySim` or the runner themselves. How the simulator works and its options
 (faults, answers, ECUs off the line, the BMT lock memory, the transcript): [sim.md](sim.md#running-it).
 

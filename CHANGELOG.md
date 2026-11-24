@@ -22,7 +22,10 @@ work so far is grouped by milestone under `Unreleased`, newest first. The crates
 - `kline_sim::multi::MultiEcu`, `SpecEcu::with_reply`, `SpecEcu::with_bit_memory`,
   `PtySim::spawn_with_control`, `VirtualLine::from_bus`.
 - `crates/kline-cli/tests/session3_rehearsal.rs`: every command of the session-3 script against
-  the simulated car, with its exit code; `exec` through the test approval terminal.
+  the simulated car, with its exit code; `exec` through the test approval terminal. The section
+  tests are `#[ignore]`d (about 2 minutes): `cargo test -p kline-cli --test session3_rehearsal -- --ignored`.
+- kline refuses a `kline-sim` built-in definition (target name `kline-sim built-in ..`) on any
+  port but the simulator (exit 2, before the port is opened); `risk` warns about one.
 
 ### Documentation overhaul (2026-11-24)
 

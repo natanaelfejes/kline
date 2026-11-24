@@ -154,13 +154,18 @@ fn the_abs_keeps_its_session_through_the_7000_ms_keep_alive() {
     positive(&d.request(&mut s, &[0x58]).unwrap());
     d.line.advance_ms(7_000);
     positive(&d.request(&mut s, &[0x58]).unwrap());
-    d.line.advance_ms(9_000);
+    // The boundary: iso8_session_timeout_ms(7000) = 8000 ms after the ECU's last byte. The
+    // request returns once the reply is read, so the silence starts a little before `now`.
+    assert_eq!(kline_sim::ecu::iso8_session_timeout_ms(7_000), 8_000);
+    d.line.advance_ms(7_950);
+    positive(&d.request(&mut s, &[0x58]).unwrap());
+    d.line.advance_ms(8_050);
     assert!(
         !matches!(
             d.request(&mut s, &[0x58]),
             Ok(SessionOutcome::Reply(Reply::Positive(_)))
         ),
-        "asleep after 9 s of silence"
+        "asleep after 8050 ms of silence"
     );
 }
 
@@ -254,7 +259,10 @@ fn scratch(tag: &str) -> std::path::PathBuf {
 fn write_defs_never_overwrites() {
     let d = scratch("defs");
     let files = kline_sim::builtin::write_defs(&d).unwrap();
-    assert_eq!(files.len(), 5);
+    assert_eq!((files.written.len(), files.unchanged.len()), (5, 0));
+    // The same directory again: nothing to do, not an error.
+    let again = kline_sim::builtin::write_defs(&d).unwrap();
+    assert_eq!((again.written.len(), again.unchanged.len()), (0, 5));
     assert!(d.join("BMT_X65_ph1_p.xml").exists());
     std::fs::write(d.join("AB70_X65.xml"), "mine").unwrap();
     std::fs::remove_file(d.join("BMT_X65_ph1_p.xml")).unwrap();
@@ -265,6 +273,57 @@ fn write_defs_never_overwrites() {
         "mine"
     );
     let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn write_defs_refuses_other_definitions_and_symlinks() {
+    let d = scratch("defs-other");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("SOMETHING_ELSE.xml"), "<x/>").unwrap();
+    assert!(kline_sim::builtin::write_defs(&d).is_err());
+    assert!(!d.join("BMT_X65_ph1_p.xml").exists(), "nothing written");
+    let _ = std::fs::remove_dir_all(&d);
+
+    let real = scratch("defs-real");
+    std::fs::create_dir_all(&real).unwrap();
+    let link = scratch("defs-link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    assert!(kline_sim::builtin::write_defs(&link).is_err());
+    assert_eq!(std::fs::read_dir(&real).unwrap().count(), 0);
+    let _ = std::fs::remove_file(&link);
+
+    // A dangling link under one of the car's names: refused, nothing created behind it.
+    std::os::unix::fs::symlink(real.join("elsewhere.xml"), real.join("BMT_X65_ph1_p.xml")).unwrap();
+    assert!(kline_sim::builtin::write_defs(&real).is_err());
+    assert!(!real.join("elsewhere.xml").exists());
+    assert!(!real.join("AB70_X65.xml").exists());
+    let _ = std::fs::remove_dir_all(&real);
+}
+
+/// An ECU taken off the line mid-reply: the bytes it had not sent yet never arrive.
+#[test]
+fn ecu_off_drops_the_reply_still_queued() {
+    use kline_sim::line::Line;
+    let built = build(&["--ecu", "bmt"]);
+    let ctl = built.control.clone();
+    let mut d = Driver::new(VirtualLine::from_bus(built.bus));
+    let init = d.init(&cfg(&b("bmt").def())).unwrap();
+    let _s = d.session(init);
+    d.line.advance_ms(100);
+    d.line.flush_rx().unwrap();
+    // 21 A3 to the BMT; its reply starts P2 = 25 ms after the request.
+    d.line
+        .write(&[0x82, 0x26, 0xF1, 0x21, 0xA3, 0x5D], 0)
+        .unwrap();
+    let echo = d.line.read(6, 5).unwrap();
+    assert_eq!(echo.len(), 6, "echo {echo:02X?}");
+    let t = d.line.clock_ms();
+    assert_eq!(
+        ctl.command_on("ECU 26 OFF", d.line.bus_mut(), t).as_deref(),
+        Some("OK")
+    );
+    let late = d.line.read(16, 200).unwrap();
+    assert!(late.is_empty(), "reply bytes after OFF: {late:02X?}");
 }
 
 #[test]
@@ -279,6 +338,7 @@ fn the_binary_prints_its_port_and_answers_ctl() {
     let dir = scratch("bin");
     std::fs::create_dir_all(&dir).unwrap();
     let ctl = dir.join("sim.ctl");
+    std::fs::write(dir.join("t.log"), "earlier session\n").unwrap();
     let mut child = Command::new(bin)
         .args(["--control"])
         .arg(&ctl)
@@ -364,8 +424,11 @@ fn the_binary_prints_its_port_and_answers_ctl() {
     };
     assert_eq!(status.and_then(|s| s.code()), Some(3), "refused at once");
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "keep");
-    // A second simulator on the same socket is refused while the first runs.
+    // A second simulator on the same socket is refused while the first runs, and writes
+    // no definitions.
     let o = Command::new(bin)
+        .arg("--write-defs")
+        .arg(dir.join("defs2"))
         .arg("--control")
         .arg(&ctl)
         .output()
@@ -376,8 +439,19 @@ fn the_binary_prints_its_port_and_answers_ctl() {
         "{}",
         String::from_utf8_lossy(&o.stderr)
     );
+    assert!(!dir.join("defs2").exists(), "no definitions written");
+    // Without --write-defs or a definition file the banner still says where --defs goes.
+    assert!(
+        all.contains("--defs DIR") && all.contains("--write-defs DIR"),
+        "{all}"
+    );
     child.kill().unwrap();
     let _ = child.wait();
+    let log = std::fs::read_to_string(dir.join("t.log")).unwrap();
+    assert!(
+        log.starts_with("earlier session\n"),
+        "appended, not truncated: {log}"
+    );
     // A killed simulator leaves its socket; the next one removes it.
     assert!(ctl.exists());
     let mut again = Command::new(bin)

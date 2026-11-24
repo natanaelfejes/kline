@@ -102,6 +102,15 @@ impl VirtualLine {
         &self.bus
     }
 
+    pub fn bus_mut(&mut self) -> &mut Bus {
+        &mut self.bus
+    }
+
+    /// The line's clock.
+    pub fn clock_ms(&self) -> u64 {
+        self.now
+    }
+
     pub fn journal(&self) -> &Journal {
         self.bus.journal()
     }

@@ -45,9 +45,10 @@ use crate::bus::Bus;
 /// Poll period of the simulator thread (ours).
 pub const POLL_MS: u64 = 1;
 
-/// Extra control commands: called with each command line the built-in table does not know;
-/// `Some(reply)` answers it, `None` answers `ERR`. Runs in the simulator thread.
-pub type ControlHandler = Box<dyn FnMut(&str) -> Option<String> + Send>;
+/// Extra control commands: called with each command line the built-in table does not know,
+/// the bus and the time; `Some(reply)` answers it, `None` answers `ERR`. Runs in the
+/// simulator thread.
+pub type ControlHandler = Box<dyn FnMut(&str, &mut Bus, u64) -> Option<String> + Send>;
 
 /// A running simulator on a pty. Dropping it stops the thread and removes the socket.
 pub struct PtySim {
@@ -72,7 +73,7 @@ impl PtySim {
     /// Open a pty, bind the control socket at `control_path` (must not exist) and run `bus`
     /// in a thread.
     pub fn spawn(bus: Bus, control_path: impl Into<PathBuf>) -> io::Result<PtySim> {
-        PtySim::spawn_with_control(bus, control_path, Box::new(|_| None))
+        PtySim::spawn_with_control(bus, control_path, Box::new(|_, _, _| None))
     }
 
     /// Like [`PtySim::spawn`], with `extra` answering the control commands the built-in table
@@ -222,7 +223,7 @@ fn serve(c: &mut Conn, bus: &mut Bus, t: u64, extra: &mut ControlHandler) -> boo
             }
             other => {
                 bus.advance(t);
-                extra(other).unwrap_or_else(|| "ERR".into())
+                extra(other, bus, t).unwrap_or_else(|| "ERR".into())
             }
         };
         if c.stream.write_all(format!("{reply}\n").as_bytes()).is_err() {

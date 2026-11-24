@@ -36,9 +36,14 @@ and hand-written (`crates/kline-sim/tests/fixtures/builtin/`, the ABS from
 bytes), with invented names and values, no Renault file. `--write-defs DIR` writes them under the
 car's file names (`SIRIUS32___EMS3132___Soft_RE1_maj.xml`, `BMT_X65_ph1_p.xml`, `AB70_X65.xml`,
 `AB80_X65_X90_V1.xml`, `X24_ABS_Bosch5.3.xml`), so `kline --defs DIR --ecu bmt` and a script's
-`--xml "$AB70"` find them; it never overwrites an existing file. Keep that directory apart
-from the real definitions and never pass it at the car: the files only look like the car's
-(their target names say `kline-sim built-in, not for a car`). The banner shows what to type:
+`--xml "$AB70"` find them. It never overwrites a file with other contents, leaves files that
+already have the built-in contents as they are (so the same directory works again), refuses a
+directory that holds any other `.xml` and any symbolic link, and writes only after the control
+socket check (a second simulator writes nothing). The files only look like the car's (their
+target names say `kline-sim built-in, not for a car`), so `kline` refuses them on any port but
+the simulator: without `--sim-control` a session command with such a definition is exit 2
+before the port is opened, and `risk` prints a warning. The banner shows what to type, always with a `--defs` directory (the `--write-defs` one, else
+that of the first `--ecu PATH.xml`, else a `--defs DIR` placeholder and a hint):
 
 ```
 kline-sim: simulated K line on /dev/ttys004
@@ -69,7 +74,7 @@ simulator; the next start removes the socket a killed one left behind.
 | `--bmt-lock-initial locked\|unlocked` | the memory at start (default `unlocked`) |
 | `--strict` | the ISO timing windows (default lenient: a pty jitters by a few ms) |
 | `--control PATH` | the control socket (default `kline-sim.ctl` in the temp directory, on macOS a long `/var/folders/..` path; `/tmp/kline-sim.ctl` is shorter to type). A path that exists and is not a socket is refused |
-| `--transcript FILE` | the transcript to FILE instead of stdout |
+| `--transcript FILE` | the transcript to FILE instead of stdout, appended (never truncated), opened once the simulator runs |
 | `--write-defs DIR` | above |
 
 The BMT lock model applies to whatever ECU runs at 26, built in or from a real definition: the
@@ -88,7 +93,8 @@ kline-sim ctl /tmp/kline-sim.ctl LOCK 26?          # LOCKED / UNLOCKED
 kline-sim ctl /tmp/kline-sim.ctl LOCK 26 LOCKED    # press the dashboard button
 ```
 
-An ECU off the line sees no wake-up and no byte and sends nothing; a session it had times out
+An ECU off the line sees no wake-up and no byte and sends nothing (reply bytes it had
+queued but not yet sent are dropped); a session it had times out
 as usual (5000 ms, the ABS after its 7000 ms keep-alive plus 1 s). `kline` then fails the init
 (exit 4) or reports no communication (exit 5) as it would at the car.
 
@@ -102,6 +108,10 @@ stderr (`kline-sim: ECU WRITE LOG: ..`).
 
 ### Rehearsing a session
 
+```
+cargo test -p kline-cli --test session3_rehearsal -- --ignored     # about 2 minutes
+```
+
 `crates/kline-cli/tests/session3_rehearsal.rs` runs every command of the session-3 script
 against the runner (built-in car, `--write-defs` directory, one simulator per section) and checks
 each exit code: reads, `live`, `dtc`, `ident`, `risk`, `ports`, `selftest` and `--version` with
@@ -109,7 +119,8 @@ the `kline` binary; `exec` through the same command code in-process with the tes
 typing the confirmation code it shows (the approval path is the real one; the test does not
 bypass it). Durations and holds are cut to 2 s. `KLINE_SESSION_COMMANDS=FILE` runs another
 script in the same format. The same file tests the lock memory both ways, an ECU leaving and
-rejoining the line, injected faults reaching the CLI, and a capture replayed as the ECU.
+rejoining the line, injected faults reaching the CLI, and a capture replayed as the ECU; those
+run in every `cargo test`, the section tests only with `--ignored`.
 
 ### Without the runner
 

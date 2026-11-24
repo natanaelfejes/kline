@@ -379,6 +379,13 @@ impl Bus {
         }
     }
 
+    /// Drop every RX byte still on its way after `t` (an ECU that left the line mid-reply:
+    /// what it had not sent yet never arrives).
+    pub fn drop_pending(&mut self, t: u64) {
+        self.advance(t);
+        self.rx.retain(|&(rt, _)| rt <= t);
+    }
+
     /// Drop every RX byte that has arrived by `t` (later bytes are still on their way).
     pub fn flush_rx(&mut self, t: u64) {
         self.advance(t);

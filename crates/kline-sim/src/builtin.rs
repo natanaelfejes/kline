@@ -140,27 +140,71 @@ impl Builtin {
     }
 }
 
-/// Write every built-in definition into `dir` under the car's file names. An existing file is
-/// never overwritten (the directory may hold the real definitions): that is an error and
-/// nothing is written.
-pub fn write_defs(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+/// What [`write_defs`] did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct WrittenDefs {
+    pub written: Vec<PathBuf>,
+    /// Already there with exactly the built-in contents.
+    pub unchanged: Vec<PathBuf>,
+}
+
+fn refuse(msg: String) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::AlreadyExists, msg)
+}
+
+/// Write every built-in definition into `dir` under the car's file names. Nothing is written
+/// (an error) when `dir` or any of those names is a symbolic link, when one of those files
+/// exists with other contents (the directory may hold the real definitions), or when `dir`
+/// holds any other `.xml` file. A file that already has exactly the built-in contents is left
+/// as it is, so the same directory can be used again.
+pub fn write_defs(dir: &Path) -> std::io::Result<WrittenDefs> {
+    let is_link = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink());
+    if is_link(dir) {
+        return Err(refuse(format!(
+            "{} is a symbolic link; --write-defs wants a plain directory",
+            dir.display()
+        )));
+    }
     std::fs::create_dir_all(dir)?;
     let files: Vec<(PathBuf, &str)> = BUILTINS
         .iter()
         .flat_map(|b| b.files.iter())
         .map(|(n, x)| (dir.join(n), *x))
         .collect();
-    if let Some((p, _)) = files.iter().find(|(p, _)| p.exists()) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!(
-                "{} exists; --write-defs never overwrites a definition (use an empty directory)",
+    let mut out = WrittenDefs::default();
+    for (p, x) in &files {
+        if is_link(p) {
+            return Err(refuse(format!(
+                "{} is a symbolic link; --write-defs never writes through one",
                 p.display()
-            ),
-        ));
+            )));
+        }
+        if p.exists() {
+            if std::fs::read(p)? != x.as_bytes() {
+                return Err(refuse(format!(
+                    "{} exists with other contents; --write-defs never overwrites a definition (use an empty directory)",
+                    p.display()
+                )));
+            }
+            out.unchanged.push(p.clone());
+        }
+    }
+    for e in std::fs::read_dir(dir)? {
+        let p = e?.path();
+        let xml = p.extension().is_some_and(|x| x.eq_ignore_ascii_case("xml"));
+        if xml && !files.iter().any(|(f, _)| f == &p) {
+            return Err(refuse(format!(
+                "{} holds other definitions ({}); --write-defs wants a directory of its own",
+                dir.display(),
+                p.display()
+            )));
+        }
     }
     for (p, x) in &files {
-        std::fs::write(p, x)?;
+        if !out.unchanged.contains(p) {
+            std::fs::write(p, x)?;
+            out.written.push(p.clone());
+        }
     }
-    Ok(files.into_iter().map(|(p, _)| p).collect())
+    Ok(out)
 }
