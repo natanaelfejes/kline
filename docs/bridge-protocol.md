@@ -99,7 +99,7 @@ Notified on change and every second while a client is connected; also the answer
 | 4 | profile | u8 | 0 off, 1 drive, 2 parked, 3 diagnostics |
 | 5 | batt_cv | u16 | bridge's own divider, centivolts, 0 = not measured |
 | 7 | lock | u8 | 0 unknown, 1 locked, 2 unlocked (BMT `21A3` d0 bit 7) |
-| 8 | flags | u8 | 0x01 lwm armed, 0x02 lwm locked, 0x04 engine running, 0x08 approvals in this build, 0x10 front door open, 0x20 rear door open, 0x40 battery below 12.0 V, 0x80 lock-when-moving gave up an unlock and disarmed itself (doors may be locked; cleared by arming again or a lock-state read showing unlocked) |
+| 8 | flags | u8 | 0x01 lwm armed, 0x02 lwm locked, 0x04 engine running, 0x08 approvals in this build, 0x10 front door open, 0x20 rear door open, 0x40 battery below 12.0 V, 0x80 lock-when-moving gave up an unlock and disarmed itself (doors may be locked; cleared only by arming again or LWM_ACK) |
 | 9 | last_error | u8 | last non-OK [result code](#response-and-result-codes) |
 | 10 | uptime_s | u32 | |
 
@@ -121,10 +121,11 @@ bridge accepted from this bond ([counters](#roles-pairing-counters-rate-limits))
 | `09` | RESUME_KLINE | | the client that yielded, or an owner | end the lease, take the K line back |
 | `0A` | SET_TIME | Unix seconds u32 | owner, agent | for logs only |
 | `0B` | LWM_ARM | | owner | arm lock-when-moving (two challenges); `LwmActive` while armed or while an unlock is owed (disarm first, and wait for the unlock), `VehicleMoving` unless parked with the engine off (the moving rule for a BMT request) |
-| `0C` | LWM_DISARM | | owner | disarm; with an unlock owed the bridge then reads BMT `21A3` once, and a positive read showing the doors unlocked ends the duty |
+| `0C` | LWM_DISARM | | owner | disarm; with an unlock owed the bridge then reads BMT `21A3` once (one such read queued at a time); only an observed locked-then-unlocked change ends the duty |
 | `0D` | RAW_STREAM | 0 or 1 | owner, agent | Raw notifications off or on |
 | `0E` | GET_STATUS | | owner, agent | Status frame in the Response data |
 | `0F` | PREPARE_WRITE | ecu u8, identification length u8 (1..64), identification (the `61 80 ..` reply the app chose its definition from), payload | owner | approval challenge for one Tier 2 config write |
+| `10` | LWM_ACK | | owner | acknowledge a lock-when-moving give-up: clears status flag `0x80`; nothing else changes (still disarmed) |
 
 ECU bytes: `7A` Sirius, `26` BMT, `01` Bosch 5.3 ABS (ISO8), `2C` airbag (owner decision
 2026-11-23: BLE scope v1 is everything the CLI can do for these four). Any other byte does not
@@ -269,11 +270,18 @@ Automaton `kline_bridge::lwm` (MASTER-PLAN-v2 3.1):
   M4); a lock that was not written or that the BMT refused is not retried. A failed unlock is
   retried up to 3 times; every lock starts with all 3 (review B-3). After the third failure the
   automaton gives up: it disarms itself and sets status flag `0x80`; no lock follows until the
-  owner arms again.
-- A positive BMT `21A3` read showing the doors unlocked ends an owed unlock (the owner unlocked
-  by hand or with the verified app UNLOCK). After LWM_DISARM with an unlock owed the bridge reads
-  `21A3` once for this. So nothing stays stuck: an owed unlock ends by the unlock, by the
-  give-up, or by such a read.
+  owner arms again. The flag stays until the owner arms again or sends LWM_ACK; lock-state
+  reads never clear it.
+- The BMT lock memory may not follow the K-line `31 A0`/`31 A1` and its polarity is NOT
+  VERIFIED, so a bare "unlocked" read proves nothing (review B4-1). An owed unlock ends only by
+  a positive reply to `31 A1 00 01`, by the give-up, or by an observed change: after our lock
+  completed, a positive `21A3` read shows "locked" and a later one "unlocked" (the owner unlocked
+  by hand, or the app UNLOCK read "locked", pulsed and saw the bit change). An app UNLOCK that
+  finds "already unlocked" sends no pulse and ends nothing. After LWM_DISARM with an unlock owed
+  the bridge reads `21A3` once, which can be the "locked" or the "unlocked" half of such a
+  change. So nothing stays stuck: once the engine stops, the unlock is sent or given up within
+  the attempts. The host tests run in two simulator models, a lock memory that follows the
+  K-line actuators and one that never does (`bmt_following` / `bmt_ecu`).
 - While it needs the Sirius (armed with the engine running, or an unlock owed) the bridge stays
   on the drive profile even without a charging voltage and refuses parked START_LIVE, REQUEST or
   PREPARE for another ECU and YIELD_KLINE (`LwmActive`), so no client can make it leave the
@@ -325,8 +333,12 @@ for when remote B is repaired.
   so the bridge relies on the Sirius `21A9` (engine off: 0 rpm). With the ignition on (engine
   off) this works for prepare and confirm. With the ignition off the Sirius does not answer and
   non-reads are refused (`VehicleMoving`): turn the ignition on, or disconnect the charger. A
-  start is seen only as a battery reading below 12.0 V; the firmware reads the battery every
-  100 ms (NOT VERIFIED that every start on this car dips that far for that long).
+  start is seen as a battery reading below 12.0 V (the cranking dip) or as a rise by more than
+  300 mV over the voltage of the engine-off sample (the alternator). The firmware reads the
+  battery every 100 ms, also inside blocking K-line actions (a 5-baud init blocks for about
+  2 s), and hands the lowest reading of an action to the bridge right after it (review M4-1).
+  NOT VERIFIED: that every start on this car dips that far for that long, and the divider's
+  reading noise (a noisy rise voids the sample: the safe side).
 - **Arming** (reviews B-1/B-2, r3 minor 5): LWM_ARM only when not armed, no unlock owed and
   the moving rule for a BMT request allows it, that is parked with the engine off (an idling
   engine at a standstill is refused). The confirmed lock risk is kept

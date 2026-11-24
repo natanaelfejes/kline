@@ -96,6 +96,7 @@ fn op() -> impl Strategy<Value = Op> {
         Just(Op::ResumeKline),
         Just(Op::LwmArm),
         Just(Op::LwmDisarm),
+        Just(Op::LwmAck),
         any::<bool>().prop_map(Op::RawStream),
         Just(Op::GetStatus),
     ]

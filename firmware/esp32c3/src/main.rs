@@ -78,10 +78,37 @@ const DIVIDER_DEN: u32 = 180;
 /// Watchdog: a step that blocks longer than this resets the chip. ours: the longest blocking
 /// action is a 5000 ms responsePending read (kline-core `RESPONSE_PENDING_TIMEOUT_MS`).
 const WATCHDOG_MS: u64 = 8_000;
-/// Battery reading period. ours: a start (cranking, about 1-2 s) must show up as a reading
-/// below 12.0 V, which voids the bridge's engine-off sample (docs/bridge-protocol.md "Battery
-/// charger"); 100 ms sees even a short one. NOT VERIFIED on the car.
+/// Battery reading period, also inside blocking K-line actions (a 5-baud init blocks for about
+/// 2 s). ours: a start (cranking, about 1-2 s) must show up as a reading below 12.0 V, which
+/// voids the bridge's engine-off sample (docs/bridge-protocol.md "Battery charger"); 100 ms
+/// sees even a short one. NOT VERIFIED on the car.
 const BATTERY_PERIOD_MS: u64 = 100;
+
+/// Battery readings taken while a K-line action blocks the main loop (review M4-1): the lowest
+/// one is handed to the bridge after the action.
+#[derive(Default)]
+struct BatteryWatch {
+    next_ms: u64,
+    lowest: Option<u16>,
+}
+
+impl BatteryWatch {
+    /// Read the battery if the period is over; keep the lowest reading.
+    fn tick(&mut self) {
+        let now = Instant::now().duration_since_epoch().as_millis();
+        if now < self.next_ms {
+            return;
+        }
+        self.next_ms = now + BATTERY_PERIOD_MS;
+        if let Some(mv) = battery_millivolts() {
+            self.lowest = Some(self.lowest.map_or(mv, |l| l.min(mv)));
+        }
+    }
+
+    fn take_lowest(&mut self) -> Option<u16> {
+        self.lowest.take()
+    }
+}
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
@@ -113,6 +140,7 @@ struct KLine<'d> {
     /// "5-baud init" step 3).
     rx_during_break: bool,
     in_break: bool,
+    battery: BatteryWatch,
 }
 
 impl KLine<'_> {
@@ -157,6 +185,7 @@ impl KLinePort for KLine<'_> {
                     if self.in_break && self.drain() > 0 {
                         self.rx_during_break = true;
                     }
+                    self.battery.tick();
                 }
                 Event::Done
             }
@@ -182,6 +211,7 @@ impl KLinePort for KLine<'_> {
                     for (i, b) in bytes.iter().enumerate() {
                         if i > 0 {
                             busy_ms(u64::from(*inter_byte_ms));
+                            self.battery.tick();
                         }
                         write_all(uart, core::slice::from_ref(b))?;
                     }
@@ -200,6 +230,9 @@ impl KLinePort for KLine<'_> {
                         if let Ok(1) = uart.read_buffered(&mut b) {
                             out.push(b[0]);
                         }
+                    } else {
+                        // The UART FIFO holds the bytes meanwhile; a reading is microseconds.
+                        self.battery.tick();
                     }
                 }
                 if out.len() == *count {
@@ -417,6 +450,7 @@ fn main() -> ! {
             k_pwr,
             rx_during_break: false,
             in_break: false,
+            battery: BatteryWatch::default(),
         },
         rwdt: rtc.rwdt,
         low_power: LowPower::new(p.LPWR),
@@ -450,7 +484,16 @@ fn main() -> ! {
                 bridge.on_battery_mv(mv, now);
             }
         }
-        if let Stepped::Idle { until_ms } = runner::step(&mut bridge, &mut board, &mut fob) {
+        let stepped = runner::step(&mut bridge, &mut board, &mut fob);
+        // The lowest reading taken during a blocking action, stamped now (later than it was
+        // taken, so it can only void an engine-off sample, never keep one).
+        if let Some(mv) = board.kline.battery.take_lowest() {
+            bridge.on_battery_mv(mv, board.now_ms());
+            if let Some(mv) = battery_millivolts() {
+                bridge.on_battery_mv(mv, board.now_ms());
+            }
+        }
+        if let Stepped::Idle { until_ms } = stepped {
             // W7: light sleep until `until_ms` or a BLE event.
             board.wait_until(until_ms.min(now + 50));
         }

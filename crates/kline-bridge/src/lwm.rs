@@ -24,10 +24,14 @@
 //!   after the pause, at most [`LwmConfig::unlock_attempts`] times; every lock starts with the
 //!   full number of attempts (review B-3).
 //! - ours: when the unlock attempts are used up the automaton gives up: it drops the duty,
-//!   disarms itself and reports it ([`LockWhenMoving::gave_up`]) until the owner arms again or a
-//!   lock-state read shows the doors unlocked. No lock follows a give-up without the owner.
-//! - ours: a positive BMT lock-state read showing the doors unlocked
-//!   ([`LockWhenMoving::on_verified_unlocked`]) ends the unlock duty, so nothing stays stuck.
+//!   disarms itself and reports it ([`LockWhenMoving::gave_up`]) until the owner arms again or
+//!   acknowledges it ([`LockWhenMoving::acknowledge_give_up`]). No lock follows a give-up
+//!   without the owner.
+//! - ours (review B4-1): the BMT lock memory may not follow the K-line `31 A0`/`31 A1` and its
+//!   polarity is not verified, so a bare "unlocked" read proves nothing. Besides a positive
+//!   reply to the unlock, the duty ends only on an observed change: after our lock completed, a
+//!   read shows "locked" and a later read "unlocked" ([`LockWhenMoving::on_lock_read`]; a fob
+//!   pulse that verifiably changed the bit is such a change).
 
 /// Parameters, defaults from MASTER-PLAN-v2 3.1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,8 +104,10 @@ pub struct LockWhenMoving {
     in_flight: Option<Intent>,
     unlock_failures: u8,
     /// The unlock attempts were used up; cleared by [`LockWhenMoving::arm`] or
-    /// [`LockWhenMoving::on_verified_unlocked`].
+    /// [`LockWhenMoving::acknowledge_give_up`].
     gave_up: bool,
+    /// A lock-state read showed "locked" since our lock completed.
+    seen_locked: bool,
 }
 
 impl LockWhenMoving {
@@ -120,6 +126,7 @@ impl LockWhenMoving {
             in_flight: None,
             unlock_failures: 0,
             gave_up: false,
+            seen_locked: false,
         }
     }
 
@@ -156,17 +163,27 @@ impl LockWhenMoving {
         self.moving_since = None;
     }
 
-    /// A positive BMT lock-state read (`21 A3`) shows the doors unlocked: whatever was owed is
-    /// done (the owner unlocked by the app or by hand), and a new drive-off may lock again. Not
-    /// while a lock is being sent (it may land after the read).
-    pub fn on_verified_unlocked(&mut self) {
-        if self.in_flight == Some(Intent::Lock) {
+    /// The owner acknowledged a give-up (LWM_ACK): the report ends; nothing else changes.
+    pub fn acknowledge_give_up(&mut self) {
+        self.gave_up = false;
+    }
+
+    /// A positive BMT lock-state read (`21 A3`): `locked` as decoded. While an unlock is owed
+    /// and no lock is being sent, a "locked" read followed by an "unlocked" read is an observed
+    /// unlock (by hand or by the fob): the duty ends and a new drive-off may lock again. A bare
+    /// "unlocked" read changes nothing (review B4-1).
+    pub fn on_lock_read(&mut self, locked: bool) {
+        if !self.locked_by_us || self.in_flight == Some(Intent::Lock) {
             return;
         }
-        self.locked_by_us = false;
-        self.relock_allowed = true;
-        self.unlock_failures = 0;
-        self.gave_up = false;
+        if locked {
+            self.seen_locked = true;
+        } else if self.seen_locked {
+            self.locked_by_us = false;
+            self.relock_allowed = true;
+            self.unlock_failures = 0;
+            self.seen_locked = false;
+        }
     }
 
     /// A decoded Sirius sample at `now_ms`. Locks are decided here only, on fresh evidence.
@@ -246,6 +263,8 @@ impl LockWhenMoving {
             self.relock_allowed = false;
             // This lock's unlock gets all its attempts (review B-3).
             self.unlock_failures = 0;
+            // Only reads after this lock completed count.
+            self.seen_locked = false;
         }
         Some(intent)
     }
@@ -403,7 +422,8 @@ mod tests {
     fn manual_unlock_allows_relock_on_next_drive_off() {
         let mut l = armed();
         assert_eq!(drive(&mut l, 0, 5_000, 30, 1500).len(), 1);
-        l.on_verified_unlocked();
+        l.on_lock_read(true);
+        l.on_lock_read(false);
         assert!(drive(&mut l, 5_000, 8_000, 0, 800).is_empty());
         let v = drive(&mut l, 8_000, 15_000, 30, 1500);
         assert_eq!(v, vec![(11_000, Intent::Lock)]);
@@ -559,41 +579,73 @@ mod tests {
         assert_eq!(drive(&mut l, t + 5_000, t + 15_000, 50, 2000).len(), 1);
     }
 
-    /// Review B-3: a lock-state read showing the doors unlocked ends the duty and the give-up
-    /// report; not while a lock is in flight.
+    /// Review B4-1: only an observed locked -> unlocked change ends the duty; a bare
+    /// "unlocked" read (stale lock memory) does not; reads while a lock is in flight do not
+    /// count; a give-up report ends only by arming or the owner's acknowledgement.
     #[test]
-    fn a_verified_unlocked_read_ends_the_duty() {
+    fn only_an_observed_unlock_ends_the_duty() {
         let mut l = armed();
         assert_eq!(drive(&mut l, 0, 5_000, 30, 1500).len(), 1);
-        assert!(l.locked_by_us());
         // Engine idling at a standstill: the duty stays...
         assert!(drive(&mut l, 5_000, 20_000, 0, 800).is_empty());
+        // ...a bare "unlocked" read proves nothing...
+        l.on_lock_read(false);
+        l.on_lock_read(false);
         assert!(l.locked_by_us());
-        // ...until a read shows the doors unlocked.
-        l.on_verified_unlocked();
+        // ...a "locked" read, then an "unlocked" one, is an observed unlock.
+        l.on_lock_read(true);
+        assert!(l.locked_by_us());
+        l.on_lock_read(false);
         assert!(!l.locked_by_us());
         assert!(
             drive(&mut l, 20_000, 30_000, 0, 0).is_empty(),
             "nothing owed"
         );
 
-        let mut l = armed();
-        let _ = lock_then_give_up(&mut l);
-        l.on_verified_unlocked();
-        assert!(!l.gave_up());
-
+        // Reads while the lock is in flight do not count.
         let mut l = armed();
         let mut t = 0;
         while l.on_sample(t, 40, 2000).is_none() {
             t += 100;
         }
-        l.on_verified_unlocked();
+        l.on_lock_read(true);
+        l.on_lock_read(false);
         assert!(
             l.locked_by_us(),
-            "the lock in flight may land after the read"
+            "the lock in flight may land after the reads"
         );
         l.intent_done(t + 300, Intent::Lock, Outcome::Done);
+        l.on_lock_read(false);
         assert!(l.locked_by_us());
+
+        // A "locked" read from an earlier lock does not carry over to a new one.
+        let mut l = armed();
+        assert_eq!(drive(&mut l, 0, 5_000, 30, 1500).len(), 1);
+        l.on_lock_read(true);
+        assert_eq!(
+            drive(&mut l, 8_000, 9_000, 0, 0).len(),
+            1,
+            "unlocked by K-line"
+        );
+        assert!(!l.locked_by_us());
+        assert!(drive(&mut l, 9_000, 75_000, 0, 800).is_empty());
+        assert_eq!(
+            drive(&mut l, 75_000, 85_000, 30, 1500).len(),
+            1,
+            "second lock"
+        );
+        l.on_lock_read(false);
+        assert!(l.locked_by_us());
+
+        // The give-up report.
+        let mut l = armed();
+        let _ = lock_then_give_up(&mut l);
+        l.on_lock_read(true);
+        l.on_lock_read(false);
+        assert!(l.gave_up(), "reads never end the report");
+        l.acknowledge_give_up();
+        assert!(!l.gave_up());
+        assert!(!l.is_armed(), "acknowledging does not arm");
     }
 
     #[test]

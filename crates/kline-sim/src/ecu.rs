@@ -340,6 +340,8 @@ pub struct SpecEcu {
     init_fault: Option<InitFault>,
     faults: Vec<FaultRule>,
     changes: Vec<ScenarioChange>,
+    /// Scenario changes a positive reply makes ([`SpecEcu::with_effect`]).
+    effects: Vec<(Vec<u8>, String, kline_spec::Value)>,
     state: State,
     asm: Assembler,
     last_rx_byte: u64,
@@ -369,6 +371,7 @@ impl SpecEcu {
             init_fault: None,
             faults: Vec::new(),
             changes: Vec::new(),
+            effects: Vec::new(),
             state: State::Asleep,
             asm: Assembler::default(),
             last_rx_byte: 0,
@@ -408,6 +411,30 @@ impl SpecEcu {
             done: false,
         });
         self
+    }
+
+    /// Set scenario value `data` to `value` whenever the ECU executes a request starting with
+    /// `on`: it answered positively (a reply lost on the line still counts as executed; a
+    /// negative reply does not). E.g. a BMT whose lock memory follows K-line `31 A0 00 01`.
+    pub fn with_effect(mut self, on: &[u8], data: &str, value: kline_spec::Value) -> SpecEcu {
+        self.effects.push((on.to_vec(), data.to_string(), value));
+        self
+    }
+
+    fn apply_effects(&mut self, t: u64, payload: &[u8]) {
+        for i in 0..self.effects.len() {
+            let (on, data, value) = &self.effects[i];
+            if !payload.starts_with(on) {
+                continue;
+            }
+            let next = self.scenario.clone().set(data, value.clone());
+            match next.check(&self.def) {
+                Ok(()) => self.scenario = next,
+                Err(e) => self
+                    .journal
+                    .note(t, format!("effect on {data} refused: {e}")),
+            }
+        }
     }
 
     /// Arm the changes `payload` triggers and apply the ones that are due at `t`.
@@ -547,6 +574,9 @@ impl SpecEcu {
             self.journal.note(t, "session stopped");
         }
         let Some(reply) = reply else { return };
+        if reply.first() != Some(&0x7F) && !matches!(fault, Some(ReplyFault::Negative { .. })) {
+            self.apply_effects(t, &p.payload);
+        }
         let (fmt, ecu, tm) = (self.fmt(), self.profile.address, self.profile.timing);
         let wire = |pl: &[u8]| encode_reply(fmt, ecu, tester, pl);
         let sid = p.payload[0];

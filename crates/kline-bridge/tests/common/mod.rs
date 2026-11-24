@@ -482,3 +482,30 @@ impl Rig {
 pub fn text(s: &str) -> Value {
     Value::Text(s.into())
 }
+
+/// A BMT whose lock memory ("Door lock memory", `21 A3`) follows the K-line lock and unlock
+/// actuators `31 A0 00 01` / `31 A1 00 01`. [`bmt_ecu`] is the other model: the memory never
+/// follows them. The 2026-11-22 car notes leave open which one the car is, so the
+/// lock-when-moving tests run in both.
+pub fn bmt_following(s: Scenario) -> SpecEcu {
+    bmt_ecu(s)
+        .with_effect(
+            &[0x31, 0xA0, 0x00, 0x01],
+            "Door lock memory",
+            text("locked"),
+        )
+        .with_effect(
+            &[0x31, 0xA1, 0x00, 0x01],
+            "Door lock memory",
+            text("unlocked"),
+        )
+}
+
+/// [`bmt_following`] when `following`, else [`bmt_ecu`].
+pub fn bmt_model(following: bool, s: Scenario) -> SpecEcu {
+    if following {
+        bmt_following(s)
+    } else {
+        bmt_ecu(s)
+    }
+}

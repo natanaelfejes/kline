@@ -109,6 +109,10 @@ pub struct BridgeConfig {
     pub critical_battery_debounce_ms: u64,
     /// A Sirius speed sample older than this is not "the car's speed now". ours: 2 s.
     pub speed_fresh_ms: u64,
+    /// A battery rise by more than this over the voltage of the engine-off sample voids it: an
+    /// alternator raises the voltage over a resting or charger-held battery (review M4-1). ours:
+    /// 300 mV, above the divider's reading noise (NOT VERIFIED on the bridge).
+    pub start_rise_mv: u16,
     pub lwm: LwmConfig,
     pub fob: FobTiming,
 }
@@ -141,6 +145,7 @@ impl Default for BridgeConfig {
             low_battery_debounce_ms: 10_000,
             critical_battery_debounce_ms: 5_000,
             speed_fresh_ms: 2_000,
+            start_rise_mv: 300,
             lwm: LwmConfig::default(),
             fob: FobTiming::default(),
         }
@@ -353,11 +358,13 @@ pub struct Bridge {
     last_engine_sample: Option<(u64, u16)>,
     /// Latest Sirius speed and when it was read.
     last_speed: Option<(u64, u8)>,
-    /// The latest Sirius `21 A9` showing 0 km/h and 0 rpm, and whether the battery read as
-    /// charging then (review r3 minor 1: engine off, whatever a charger does to the voltage).
-    engine_off_at: Option<(u64, bool)>,
+    /// The latest Sirius `21 A9` showing 0 km/h and 0 rpm, whether the battery read as
+    /// charging then, and the battery voltage then (review r3 minor 1: engine off, whatever a
+    /// charger does to the voltage).
+    engine_off_at: Option<(u64, bool, u16)>,
     /// The latest battery reading below the write limit (a start pulls the battery far below
-    /// it): an engine-off proof older than this no longer counts.
+    /// it): an engine-off proof older than this no longer counts. The firmware also reports the
+    /// lowest reading taken during a blocking K-line action (review M4-1).
     last_dip_ms: Option<u64>,
     /// Since when the battery reads below the write limit / the critical limit.
     low_since: Option<u64>,
@@ -573,6 +580,14 @@ impl Bridge {
     pub fn on_battery_mv(&mut self, mv: u16, now_ms: u64) {
         self.now_ms = now_ms;
         self.battery_mv = Some(mv);
+        // A rise over the voltage of the engine-off sample is an alternator (review M4-1: a
+        // start whose dip was not seen).
+        if self
+            .engine_off_at
+            .is_some_and(|(_, _, m0)| mv > m0.saturating_add(self.cfg.start_rise_mv))
+        {
+            self.engine_off_at = None;
+        }
         if mv < self.cfg.low_battery_mv {
             self.low_since.get_or_insert(now_ms);
             self.last_dip_ms = Some(now_ms);
@@ -703,9 +718,18 @@ impl Bridge {
                 } else {
                     self.lwm.disarm();
                     self.drop_standing_if_done();
-                    // An unlock still owed: read the lock state once; if the doors are unlocked
-                    // the duty ends (review B-3). Answered Ok at once.
-                    if self.lwm.locked_by_us() && !self.yielded {
+                    // An unlock still owed: read the lock state once (answered Ok at once). Only
+                    // an observed locked -> unlocked change ends the duty (review B4-1). One
+                    // such read queued at a time, within the queue limit.
+                    let queued = self
+                        .jobs
+                        .iter()
+                        .any(|j| matches!(j.kind, JobKind::LockCheck));
+                    if self.lwm.locked_by_us()
+                        && !self.yielded
+                        && !queued
+                        && self.jobs.len() < self.cfg.max_queue
+                    {
                         self.jobs.push_back(Job {
                             client: None,
                             counter: 0,
@@ -713,6 +737,14 @@ impl Bridge {
                             since_ms: now_ms,
                         });
                     }
+                    Ok(())
+                }
+            }
+            Op::LwmAck => {
+                if role != Role::Owner {
+                    r(ResultCode::NotAllowedForRole)
+                } else {
+                    self.lwm.acknowledge_give_up();
                     Ok(())
                 }
             }
@@ -1912,7 +1944,7 @@ impl Bridge {
                     self.last_engine_sample = Some((now, v.rpm));
                     self.last_speed = Some((now, v.speed_kmh));
                     self.engine_off_at = if v.rpm == 0 && v.speed_kmh == 0 {
-                        Some((now, self.charging()))
+                        Some((now, self.charging(), self.battery_mv.unwrap_or(0)))
                     } else {
                         None
                     };
@@ -1949,11 +1981,14 @@ impl Bridge {
                 Some(BmtFrame::Lock(l)) => {
                     self.parked.lock = l;
                     self.parked.lock_at_ms = Some(now);
-                    // The doors are unlocked now: nothing is owed (review B-3).
-                    if l == LockState::Unlocked {
-                        self.lwm.on_verified_unlocked();
-                        self.drop_standing_if_done();
+                    // Only an observed locked -> unlocked change ends an owed unlock (review
+                    // B4-1; lock memory and polarity NOT VERIFIED).
+                    match l {
+                        LockState::Locked => self.lwm.on_lock_read(true),
+                        LockState::Unlocked => self.lwm.on_lock_read(false),
+                        LockState::Unknown => {}
                     }
+                    self.drop_standing_if_done();
                 }
                 Some(BmtFrame::Doors {
                     front_open,
@@ -2056,7 +2091,7 @@ impl Bridge {
     /// holds the voltage at; or there is no sign at all that it runs.
     #[cfg_attr(not(feature = "approvals"), allow(dead_code))]
     fn engine_off_known(&self, now: u64) -> bool {
-        let proof = self.engine_off_at.is_some_and(|(t, charging_then)| {
+        let proof = self.engine_off_at.is_some_and(|(t, charging_then, _)| {
             now.saturating_sub(t) <= self.cfg.challenge_ttl_ms
                 && self.last_dip_ms.is_none_or(|d| d < t)
                 && (charging_then || !self.charging())

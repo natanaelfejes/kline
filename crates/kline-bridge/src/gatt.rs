@@ -340,7 +340,7 @@ pub mod status_flags {
     /// Battery below the write limit (12.0 V, MASTER-PLAN-v2 P6): no Tier 1 and no LOCK/UNLOCK.
     pub const LOW_BATTERY: u8 = 0x40;
     /// Lock-when-moving gave up an unlock (the doors may still be locked) and disarmed itself;
-    /// cleared when the owner arms again or a lock-state read shows the doors unlocked.
+    /// cleared only when the owner arms again or acknowledges it (LWM_ACK).
     pub const LWM_GAVE_UP: u8 = 0x80;
 }
 
@@ -420,6 +420,7 @@ pub mod opcode {
     pub const RAW_STREAM: u8 = 0x0D;
     pub const GET_STATUS: u8 = 0x0E;
     pub const PREPARE_WRITE: u8 = 0x0F;
+    pub const LWM_ACK: u8 = 0x10;
 }
 
 /// What a Command asks for.
@@ -458,6 +459,8 @@ pub enum Op {
     LwmArm,
     /// Disarm lock-when-moving (owner only).
     LwmDisarm,
+    /// The owner acknowledges a lock-when-moving give-up (status flag `LWM_GAVE_UP`).
+    LwmAck,
     /// Raw frame notifications on or off.
     RawStream(bool),
     /// Answer with one Status frame on Response.
@@ -529,6 +532,7 @@ impl Command {
             }
             Op::LwmArm => b.push(opcode::LWM_ARM),
             Op::LwmDisarm => b.push(opcode::LWM_DISARM),
+            Op::LwmAck => b.push(opcode::LWM_ACK),
             Op::RawStream(on) => {
                 b.push(opcode::RAW_STREAM);
                 b.push(u8::from(*on));
@@ -599,6 +603,7 @@ impl Command {
             opcode::SET_TIME => Op::SetTime(r.u32()?),
             opcode::LWM_ARM => Op::LwmArm,
             opcode::LWM_DISARM => Op::LwmDisarm,
+            opcode::LWM_ACK => Op::LwmAck,
             opcode::RAW_STREAM => match r.u8()? {
                 0 => Op::RawStream(false),
                 1 => Op::RawStream(true),

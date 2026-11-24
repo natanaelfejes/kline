@@ -58,9 +58,11 @@ Default-deny, decided on exact payload bytes and the target of the init that act
   mitigation). Arming is refused while armed, while an unlock is owed and unless the car is
   parked with the engine off. When the unlock attempts are used up (3 refused or unanswered),
   the bridge gives up: it disarms itself, drops the armed risks and reports it in its status
-  (`LWM_GAVE_UP`); no lock is sent again until the owner arms again with two new codes. A
-  positive BMT lock-state read showing the doors unlocked (after LWM_DISARM or the owner's
-  verified app UNLOCK) ends an owed unlock. No other payload, ECU or binary may do this. The owner accepts that the remote's lock
+  (`LWM_GAVE_UP`, cleared only by arming again or the owner's LWM_ACK); no lock is sent again
+  until the owner arms again with two new codes. Since the BMT lock memory may not follow the
+  K-line actuators, a bare "unlocked" read never ends an owed unlock: only a positive reply to
+  the unlock, the give-up, or an observed change (a "locked" read after our lock, then an
+  "unlocked" one) does. No other payload, ECU or binary may do this. The owner accepts that the remote's lock
   state may get out of step with the doors.
 - **What the code is.** The `/dev/tty` code is an **anti-accident gate**, not an
   authentication: it stops a pipe, `--json`, a script or a non-interactive agent from sending by

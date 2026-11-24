@@ -58,7 +58,13 @@ fn arm(rig: &mut Rig) {
 
 #[test]
 fn locks_when_moving_and_unlocks_when_the_engine_stops() {
-    let mut rig = Rig::new(driving_sirius(), bmt_ecu(bmt_scenario(true)));
+    for following in [false, true] {
+        locks_and_unlocks(following);
+    }
+}
+
+fn locks_and_unlocks(following: bool) {
+    let mut rig = Rig::new(driving_sirius(), bmt_model(following, bmt_scenario(true)));
     rig.connect(OWNER, Role::Owner);
     rig.battery(14_100);
     arm(&mut rig);
@@ -146,21 +152,78 @@ fn a_wrong_arming_code_leaves_it_disarmed() {
     rig.car.bmt_journal.assert_no_writes();
 }
 
+/// The BMT lock-memory models: (follows the K-line actuators, reads unlocked at the start).
+/// A stale memory that keeps reading "unlocked" after our lock is the hard case (review B4-1).
+const MODELS: [(bool, bool); 3] = [(false, true), (false, false), (true, true)];
+
 #[test]
 fn disarm_after_the_lock_still_unlocks_at_engine_stop() {
-    // The BMT reads locked (the disarm's lock-state read must not end the duty).
-    let mut rig = Rig::new(driving_sirius(), bmt_ecu(bmt_scenario(false)));
+    for (following, unlocked) in MODELS {
+        let mut rig = Rig::new(
+            driving_sirius(),
+            bmt_model(following, bmt_scenario(unlocked)),
+        );
+        rig.connect(OWNER, Role::Owner);
+        rig.battery(14_100);
+        arm(&mut rig);
+        let locked = rig.run_until_pred(30_000, |r| r.bridge.lwm().locked_by_us());
+        assert!(locked);
+        rig.run_for(8_000);
+        assert_eq!(rig.call(OWNER, Op::LwmDisarm, 1_000).result, ResultCode::Ok);
+        rig.run_for(50_000);
+        let w = rig.car.bmt_journal.writes();
+        assert_eq!(w.len(), 2, "{following} {unlocked}: {w:?}");
+        assert_eq!(w[1].payload, vec![0x31, 0xA1, 0x00, 0x01]);
+    }
+}
+
+/// Review B4-1 (reviewer's break tests): the lock memory keeps reading "unlocked" after the
+/// K-line lock. A disarm while driving (later, or right after the lock) reads it, and the owed
+/// unlock must still be sent at engine stop.
+#[test]
+fn rev4_stale_lock_memory_disarm_keeps_unlock() {
+    for wait_ms in [3_000, 0] {
+        for (following, unlocked) in MODELS {
+            let mut rig = Rig::new(
+                driving_sirius(),
+                bmt_model(following, bmt_scenario(unlocked)),
+            );
+            rig.connect(OWNER, Role::Owner);
+            rig.battery(14_100);
+            arm(&mut rig);
+            assert!(rig.run_until_pred(30_000, |r| r.bridge.lwm().locked_by_us()));
+            rig.run_for(wait_ms);
+            assert_eq!(rig.call(OWNER, Op::LwmDisarm, 1_000).result, ResultCode::Ok);
+            rig.run_for(60_000);
+            let w = bmt_payloads(&rig);
+            assert!(
+                w.contains(&vec![0x31, 0xA1, 0x00, 0x01]),
+                "no unlock after disarm ({wait_ms} ms, {following} {unlocked}): {w:02X?}"
+            );
+        }
+    }
+}
+
+/// Review B4-1 (reviewer's break test): stale memory reading "unlocked", K-line unlock refused:
+/// the app UNLOCK finds "already unlocked" and pulses nothing; that must not end the duty.
+#[test]
+fn rev4_stale_memory_app_unlock_ends_duty_without_pulse() {
+    let bmt = bmt_ecu(bmt_scenario(true)).with_fault(FaultRule::on(
+        &[0x31, 0xA1],
+        ReplyFault::Negative { nrc: 0x22 },
+    ));
+    let mut rig = Rig::new(driving_sirius(), bmt);
     rig.connect(OWNER, Role::Owner);
-    rig.battery(14_100);
     arm(&mut rig);
-    let locked = rig.run_until_pred(30_000, |r| r.bridge.lwm().locked_by_us());
-    assert!(locked);
-    rig.run_for(8_000);
-    assert_eq!(rig.call(OWNER, Op::LwmDisarm, 1_000).result, ResultCode::Ok);
-    rig.run_for(50_000);
-    let w = rig.car.bmt_journal.writes();
-    assert_eq!(w.len(), 2, "{w:?}");
-    assert_eq!(w[1].payload, vec![0x31, 0xA1, 0x00, 0x01]);
+    assert!(rig.run_until_pred(60_000, |r| count(&bmt_payloads(r), 0xA1) == 1));
+    assert!(rig.bridge.lwm().locked_by_us());
+    rig.battery(12_600);
+    let pulses = rig.pin_highs().len();
+    let _ = rig.call(OWNER, Op::Unlock, 30_000);
+    assert!(
+        rig.bridge.lwm().locked_by_us() || rig.pin_highs().len() > pulses,
+        "duty ended with no pulse and no K-line unlock"
+    );
 }
 
 #[test]
@@ -501,6 +564,12 @@ fn count(w: &[Vec<u8>], fn_byte: u8) -> usize {
 /// again, the next lock gets its unlock.
 #[test]
 fn r3_a_give_up_never_poisons_later_unlocks() {
+    for following in [false, true] {
+        give_up_then_rearm(following);
+    }
+}
+
+fn give_up_then_rearm(following: bool) {
     let change = |e: kline_sim::ecu::SpecEcu, t: u64, v: f64, rpm: f64| {
         e.with_change_after(&[0x21, 0xA9], t, "Vehicle speed", Value::Number(v))
             .with_change_after(&[0x21, 0xA9], t, "Engine speed", Value::Number(rpm))
@@ -516,7 +585,7 @@ fn r3_a_give_up_never_poisons_later_unlocks() {
     ] {
         sirius = change(sirius, t, v, rpm);
     }
-    let bmt = bmt_ecu(bmt_scenario(false)).with_fault(FaultRule {
+    let bmt = bmt_model(following, bmt_scenario(following)).with_fault(FaultRule {
         times: Some(3),
         ..FaultRule::on(&[0x31, 0xA1], ReplyFault::Negative { nrc: 0x22 })
     });
@@ -546,17 +615,23 @@ fn r3_a_give_up_never_poisons_later_unlocks() {
     assert!(!rig.bridge.lwm().locked_by_us());
 }
 
-/// Review B-3: LWM_DISARM with an unlock owed reads the BMT lock state once; the duty ends only
-/// when a positive read shows the doors unlocked.
+/// Reviews B-3 and B4-1: LWM_DISARM with an unlock owed reads the BMT lock state once; the duty
+/// ends only on an observed change (a "locked" read, then an "unlocked" one).
 #[test]
 fn r3_disarm_ends_the_duty_once_a_read_shows_the_doors_unlocked() {
+    for following in [false, true] {
+        disarm_reads(following);
+    }
+}
+
+fn disarm_reads(following: bool) {
     // Drives off, then stands with the engine idling: the duty stays (no engine stop).
     let sirius = cruising_sirius()
         .with_change_after(&[0x21, 0xA9], 30_000, "Vehicle speed", Value::Number(0.0))
         .with_change_after(&[0x21, 0xA9], 30_000, "Engine speed", Value::Number(800.0));
-    // Locked; the first 21A3 (the first disarm's read) says locked, later reads unlocked (the
-    // owner opened by hand).
-    let bmt = bmt_ecu(bmt_scenario(false)).with_change_after(
+    // Locked after our lock; the first 21A3 (the first disarm's read) says locked, later reads
+    // unlocked (the owner opened by hand): an observed change.
+    let bmt = bmt_model(following, bmt_scenario(following)).with_change_after(
         &[0x21, 0xA3],
         1,
         "Door lock memory",
@@ -574,6 +649,11 @@ fn r3_disarm_ends_the_duty_once_a_read_shows_the_doors_unlocked() {
         rig.bridge.lwm().locked_by_us(),
         "read showed locked: duty stays"
     );
+    // In both models the memory reads locked here (the following one by the K-line lock).
+    assert_eq!(
+        rig.bridge.status().lock,
+        kline_bridge::gatt::LockState::Locked
+    );
     assert_eq!(rig.call(OWNER, Op::LwmDisarm, 1_000).result, ResultCode::Ok);
     assert!(rig.run_until_pred(15_000, |r| !r.bridge.lwm().locked_by_us()));
     assert_eq!(bmt_payloads(&rig), vec![vec![0x31, 0xA0, 0x00, 0x01]]);
@@ -584,11 +664,18 @@ fn r3_disarm_ends_the_duty_once_a_read_shows_the_doors_unlocked() {
     );
 }
 
-/// Review B-3: the owner's app UNLOCK, verified by the BMT lock bit, ends an unlock duty whose
-/// K-line unlock keeps being refused.
+/// Reviews B-3 and B4-1: the owner's app UNLOCK reads "locked", pulses, and the bit changes to
+/// "unlocked": that observed change ends an unlock duty whose K-line unlock keeps being
+/// refused.
 #[test]
 fn r3_a_verified_app_unlock_ends_the_duty() {
-    let bmt = bmt_ecu(bmt_scenario(false))
+    for following in [false, true] {
+        app_unlock(following);
+    }
+}
+
+fn app_unlock(following: bool) {
+    let bmt = bmt_model(following, bmt_scenario(following))
         .with_fault(FaultRule::on(
             &[0x31, 0xA1],
             ReplyFault::Negative { nrc: 0x22 },
@@ -713,4 +800,66 @@ fn r3_arming_on_a_charger_works() {
     );
     assert_eq!(r.result, ResultCode::Ok, "{r:?}");
     assert!(rig.bridge.lwm().is_armed());
+}
+
+/// Review B4-1: the give-up report persists over lock-state reads (parked polls, even an
+/// observed change) and ends only by the owner's LWM_ACK (owner only) or a new arming.
+#[test]
+fn r4_the_give_up_flag_persists_until_the_owner_acknowledges() {
+    use kline_bridge::gatt::status_flags::LWM_GAVE_UP;
+    let bmt = bmt_ecu(bmt_scenario(false))
+        .with_fault(FaultRule::on(
+            &[0x31, 0xA1],
+            ReplyFault::Negative { nrc: 0x22 },
+        ))
+        .with_change_after(&[0x21, 0xA3], 3_000, "Door lock memory", text("unlocked"));
+    let mut rig = Rig::new(driving_sirius(), bmt);
+    rig.connect(OWNER, Role::Owner);
+    rig.connect(AGENT, Role::Agent);
+    arm(&mut rig);
+    assert!(rig.run_until_pred(90_000, |r| r.bridge.lwm().gave_up()));
+    rig.battery(12_600);
+    assert_eq!(
+        rig.call(OWNER, Op::StartLive(Profile::Parked), 5_000)
+            .result,
+        ResultCode::Ok
+    );
+    rig.run_for(20_000);
+    assert_eq!(
+        rig.bridge.status().flags & LWM_GAVE_UP,
+        LWM_GAVE_UP,
+        "reads keep it"
+    );
+    assert_eq!(
+        rig.call(AGENT, Op::LwmAck, 1_000).result,
+        ResultCode::NotAllowedForRole
+    );
+    assert_eq!(rig.bridge.status().flags & LWM_GAVE_UP, LWM_GAVE_UP);
+    assert_eq!(rig.call(OWNER, Op::LwmAck, 1_000).result, ResultCode::Ok);
+    assert_eq!(rig.bridge.status().flags & LWM_GAVE_UP, 0);
+    assert!(!rig.bridge.lwm().is_armed());
+}
+
+/// Review nit: repeated LWM_DISARM with an unlock owed queues one lock-state read at a time.
+#[test]
+fn r4_repeated_disarms_queue_one_lock_check() {
+    let mut rig = Rig::new(cruising_sirius(), bmt_ecu(bmt_scenario(false)));
+    rig.connect(OWNER, Role::Owner);
+    arm(&mut rig);
+    assert!(rig.run_until_pred(30_000, |r| r.bridge.lwm().locked_by_us()));
+    rig.run_for(6_000);
+    let reads = |rig: &Rig| {
+        rig.car
+            .written_payloads()
+            .iter()
+            .filter(|(t, p)| *t == EcuId::Bmt.address() && p[..] == [0x21, 0xA3])
+            .count()
+    };
+    let before = reads(&rig);
+    for _ in 0..6 {
+        rig.send(OWNER, Op::LwmDisarm);
+    }
+    rig.run_for(20_000);
+    assert_eq!(reads(&rig) - before, 1);
+    assert!(rig.bridge.lwm().locked_by_us());
 }

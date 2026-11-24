@@ -723,3 +723,138 @@ fn r3_prepare_rechecks_motion_when_its_job_runs() {
     let r = rig.car.responses_for(OWNER, c).pop().unwrap();
     assert_eq!(r.result, ResultCode::VehicleMoving, "{r:?}");
 }
+
+/// Review M4-1 (reviewer's break test): the engine stalled with the voltage still high, the
+/// owner PREPAREs on the ABS (fresh 0 rpm, 0 km/h), the engine restarts without a dip being
+/// seen and the car drives off. The alternator's rise over the voltage of the engine-off sample
+/// voids it: CONFIRM is refused.
+#[test]
+fn rev4_stall_restart_without_dip_abs_confirm() {
+    let sirius = parked_sirius()
+        .with_change_after(
+            &[0x21, 0xA9],
+            20_000,
+            "Vehicle speed",
+            kline_spec::Value::Number(50.0),
+        )
+        .with_change_after(
+            &[0x21, 0xA9],
+            20_000,
+            "Engine speed",
+            kline_spec::Value::Number(2_500.0),
+        );
+    let car = Car::with_others(sirius, bmt_ecu(bmt_scenario(true)), vec![abs_ecu()]);
+    let mut rig = Rig::from_car(car, Default::default());
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(13_600);
+    rig.send(OWNER, Op::StartLive(kline_bridge::profile::Profile::Drive));
+    rig.run_for(3_000);
+    let (id, code) = code_of(&rig.call(OWNER, prepare_abs_clear(), 15_000));
+    rig.battery(14_100);
+    rig.run_for(30_000);
+    let r = rig.call(
+        OWNER,
+        Op::Confirm {
+            challenge: id,
+            code,
+        },
+        10_000,
+    );
+    assert_eq!(r.result, ResultCode::VehicleMoving, "{r:?}");
+    rig.car.other_journals[0].assert_no_writes();
+}
+
+/// On a charger, a Sirius that stopped answering `21 A9` and an ABS PREPARE: refused when the
+/// last engine-off sample does not count (`VehicleMoving`), granted when it does.
+fn abs_prepare_with(sirius: kline_sim::ecu::SpecEcu, run_ms: u64) -> ResultCode {
+    let car = Car::with_others(sirius, bmt_ecu(bmt_scenario(true)), vec![abs_ecu()]);
+    let mut rig = Rig::from_car(car, Default::default());
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(13_600);
+    rig.send(OWNER, Op::StartLive(kline_bridge::profile::Profile::Drive));
+    rig.run_for(run_ms);
+    rig.call(OWNER, prepare_abs_clear(), 60_000).result
+}
+
+fn a9_refused_after(n: u32) -> kline_sim::ecu::FaultRule {
+    kline_sim::ecu::FaultRule::on(
+        &[0x21, 0xA9],
+        kline_sim::ecu::ReplyFault::Negative { nrc: 0x12 },
+    )
+    .after(n)
+}
+
+/// Review M4-2: an `21 AA` frame with rpm above 0 after the engine-off `21 A9` voids it.
+#[test]
+fn r4_aa_rpm_voids_the_engine_off_sample() {
+    // Control: without the rpm change the sample counts.
+    assert_eq!(
+        abs_prepare_with(parked_sirius().with_fault(a9_refused_after(5)), 10_000),
+        ResultCode::Challenge
+    );
+    let sirius = parked_sirius()
+        .with_fault(a9_refused_after(5))
+        .with_change_after(
+            &[0x21, 0xAA],
+            3_000,
+            "Engine speed",
+            kline_spec::Value::Number(800.0),
+        );
+    assert_eq!(abs_prepare_with(sirius, 10_000), ResultCode::VehicleMoving);
+}
+
+/// Review M4-2: an `21 A9` with rpm above 0, or with a speed above 0, voids the engine-off
+/// sample (also once it is no longer fresh).
+#[test]
+fn r4_a9_rpm_or_speed_voids_the_engine_off_sample() {
+    for (data, v) in [("Engine speed", 800.0), ("Vehicle speed", 10.0)] {
+        // The changed value is sent by a few 21 A9 replies, then 21 A9 is refused.
+        let sirius = parked_sirius()
+            .with_change_after(&[0x21, 0xA9], 1_000, data, kline_spec::Value::Number(v))
+            .with_fault(a9_refused_after(12));
+        assert_eq!(
+            abs_prepare_with(sirius, 10_000),
+            ResultCode::VehicleMoving,
+            "{data}"
+        );
+    }
+}
+
+/// Review M4-2: the engine-off sample counts for the challenge lifetime (120 s) only.
+#[test]
+fn r4_the_engine_off_sample_expires() {
+    assert_eq!(
+        abs_prepare_with(parked_sirius().with_fault(a9_refused_after(5)), 100_000),
+        ResultCode::Challenge
+    );
+    assert_eq!(
+        abs_prepare_with(parked_sirius().with_fault(a9_refused_after(5)), 130_000),
+        ResultCode::VehicleMoving
+    );
+}
+
+/// Review M4-2: when the Sirius sample taken for a PREPARE shows the car moving, the PREPARE
+/// is refused there, on the Sirius, without opening the target ECU.
+#[test]
+fn r4_a_moving_sample_refuses_before_the_target_ecu() {
+    let sirius = sirius_ecu(sirius_scenario().number("Vehicle speed", 40.0));
+    let car = Car::with_others(sirius, bmt_ecu(bmt_scenario(true)), vec![abs_ecu()]);
+    let mut rig = Rig::from_car(car, Default::default());
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(13_600);
+    rig.send(OWNER, Op::StartLive(kline_bridge::profile::Profile::Parked));
+    rig.run_for(8_000);
+    let c = rig.send(OWNER, prepare_abs_clear());
+    assert!(rig.run_until_pred(30_000, |r| r
+        .car
+        .responses_for(OWNER, c)
+        .iter()
+        .any(|x| x.result != ResultCode::Accepted)));
+    let r = rig.car.responses_for(OWNER, c).pop().unwrap();
+    assert_eq!(r.result, ResultCode::VehicleMoving);
+    assert_eq!(
+        rig.bridge.session_ecu(),
+        Some(EcuId::Sirius),
+        "refused on the Sirius"
+    );
+}
