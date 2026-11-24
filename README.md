@@ -218,7 +218,7 @@ output to expect, are in [docs/cli.md](docs/cli.md#first-session-on-a-car).
 kline reads DDT2000 ECU XML definition files. Those files belong to Renault. They are **never**
 shipped with kline and must never be committed to this repository
 (`scripts/check-no-renault-data.sh` checks every commit in CI). Copy them from your own DDT2000
-installation:
+installation, where they are usually the XML files in the `ecus` folder of the data directory:
 
 ```
 kline setup --defs-from /path/to/ecus   # copy once into the default directory
@@ -228,7 +228,10 @@ kline --xml /path/to/one-ecu.xml ...    # or use a single file
 
 The default directory is `~/.local/share/kline/ecus` (Linux, macOS) or `%APPDATA%\kline\ecus`
 (Windows). `--ecu sirius`, `--ecu bmt`, `--ecu bmt-ph1p` and `--ecu bmt-sagem` are shortcuts for
-the Clio II file names. How kline decodes a definition, and where it differs from ddt4all, is in
+the Clio II file names. Not sure which file is your ECU? Give `kline ident` several
+candidates for the same address (`--xml a.xml --xml b.xml`; the first sets up the link) and it
+picks the one whose identification matches. How kline decodes a definition, and where it
+differs from ddt4all, is in
 [docs/spec-semantics.md](docs/spec-semantics.md).
 
 ## Safety model
