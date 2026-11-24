@@ -65,10 +65,10 @@ implemented and the definition decodes. These ECUs were checked on a 1999 Clio I
 
 | ECU | Address | Protocol | Verified on the car |
 |---|---|---|---|
-| Siemens Sirius 32 engine ECU | 0x7A | KWP2000, 5-baud init (`D0 8F`) | init, identification (exact AutoIdent match), live data while driving, fault codes, read-only scan |
-| Sagem BMT N2 body computer (UCH) | 0x26 | KWP2000, 5-baud init (`D0 8F`) | init (also with the ignition off), identification, inputs and outputs, fault codes and fault clear, remote-key learning, door lock and unlock outputs |
-| Bosch airbag | 0x2C | KWP2000, 5-baud init | identification; nothing else is sent ([why](docs/SAFETY.md#airbag-ecu-address-0x2c-any-protocol-with-or-without-a-definition)) |
-| Bosch 5.3 ABS | 0x01 | ISO8 5-baud (`DC 83`) | identification (`51`) and fault memory (`58`); the fault clear `45` has not been sent |
+| Siemens Sirius 32 engine ECU | 0x7A | KWP2000, 5-baud init (`D0 8F`) | init, identification (exact AutoIdent match), live data while driving, fault codes, read-only scan, output tests (fuel pump, fans, warning lamps) |
+| Sagem BMT N2 body computer (UCH) | 0x26 | KWP2000, 5-baud init (`D0 8F`) | init (also with the ignition off), identification, inputs and outputs, fault codes and fault clear, remote-key learning, door lock and unlock outputs, indicator, wiper, courtesy light and buzzer tests |
+| Bosch airbag | 0x2C | KWP2000, 5-baud init | identification, fault reads, impedance and status reads; nothing was written or cleared ([why](docs/SAFETY.md#airbag-ecu-address-0x2c-any-protocol-with-or-without-a-definition)) |
+| Bosch 5.3 ABS | 0x01 | ISO8 5-baud (`DC 83`) | identification (`51`) and fault memory (`58`). The fault clear `45` exists (Tier 1) but has not been sent on the car |
 | Sagem Safir 1 / 2 engine ECU | 0x7A | ISO8 5-baud (`1C 86` / `C2 85`) | not on a car; simulator only |
 | KWP2000 fast-init ECUs | per definition | KWP2000 fast init | not on a car; simulator only |
 | CAN-only ECUs | | | refused: a KKL cable cannot talk CAN |
@@ -76,7 +76,9 @@ implemented and the definition decodes. These ECUs were checked on a 1999 Clio I
 Details per ECU, including what did **not** work, are in
 [protocol.md "What the car confirmed"](docs/protocol.md#what-the-car-confirmed). Two examples:
 the Clio's BMT answers `7F 31 12` to the window and door-lamp output tests (this unit has no
-such outputs), and its stored lock state does not follow the K-line lock outputs.
+such outputs), and its stored lock state does not follow the K-line lock outputs. The airbag's
+`21 80` decodes with two definitions (`AB70_X65`, `AB80_X65_X90_V1`), so which one fits is
+still open.
 
 The ddt4all database shipped by default has no definition for this BMT. kline reads it with
 the DDT2000 definitions `BMT_X65_ph1_p.xml` and `BMT_SAGEM.xml`.

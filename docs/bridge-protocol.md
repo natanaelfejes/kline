@@ -286,7 +286,7 @@ Automaton `kline_bridge::lwm`:
   Sirius and toggle the locks (review B1). It never sleeps on a low battery while an unlock is
   owed.
 
-Execution, decision D37 (maintainer decision; build feature
+Execution (lock-when-moving, maintainer decision 2026-11-23; build feature
 `standing-lock`, off by default): the bridge stops the Sirius session, opens the BMT, sends
 `31 A0 00 01` (lock) or `31 A1 00 01` (unlock), stops the BMT and goes back to the Sirius. Both
 are Tier 1 BMT actuator requests. Arming (`LWM_ARM`) needs the owner's code for each of the two
@@ -325,7 +325,7 @@ for when remote B is repaired.
   in the last 120 s). Checked at PREPARE, when its job runs and again at CONFIRM
   (`VehicleMoving`). When nothing recent decides it at PREPARE, the job first reads `21A9` from
   the Sirius; if the Sirius does not answer, `VehicleMoving`. So with the engine idling, only a
-  Sirius request goes through; switch the engine off for the others. The D37 requests are the
+  Sirius request goes through; switch the engine off for the others. The lock-when-moving requests are the
   exception.
 - **Battery charger**: parked with a charger holding 13.2 V or more, the voltage says nothing,
   so the bridge relies on the Sirius `21A9` (engine off: 0 rpm). With the ignition on (engine
@@ -403,7 +403,7 @@ Checked by `crates/kline-bridge/tests/vectors.rs`; the CRCs were cross-checked w
 2. `DefinitionGuard::flagged()`: read access to the flagged prefixes, for the parity test.
 
 Not made: a kline-core `StandingApproval` type. The maintainer allowed the bridge's standing
-self-approval for exactly the two D37 payloads (SAFETY.md rule 2); a core type would move that
+self-approval for exactly the two lock-when-moving payloads (SAFETY.md rule 2); a core type would move that
 check into kline-core and is a possible later cleanup.
 
 ## Not verified
@@ -411,7 +411,7 @@ check into kline-core and is a possible later cleanup.
 - Everything on real hardware: ESP32-C3 UART at 10400, the BREAK_N bit-bang timing, break
   loopback through the L9637D, BLE MTU and throughput, NVS counters (not written yet).
 - Lock memory after K-line `31 A0`/`31 A1`: on the car the BMT's lock memory (`21A3` d0
-  bit 7) did not follow them, so D37 can put the remote's lock state out of step. The
+  bit 7) did not follow them, so lock-when-moving can put the remote's lock state out of step. The
   simulator offers both models (a memory that follows and one that does not).
 - The `21A3` polarity (0 locked, 1 unlocked) for the remote and the key cylinder; it was
   observed only with the dashboard button. The `21A0` door bits.

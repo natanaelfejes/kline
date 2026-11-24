@@ -47,7 +47,7 @@ Default-deny, decided on exact payload bytes and the target of the init that act
   the same addresses (e.g. `S2000_Atmo___SoftA3` at 0x7A) are not covered; a bridge for another
   car needs its own table. Known issue: `X65_Bosch5.3+REF+Tachy.xml` does not parse with
   kline-spec, so the parity test cannot cover it.
-- **Standing self-approval, D37 only (maintainer decision 2026-11-23).** With `kline-bridge` feature
+- **Standing self-approval, lock-when-moving only (maintainer decision 2026-11-23).** With `kline-bridge` feature
   `standing-lock` (off by default) and only in the bridge firmware, lock-when-moving may send the
   two exact BMT requests `31 A0 00 01` (lock) and `31 A1 00 01` (unlock) to the BMT `0x26`
   without a per-request code: only after the owner armed it in the app by confirming one

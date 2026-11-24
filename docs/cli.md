@@ -19,6 +19,7 @@ first test at the car. Run `kline --help` or `kline <command> --help` for the sh
 - [First session on a car](#first-session-on-a-car)
 - [Remote learning on the car (BMT)](#remote-learning-on-the-car-bmt)
 - [BMT outputs (actuator tests)](#bmt-outputs-actuator-tests)
+- [Sirius output tests](#sirius-output-tests)
 - [ABS (Bosch 5.3) on the car](#abs-bosch-53-on-the-car)
 - [Not verified (host and cable)](#not-verified-host-and-cable)
 - [kline-agent (read-only)](#kline-agent-read-only)
@@ -453,9 +454,10 @@ N2 did:
 
 | Output | Request | Result on the car |
 |---|---|---|
-| Door lock | `31 A0 00 01` | locks, also with the key out of the ignition |
-| Door unlock | `31 A1 00 01` | unlocks, also with the key out |
-| Driver / passenger window | `31 A2 ..` / `31 A3 ..` | `7F 31 12` (subFunctionNotSupported): not on this unit |
+| Door lock | `31 A0 00 01` | locks, also with the key out of the ignition and after the BMT had slept for 5 minutes |
+| Door unlock | `31 A1 00 01` | unlocks, under the same conditions |
+| Indicators, wipers, courtesy light, buzzer | `31 out ..` | accepted, the output works |
+| Driver / passenger window | `31 A2 ..` / `31 A3 ..` | `7F 31 12` (subFunctionNotSupported): this BMT N2 has no window relay |
 | Door-open warning lamp | `31 B0 ..` | `7F 31 12`: not on this unit |
 
 `7F 31 12` means this BMT variant has no such output; nothing was changed. A count of `FF`
@@ -465,6 +467,22 @@ The lock state the BMT keeps (`21 A3` data byte 0 bit 7, 0 locked, 1 unlocked) f
 dashboard lock button but **not** the K-line lock outputs. After a K-line lock the remote may
 think the car is still unlocked, so the first press can do the opposite of what you expect.
 Press it again, or lock and unlock once with the remote.
+
+## Sirius output tests
+
+`30 id 00 cc` starts an output test for `cc` cycles (1 to 10, Tier 1, one code per request);
+one cycle is about half a second. On the Clio, engine off:
+
+| Output | Request | Result on the car |
+|---|---|---|
+| Fuel pump relay | `30 80 00 cc` | the pump runs |
+| MIL lamp | `30 94 00 cc` | accepted, the lamp stays dark (dead bulb on this car) |
+| Coolant warning lamp | `30 9E 00 cc` | the lamp lights |
+| Fan low | `30 9F 00 cc` | the fan runs |
+| Fan high | `30 A0 00 cc` | accepted, no effect (probably not fitted on cars without A/C) |
+| Downstream O2 heater | `30 A7 00 cc` | accepted |
+
+Injector inhibition (`31 A0 00`) has not been run on the car.
 
 ## ABS (Bosch 5.3) on the car
 

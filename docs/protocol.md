@@ -105,14 +105,15 @@ Two sessions on a 1999 Clio II phase 1 (D7F engine), FTDI FT232R cable on macOS:
 | Sirius 32 (0x7A) init | fast init not answered; 5-baud `7A` (`SingleEcu`) answered `55 D0 8F`, ~address `85` |
 | BMT (0x26) init | same: 5-baud `26`, `55 D0 8F`, ~address `D9`; it also answers with the ignition off |
 | Bosch 5.3 ABS (0x01) init | ISO8 5-baud `01`, `55 DC 83`, no handshake ([below](#bosch-53-abs-0x01-iso8)) |
-| Airbag (0x2C) | KWP 5-baud, identified with `AB70_X65.xml`; reads only |
+| Airbag (0x2C) | KWP 5-baud; the key bytes match `AB70_X65.xml`, but `AB80_X65_X90_V1.xml` decodes `21 80` too, so the definition choice is open. Identification, fault reads (present and memorized faults decoded) and the impedance and status blocks `21 80`..`21 8A`, `21 B0`, `21 C0`, `21 C1` answered. Nothing was written or cleared |
 | Sessions | the Sirius accepts `10 A0` and answers `50` (one byte, no `A0`); `10 81` gets `7F 10 11`. The BMT definition has no session request. StopCommunication is answered `C2` |
 | Link quality | about 20 000 requests over two drives with the engine running: no negative reply, no checksum error, no timeout |
 | Throughput | one KWP request every 45 to 48 ms (about 21 per second); reply latency 26 to 43 ms. The 16 ms steps in the latency come from the macOS FTDI latency timer |
 | Sirius reads | `21 80` (DDT2000 AutoIdent exact match), `21 82`, `21 A0`..`21 AF`, `21 C6`, `21 C7`, `21 F0`, `21 F1`, `21 FC`..`21 FF`. `21 90`..`21 97` and `21 E0` exist but answer `7F 21 22` (conditionsNotCorrect), engine running or not. `1A xx`: none |
 | BMT reads | `21 80`, `21 9F`, `21 A0`..`21 A4`, `21 A7`, `21 A8` (`21 9x`, `Bx` and `Cx` mirror `Ax`). `1A xx`: none |
-| BMT service | `14 FF 00` answered `54 FF 00`; remote learning `31 C7 00 00 00` answered `71 C7 01` and paired a remote; the lock / unlock outputs `31 A0` / `31 A1` work with the key out |
-| BMT outputs missing on this unit | the door-open lamp `31 B0` and the windows `31 A2` / `31 A3` answer `7F 31 12` (subFunctionNotSupported) on this BMT N2 |
+| BMT service | `14 FF 00` answered `54 FF 00`; remote learning `31 C7 00 00 00` answered `71 C7 01` and paired a remote; the lock / unlock outputs `31 A0 00 01` / `31 A1 00 01` work with the key out, also after the BMT had slept for 5 minutes; the indicator, wiper, courtesy light and buzzer output tests were accepted |
+| BMT outputs missing on this unit | the door-open lamp `31 B0` and the windows `31 A2` / `31 A3` answer `7F 31 12` (subFunctionNotSupported): this BMT N2 has no window relay |
+| Sirius output tests | engine off, one approved request each: `30 80` fuel pump, `30 9E` coolant warning lamp and `30 9F` fan low work; `30 94` (MIL) is accepted but the lamp stays dark (bulb); `30 A0` fan high is accepted with no effect (probably not fitted on cars without A/C); `30 A7` is accepted. One cycle lasts about half a second |
 | BMT lock state | `21 A3` data byte 0 bit 7 follows the dashboard lock button (0 locked, 1 unlocked). It does not follow the K-line lock outputs, so after a K-line lock the remote's idea of the lock state can be out of step |
 
 ## The Clio II ECUs
@@ -607,7 +608,9 @@ command, every request and reply logged. Never scans `30`/`31`/`3B` or anything 
   keep-alive stops (the reason `41`/`71` are forbidden).
 - The 5000 ms / 10x responsePending bounds; DTR effect on the KKL cable.
 - Fast init on this car: neither 0x7A nor 0x26 answered it.
-- The Sirius output tests (`30 id ..`) and injector inhibition (`31 A0 00`) on the car.
+- Sirius injector inhibition (`31 A0 00`) and the Sirius output tests other than `80`, `94`, `9E`, `9F`, `A0`, `A7`.
+- Bosch 5.3 ABS fault clear `45`: implemented (Tier 1), never sent on the car.
+- Airbag date writes `3B B0` / `3B C0` (Tier 2): never sent; the dates read `FF FF FF`.
 - BMT configuration writes (`3B D2`): none has been sent.
 - Whether any ECU needs a wider keyword window than KW2Timeout + 100 (`kw_window_ms`).
 - That BMT `3B` identifiers other than `D2`, BMT `2E`/`2F`, and Sirius `2E`/`2F`/`3B` on `A0`,

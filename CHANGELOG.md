@@ -14,7 +14,9 @@ work so far is grouped by milestone under `Unreleased`, newest first. The crates
 - README rewritten: supported ECUs with their verification status, a quick start, a comparison
   with DDT2000, ddt4all and pyren, and an FAQ.
 - `docs/protocol.md` has a "What the car confirmed" table; `docs/cli.md` shows the output the
-  car gave and has new sections on BMT outputs and the ABS.
+  car gave and has new sections on BMT outputs, Sirius output tests and the ABS.
+- The 2026-11-23 car results are documented: airbag identification, fault, impedance and status
+  reads; Sirius output tests; BMT output tests and the outputs this BMT N2 lacks.
 - Public pages no longer refer to private planning notes.
 
 #### Fixed
