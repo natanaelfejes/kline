@@ -287,6 +287,9 @@ sent (NOT VERIFIED on Windows).
   macOS only. Its tests (kline-sim and kline-cli `tests/pty.rs`, kline-agent `tests/agent.rs`
   sessions) are compiled only on Unix; on Windows `kline-sim/tests/pty_unix_only.rs` prints
   `SKIPPED` and `--sim-control` fails with "the simulator transport needs a Unix pty".
+- The `kline-sim` runner binary (docs/sim.md "Running it") is the pty transport too: Linux and
+  macOS only. On Windows it prints that it needs a Unix pty and exits 2; rehearse a session on
+  the Mac or in a Linux VM.
 
 ## Not verified
 

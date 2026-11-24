@@ -7,6 +7,23 @@ work so far is grouped by milestone under `Unreleased`, newest first. The crates
 
 ## [Unreleased]
 
+### Standalone simulator (2026-11-24)
+
+#### Added
+
+- `kline-sim` binary (crate `kline-sim`, macOS and Linux only): one simulated K line on a pty
+  with any number of ECUs, for running the real `kline` against a simulated car. Built-in
+  hand-written sirius, bmt, airbag and abs definitions (`--write-defs DIR` writes them under the
+  car's file names, never overwriting); `--ecu ADDR=file.xml` for any definition;
+  `--replay ADDR=capture.jsonl`; `--answer` and `--fault` (silence, `7F` codes, after N answers,
+  init faults); ECUs off and back on the line and the BMT dashboard lock button over the control
+  socket (`kline-sim ctl`); the BMT lock memory with `--bmt-lock-follows true|false` (default
+  false, as on the car); the ABS 7000 ms keep-alive window; a transcript of every frame.
+- `kline_sim::multi::MultiEcu`, `SpecEcu::with_reply`, `SpecEcu::with_bit_memory`,
+  `PtySim::spawn_with_control`, `VirtualLine::from_bus`.
+- `crates/kline-cli/tests/session3_rehearsal.rs`: every command of the session-3 script against
+  the simulated car, with its exit code; `exec` through the test approval terminal.
+
 ### Documentation overhaul (2026-11-24)
 
 #### Changed

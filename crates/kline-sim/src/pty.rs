@@ -16,6 +16,9 @@
 //! | `RTS 1` / `RTS 0` | RTS high / low (logged only) | `OK` |
 //! | `LOOPBACK?` | was the last break seen on RX? | `1` or `0` |
 //!
+//! [`PtySim::spawn_with_control`] adds the commands of a [`ControlHandler`] (the `kline-sim`
+//! runner's `ECU 26 OFF`, `LOCK 26 LOCKED`, ..., docs/sim.md "Running it").
+//!
 //! The command is applied when it arrives (wall clock), and the reply is sent after, so a
 //! tester that waits for `OK` has the edge on the bus before it sleeps. A tester driver for the
 //! sim forwards `set_break`/`set_dtr`/loopback checks to [`ControlClient`] instead of (or as
@@ -42,6 +45,10 @@ use crate::bus::Bus;
 /// Poll period of the simulator thread (ours).
 pub const POLL_MS: u64 = 1;
 
+/// Extra control commands: called with each command line the built-in table does not know;
+/// `Some(reply)` answers it, `None` answers `ERR`. Runs in the simulator thread.
+pub type ControlHandler = Box<dyn FnMut(&str) -> Option<String> + Send>;
+
 /// A running simulator on a pty. Dropping it stops the thread and removes the socket.
 pub struct PtySim {
     tty: PathBuf,
@@ -65,6 +72,16 @@ impl PtySim {
     /// Open a pty, bind the control socket at `control_path` (must not exist) and run `bus`
     /// in a thread.
     pub fn spawn(bus: Bus, control_path: impl Into<PathBuf>) -> io::Result<PtySim> {
+        PtySim::spawn_with_control(bus, control_path, Box::new(|_| None))
+    }
+
+    /// Like [`PtySim::spawn`], with `extra` answering the control commands the built-in table
+    /// does not know.
+    pub fn spawn_with_control(
+        bus: Bus,
+        control_path: impl Into<PathBuf>,
+        extra: ControlHandler,
+    ) -> io::Result<PtySim> {
         let ctl: PathBuf = control_path.into();
         let pty = nix::pty::openpty(None, None).map_err(nix_io)?;
         let tty = nix::unistd::ttyname(&pty.slave).map_err(nix_io)?;
@@ -80,7 +97,7 @@ impl PtySim {
         let master = pty.master;
         // Keep a slave fd open so the master never sees a hang-up between tester opens.
         let slave = pty.slave;
-        let thread = std::thread::spawn(move || run(bus, master, slave, listener, st));
+        let thread = std::thread::spawn(move || run(bus, master, slave, listener, st, extra));
         Ok(PtySim {
             tty,
             ctl,
@@ -120,6 +137,7 @@ fn run(
     _slave: OwnedFd,
     listener: UnixListener,
     stop: Arc<AtomicBool>,
+    mut extra: ControlHandler,
 ) {
     let t0 = Instant::now();
     let now = || t0.elapsed().as_millis() as u64;
@@ -135,7 +153,7 @@ fn run(
                 });
             }
         }
-        conns.retain_mut(|c| serve(c, &mut bus, now()));
+        conns.retain_mut(|c| serve(c, &mut bus, now(), &mut extra));
         // Errors: WouldBlock (nothing to read), EIO (no slave open; we hold one).
         if let Ok(n) = master.read(&mut buf) {
             let t = now();
@@ -157,7 +175,7 @@ fn run(
 }
 
 /// Handle the commands that arrived on one control connection. False: connection closed.
-fn serve(c: &mut Conn, bus: &mut Bus, t: u64) -> bool {
+fn serve(c: &mut Conn, bus: &mut Bus, t: u64, extra: &mut ControlHandler) -> bool {
     let mut tmp = [0u8; 64];
     loop {
         match c.stream.read(&mut tmp) {
@@ -170,39 +188,42 @@ fn serve(c: &mut Conn, bus: &mut Bus, t: u64) -> bool {
     while let Some(pos) = c.buf.iter().position(|&b| b == b'\n') {
         let line: Vec<u8> = c.buf.drain(..=pos).collect();
         let cmd = String::from_utf8_lossy(&line).trim().to_string();
-        let reply = match cmd.as_str() {
+        let reply: String = match cmd.as_str() {
             "BREAK 1" => {
                 bus.tester_break(true, t);
-                "OK"
+                "OK".into()
             }
             "BREAK 0" => {
                 bus.tester_break(false, t);
-                "OK"
+                "OK".into()
             }
             "DTR 1" => {
                 bus.tester_dtr(true, t);
-                "OK"
+                "OK".into()
             }
             "DTR 0" => {
                 bus.tester_dtr(false, t);
-                "OK"
+                "OK".into()
             }
             "RTS 1" => {
                 bus.tester_rts(true, t);
-                "OK"
+                "OK".into()
             }
             "RTS 0" => {
                 bus.tester_rts(false, t);
-                "OK"
+                "OK".into()
             }
             "LOOPBACK?" => {
                 if bus.break_loopback_seen() {
-                    "1"
+                    "1".into()
                 } else {
-                    "0"
+                    "0".into()
                 }
             }
-            _ => "ERR",
+            other => {
+                bus.advance(t);
+                extra(other).unwrap_or_else(|| "ERR".into())
+            }
         };
         if c.stream.write_all(format!("{reply}\n").as_bytes()).is_err() {
             return false;

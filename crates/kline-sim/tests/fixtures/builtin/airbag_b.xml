@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Hand-written kline-sim built-in (not derived from any Renault file), for `kline-sim`'s
+     simulated car. Shaped like an airbag ECU at 0x2C on KWP 5-baud (the key bytes D0 8F are
+     invented; docs/protocol.md only says they match the definition). Names, positions and
+     scaling are invented. Variant B: variant A plus 21 86 and 21 89, the airbag the simulator runs. -->
+<Target Name="Simulated airbag B" xmlns="http://www-diag.renault.com/2002/ECU">
+<Function Name="Airbag" Address="44"/>
+<K BaudRate="10400">
+<KWP>
+<ISO8><KW1 Value="208"/><KW2 Value="143" Timeout="300"/><FirstRequest Delay="20"/></ISO8>
+<KW2_ Delay="25"/>
+</KWP>
+<InterByte Delay="0"/>
+<ReplyToRequest Delay="5"/>
+<RequestToReply Timeout="300"/>
+<TesterPresent Delay="3000"/>
+<OnError Delay="300"/>
+</K>
+<Datas>
+<Data Name="Part number"><Bytes count="5"/></Data>
+<Data Name="Software"><Bytes count="2"/></Data>
+<Data Name="Driver pretensioner circuit"><Bits count="1"><List><Item Value="0" Text="ok"/><Item Value="1" Text="open circuit"/></List></Bits></Data>
+<Data Name="Supply below 9 V"><Bits count="1"><List><Item Value="0" Text="no"/><Item Value="1" Text="yes"/></List></Bits></Data>
+<Data Name="Crash counter"><Bits><Scaled/></Bits></Data>
+<Data Name="Supply voltage"><Bits><Scaled Unit="V" Step="0.1"/></Bits></Data>
+<Data Name="Driver pretensioner impedance"><Bits count="16"><Scaled Unit="ohm" Step="0.01"/></Bits></Data>
+<Data Name="Driver airbag impedance"><Bits count="16"><Scaled Unit="ohm" Step="0.01"/></Bits></Data>
+<Data Name="Passenger airbag fitted"><Bits count="1"><List><Item Value="0" Text="no"/><Item Value="1" Text="yes"/></List></Bits></Data>
+<Data Name="Warning lamp"><Bits count="1"><List><Item Value="0" Text="off"/><Item Value="1" Text="on"/></List></Bits></Data>
+</Datas>
+<Requests Endian="Big">
+<Request Name="Identification">
+<Sent><SentBytes>2180</SentBytes></Sent>
+<Received MinBytes="12">
+<DataItem Name="Part number" Ref="1" FirstByte="3"/>
+<DataItem Name="Software" Ref="1" FirstByte="8"/>
+</Received>
+</Request>
+<Request Name="Present faults">
+<Sent><SentBytes>2181</SentBytes></Sent>
+<Received MinBytes="3"><DataItem Name="Driver pretensioner circuit" Ref="1" FirstByte="3" BitOffset="7"/></Received>
+</Request>
+<Request Name="Memorized faults">
+<Sent><SentBytes>2182</SentBytes></Sent>
+<Received MinBytes="3"><DataItem Name="Supply below 9 V" Ref="1" FirstByte="3" BitOffset="7"/></Received>
+</Request>
+<Request Name="Crash data">
+<Sent><SentBytes>2183</SentBytes></Sent>
+<Received MinBytes="3"><DataItem Name="Crash counter" Ref="1" FirstByte="3"/></Received>
+</Request>
+<Request Name="Supply">
+<Sent><SentBytes>2184</SentBytes></Sent>
+<Received MinBytes="3"><DataItem Name="Supply voltage" Ref="1" FirstByte="3"/></Received>
+</Request>
+<Request Name="Impedances">
+<Sent><SentBytes>2185</SentBytes></Sent>
+<Received MinBytes="6">
+<DataItem Name="Driver pretensioner impedance" Ref="1" FirstByte="3"/>
+<DataItem Name="Driver airbag impedance" Ref="1" FirstByte="5"/>
+</Received>
+</Request>
+<Request Name="Equipment">
+<Sent><SentBytes>2186</SentBytes></Sent>
+<Received MinBytes="3"><DataItem Name="Passenger airbag fitted" Ref="1" FirstByte="3" BitOffset="7"/></Received>
+</Request>
+<Request Name="Status">
+<Sent><SentBytes>2189</SentBytes></Sent>
+<Received MinBytes="3"><DataItem Name="Warning lamp" Ref="1" FirstByte="3" BitOffset="7"/></Received>
+</Request>
+</Requests>
+</Target>

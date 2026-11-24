@@ -17,8 +17,99 @@ confirmed or contradicted them, the last section says so.
 
 ## Running it
 
-There is no standalone simulator binary yet. The simulator runs inside the test suite, and a
-car capture can be decoded with `kline replay`:
+`kline-sim` is a standalone simulator: it opens a pseudo-terminal, prints its path and runs one
+virtual K line with any number of ECUs behind it, so the real `kline` binary can be driven
+against a simulated car, command by command, as at the car. **macOS and Linux only**: it needs a
+pty and a Unix socket. On Windows the binary only prints that it is not available (exit 2); the
+in-process simulator in the test suite still runs there.
+
+```
+cargo build --release -p kline-sim -p kline-cli
+mkdir -p ~/kline-sim-defs
+target/release/kline-sim --write-defs ~/kline-sim-defs
+```
+
+Without `--ecu` or `--replay` it runs the whole simulated car: the injection `sirius` (7A), the
+body `bmt` (26), the `airbag` (2C) and the Bosch 5.3 `abs` (01). Their definitions are built in
+and hand-written (`crates/kline-sim/tests/fixtures/builtin/`, the ABS from
+`tests/fixtures/bosch_abs_iso8.xml`): shaped like the car's ECUs (addresses, key bytes, request
+bytes), with invented names and values, no Renault file. `--write-defs DIR` writes them under the
+car's file names (`SIRIUS32___EMS3132___Soft_RE1_maj.xml`, `BMT_X65_ph1_p.xml`, `AB70_X65.xml`,
+`AB80_X65_X90_V1.xml`, `X24_ABS_Bosch5.3.xml`), so `kline --defs DIR --ecu bmt` and a script's
+`--xml "$AB70"` find them; it never overwrites an existing file. The banner shows what to type:
+
+```
+kline-sim: simulated K line on /dev/ttys004
+  control socket: /var/folders/../T/kline-sim.ctl
+  ECU 7A sirius (built-in)
+  ECU 26 bmt (built-in), lock memory unlocked and does not follow K-line 31 A0/31 A1
+  ECU 2C airbag (built-in)
+  ECU 01 abs (built-in)
+run kline against it:
+  kline --port /dev/ttys004 --sim-control /var/folders/../T/kline-sim.ctl --defs /Users/me/kline-sim-defs <command> ..
+```
+
+In a second terminal, every session command works with that prefix, `exec` included: the
+confirmation code is shown and typed in that terminal as at the car. Ctrl-C stops the
+simulator; the next start removes the socket a killed one left behind.
+
+### Options
+
+| Option | What it does |
+|---|---|
+| `--ecu NAME` | a built-in ECU: `sirius`, `bmt`, `airbag`, `abs` (repeatable; with any `--ecu` or `--replay`, only the ECUs named run) |
+| `--ecu PATH.xml`, `--ecu ADDR=PATH.xml` | an ECU from any definition, e.g. the real `$KLINE_DDT_XML/BMT_X65_ph1_p.xml`, at its `<Function Address>` (ADDR, hex, must match). It answers every documented request of the definition, zeros where the built-ins have values |
+| `--replay ADDR=FILE.jsonl` | the ECU at ADDR plays a capture back ([below](#replay-log-jsonl)); the tester must send the recorded requests in order (e.g. `--variant single`, as recorded), one session |
+| `--answer ADDR:REQ=positive\|nrc:NN\|HEX` | answer exactly the request REQ (hex) so: `positive` (response SID and the request bytes), `nrc:22` (`7F sid 22`) or the reply payload in hex. E.g. `--answer 7A:2701=nrc:22` |
+| `--fault ADDR:REQ=F[,after=N][,times=N]` | reply fault on requests starting with REQ (hex, or `*` for every request incl. TesterPresent): `silent`, `nrc:NN`, `bad-checksum`, `pending:N` (N x `7F sid 78` first), `drop:N` (last N bytes cut), `slow:MS`; `after=N` answers the first N normally, `times=N` applies it N times |
+| `--fault ADDR:init=F` | init fault: `silent`, `no-complement` (no ~address), `wrong-keywords:KKKK`, `bad-sync:NN` |
+| `--bmt-lock-follows true\|false` | the BMT lock memory (`21 A3` data byte 0 bit 7, 1 unlocked) follows K-line `31 A0 00 01` (lock) / `31 A1 00 01` (unlock) after a positive answer, or not. Default `false`: what the car did ([protocol.md](protocol.md)) |
+| `--bmt-lock-initial locked\|unlocked` | the memory at start (default `unlocked`) |
+| `--strict` | the ISO timing windows (default lenient: a pty jitters by a few ms) |
+| `--control PATH` | the control socket (default `kline-sim.ctl` in the temp directory) |
+| `--transcript FILE` | the transcript to FILE instead of stdout |
+| `--write-defs DIR` | above |
+
+The BMT lock model applies to whatever ECU runs at 26, built in or from a real definition: the
+bit of the `21 A3` reply is set from the memory.
+
+### Control: ECUs off the line, the dashboard button
+
+The control socket that `kline --sim-control` uses for break and DTR also takes the runner's
+commands, from a third terminal or a script:
+
+```
+kline-sim ctl /var/folders/../T/kline-sim.ctl ECUS?             # 7A sirius on; 26 bmt on; ...
+kline-sim ctl /var/folders/../T/kline-sim.ctl ECU 26 OFF        # the BMT leaves the line
+kline-sim ctl /var/folders/../T/kline-sim.ctl ECU 26 ON         # and comes back
+kline-sim ctl /var/folders/../T/kline-sim.ctl LOCK 26?          # LOCKED / UNLOCKED
+kline-sim ctl /var/folders/../T/kline-sim.ctl LOCK 26 LOCKED    # press the dashboard button
+```
+
+An ECU off the line sees no wake-up and no byte and sends nothing; a session it had times out
+as usual (5000 ms, the ABS after its 7000 ms keep-alive plus 1 s). `kline` then fails the init
+(exit 4) or reports no communication (exit 5) as it would at the car.
+
+### Transcript
+
+One line per event, flushed as written, on stdout or in `--transcript FILE`: wake-ups and which
+ECU took them, every request (`TX 26 <- 21 A3`) and every reply as it went on the wire
+(`RX 26 bmt -> 84 F1 26 61 A3 80 20 ..`), ECUs going off and on, the ECU write log, timing
+violations and the ECUs' notes (session stopped, timed out). The ECU write log is also printed to
+stderr (`kline-sim: ECU WRITE LOG: ..`).
+
+### Rehearsing a session
+
+`crates/kline-cli/tests/session3_rehearsal.rs` runs every command of the session-3 script
+against the runner (built-in car, `--write-defs` directory, one simulator per section) and checks
+each exit code: reads, `live`, `dtc`, `ident`, `risk`, `ports`, `selftest` and `--version` with
+the `kline` binary; `exec` through the same command code in-process with the test terminal
+typing the confirmation code it shows (the approval path is the real one; the test does not
+bypass it). Durations and holds are cut to 2 s. `KLINE_SESSION_COMMANDS=FILE` runs another
+script in the same format. The same file tests the lock memory both ways, an ECU leaving and
+rejoining the line, injected faults reaching the CLI, and a capture replayed as the ECU.
+
+### Without the runner
 
 ```
 cargo test --workspace                     # every kline command against the simulator
@@ -28,9 +119,7 @@ kline selftest                             # the cable plugged into the computer
 ```
 
 `abs_car_58.jsonl` is the Clio's ABS session of 2026-11-23; `bosch_abs_iso8.xml` is a
-hand-written definition with English item names, so the replay needs no Renault file. To drive
-the `kline` binary against the pty simulator yourself, see
-[Running against the simulator](cli.md#running-against-the-simulator).
+hand-written definition with English item names, so the replay needs no Renault file.
 
 ## Pieces
 
@@ -43,6 +132,8 @@ the `kline` binary against the pty simulator yourself, see
 | `replay::ReplayEcu` | Plays back a JSONL capture as the ECU. |
 | `line::VirtualLine` | In-process duplex with a virtual millisecond clock (a 5-baud init costs no real time). |
 | `pty::PtySim` | The bus behind a pseudo-terminal plus a control socket (Linux/macOS). |
+| `multi::MultiEcu` | Several ECUs on one line (the runner): a 5-baud wake-up goes to the ECU at that address, the tester's bytes then only to it; ECUs can go off the line; the transcript. |
+| `runner`, `builtin` | The `kline-sim` binary's command line, control commands and built-in car (Linux/macOS). |
 | `driver::Driver` | Runs kline-core's `FiveBaudInit` / `FastInit` / `Session` over any `Line`, optionally capturing the JSONL log. A test driver; the CLI uses its own runner in `kline-host` (`link`). |
 
 ## Wire behaviour
@@ -190,7 +281,9 @@ wrong together:
 10. The cable: echo always exact, break looped back, one 0x00 residue byte. Real FTDI behaviour
     under macOS (break latency, residue count, DTR effect) is not modelled.
 11. Not modelled at all: collisions (ECU and tester transmitting together), electrical faults,
-    noise, a second ECU on the line, the L line, battery voltage.
+    noise, the L line, battery voltage. Several ECUs share a line only in the runner
+    (`multi`), and there an ECU that is not addressed does not overhear the others' frames,
+    and a wake-up for one ECU does not end another one's session (it times out).
 12. The scenario data layout comes from the definitions; if the DDT XML misdescribes a frame,
     the simulator agrees with it. ddt4all cross-checks only cover decoding.
 

@@ -86,6 +86,11 @@ impl VirtualLine {
         }
     }
 
+    /// Line over an already built bus (e.g. the `kline-sim` runner's, [`crate::runner`]).
+    pub fn from_bus(bus: Bus) -> VirtualLine {
+        VirtualLine { bus, now: 0 }
+    }
+
     /// Line for a [`crate::ecu::SpecEcu`] with the default cable and the ECU's own tolerance.
     pub fn with_ecu(ecu: crate::ecu::SpecEcu) -> VirtualLine {
         let j = ecu.journal();

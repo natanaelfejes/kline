@@ -310,8 +310,18 @@ decoded values).
 kline --port /dev/pts/N --sim-control /tmp/sim.ctl connect --xml crates/kline-cli/tests/fixtures/sirius_cli.xml
 ```
 
-The tests start `kline_sim::pty::PtySim` themselves; there is no standalone simulator binary yet.
-How the simulator works: [sim.md](sim.md).
+`kline-sim` (macOS, Linux) opens the pty and the control socket and prints this prefix; with
+`--write-defs DIR` it also writes its built-in definitions under the car's file names, so
+`--defs DIR --ecu bmt` works without Renault files:
+
+```
+kline-sim --write-defs ~/kline-sim-defs                 # terminal 1
+kline --port /dev/ttys004 --sim-control /var/folders/../T/kline-sim.ctl --defs ~/kline-sim-defs read --ecu bmt 21A3   # terminal 2
+```
+
+Every command behaves as at the car, `exec` with its confirmation code included. The tests start
+`kline_sim::pty::PtySim` or the runner themselves. How the simulator works and its options
+(faults, answers, ECUs off the line, the BMT lock memory, the transcript): [sim.md](sim.md#running-it).
 
 ## First session on a car
 

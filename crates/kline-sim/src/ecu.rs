@@ -300,6 +300,58 @@ impl FaultRule {
     }
 }
 
+/// One bit of ECU memory that a read reports and that requests may change
+/// ([`SpecEcu::with_bit_memory`]). Model of the BMT lock state: `21 A3` data byte 0 bit 7
+/// (0 locked, 1 unlocked) follows the dashboard lock button; on the car it did **not** follow
+/// the K-line lock outputs `31 A0 00 01` / `31 A1 00 01` (docs/protocol.md "BMT lock state").
+/// With `follows` the memory follows them (the other model, for rehearsing both cases).
+#[derive(Debug, Clone)]
+pub struct BitMemory {
+    /// The read whose positive reply carries the bit (exact payload, e.g. `21 A3`).
+    pub read: Vec<u8>,
+    /// Index of the byte in the reply payload (response SID = 0; BMT `21 A3` data byte 0 = 2).
+    pub byte: usize,
+    /// The bit within that byte (BMT lock: 0x80).
+    pub mask: u8,
+    /// A positive answer to this exact request sets the bit (BMT: `31 A1 00 01`, unlock).
+    pub set_on: Vec<u8>,
+    /// A positive answer to this exact request clears the bit (BMT: `31 A0 00 01`, lock).
+    pub clear_on: Vec<u8>,
+    /// Whether `set_on` / `clear_on` change the memory at all.
+    pub follows: bool,
+    /// The bit, shared with whoever presses the "dashboard button" (the simulator control).
+    pub state: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// BMT lock memory reply byte: `61 A3 d0 ..`, data byte 0 (docs/protocol.md "BMT lock state").
+pub const BMT_LOCK_BYTE: usize = 2;
+/// BMT lock memory bit: data byte 0 bit 7, 1 = unlocked (docs/protocol.md "BMT lock state").
+pub const BMT_LOCK_MASK: u8 = 0x80;
+
+impl BitMemory {
+    /// The BMT lock memory (`21 A3` d0 bit 7, 1 unlocked) starting `unlocked` or not, following
+    /// K-line `31 A0 00 01` (lock) / `31 A1 00 01` (unlock) only when `follows`.
+    pub fn bmt_lock(follows: bool, unlocked: bool) -> BitMemory {
+        BitMemory {
+            read: vec![0x21, 0xA3],
+            byte: BMT_LOCK_BYTE,
+            mask: BMT_LOCK_MASK,
+            set_on: vec![0x31, 0xA1, 0x00, 0x01],
+            clear_on: vec![0x31, 0xA0, 0x00, 0x01],
+            follows,
+            state: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(unlocked)),
+        }
+    }
+
+    pub fn get(&self) -> bool {
+        self.state.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn set(&self, on: bool) {
+        self.state.store(on, std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
 /// A scheduled scenario change ([`SpecEcu::with_change_after`]).
 #[derive(Debug, Clone)]
 struct ScenarioChange {
@@ -342,6 +394,9 @@ pub struct SpecEcu {
     changes: Vec<ScenarioChange>,
     /// Scenario changes a positive reply makes ([`SpecEcu::with_effect`]).
     effects: Vec<(Vec<u8>, String, kline_spec::Value)>,
+    /// Exact request payload -> reply payload, instead of the definition's answer.
+    replies: Vec<(Vec<u8>, Vec<u8>)>,
+    memories: Vec<BitMemory>,
     state: State,
     asm: Assembler,
     last_rx_byte: u64,
@@ -372,6 +427,8 @@ impl SpecEcu {
             faults: Vec::new(),
             changes: Vec::new(),
             effects: Vec::new(),
+            replies: Vec::new(),
+            memories: Vec::new(),
             state: State::Asleep,
             asm: Assembler::default(),
             last_rx_byte: 0,
@@ -419,6 +476,43 @@ impl SpecEcu {
     pub fn with_effect(mut self, on: &[u8], data: &str, value: kline_spec::Value) -> SpecEcu {
         self.effects.push((on.to_vec(), data.to_string(), value));
         self
+    }
+
+    /// Answer exactly `request` with `reply` (a payload from the response SID on, e.g.
+    /// `7F 27 22` or `67 01 12 34`) instead of what the definition gives. Faults still apply.
+    pub fn with_reply(mut self, request: &[u8], reply: &[u8]) -> SpecEcu {
+        self.replies.retain(|(r, _)| r != request);
+        self.replies.push((request.to_vec(), reply.to_vec()));
+        self
+    }
+
+    /// Keep one bit of memory that `memory.read` reports ([`BitMemory`]).
+    pub fn with_bit_memory(mut self, memory: BitMemory) -> SpecEcu {
+        self.memories.push(memory);
+        self
+    }
+
+    /// Update the memories a positive answer to `payload` changes, and set the memory bits in
+    /// a positive `reply` to a read that reports them.
+    fn apply_memories(&self, payload: &[u8], reply: &mut [u8], executed: bool) {
+        for m in &self.memories {
+            if executed && m.follows {
+                if payload == m.set_on.as_slice() {
+                    m.set(true);
+                } else if payload == m.clear_on.as_slice() {
+                    m.set(false);
+                }
+            }
+            if payload == m.read.as_slice() && reply.first() != Some(&0x7F) {
+                if let Some(b) = reply.get_mut(m.byte) {
+                    if m.get() {
+                        *b |= m.mask;
+                    } else {
+                        *b &= !m.mask;
+                    }
+                }
+            }
+        }
     }
 
     fn apply_effects(&mut self, t: u64, payload: &[u8]) {
@@ -523,6 +617,9 @@ impl SpecEcu {
             (true, [0x3F]) => return (self.profile.iso8_stop_reply.clone(), true),
             _ => {}
         }
+        if let Some((_, r)) = self.replies.iter().find(|(q, _)| q.as_slice() == payload) {
+            return (Some(r.clone()), false);
+        }
         if !matches.is_empty() {
             let offset = self.profile.positive_sid_offset;
             return match positive_response_with(
@@ -573,10 +670,13 @@ impl SpecEcu {
             self.state = State::Asleep;
             self.journal.note(t, "session stopped");
         }
-        let Some(reply) = reply else { return };
-        if reply.first() != Some(&0x7F) && !matches!(fault, Some(ReplyFault::Negative { .. })) {
+        let Some(mut reply) = reply else { return };
+        let executed =
+            reply.first() != Some(&0x7F) && !matches!(fault, Some(ReplyFault::Negative { .. }));
+        if executed {
             self.apply_effects(t, &p.payload);
         }
+        self.apply_memories(&p.payload, &mut reply, executed);
         let (fmt, ecu, tm) = (self.fmt(), self.profile.address, self.profile.timing);
         let wire = |pl: &[u8]| encode_reply(fmt, ecu, tester, pl);
         let sid = p.payload[0];

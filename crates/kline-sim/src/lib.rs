@@ -9,9 +9,12 @@
 //! - Transports: [`line::VirtualLine`] (in-process, virtual clock) and [`pty::PtySim`]
 //!   (pseudo-terminal plus a control socket for break/DTR).
 //! - [`driver::Driver`]: runs kline-core's machines over any [`line::Line`].
+//! - [`multi::MultiEcu`]: several ECUs on one line; [`runner`] and [`builtin`]: the `kline-sim`
+//!   binary that runs a whole simulated car behind a pty (macOS, Linux).
 
 #![forbid(unsafe_code)]
 
+pub mod builtin;
 pub mod bus;
 pub mod classify;
 pub mod driver;
@@ -19,9 +22,12 @@ pub mod ecu;
 pub mod frame;
 pub mod journal;
 pub mod line;
+pub mod multi;
 #[cfg(unix)]
 pub mod pty;
 pub mod replay;
+#[cfg(unix)]
+pub mod runner;
 pub mod scenario;
 pub mod timing;
 

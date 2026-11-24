@@ -49,6 +49,20 @@ impl Out {
         }
         t
     }
+
+    /// The queued bytes with their times.
+    pub fn bytes(&self) -> &[(u64, u8)] {
+        &self.bytes
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    /// Move every byte of `other` into this queue.
+    pub fn append(&mut self, other: Out) {
+        self.bytes.extend(other.bytes);
+    }
 }
 
 /// An ECU (or a replay) attached to the bus.

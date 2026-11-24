@@ -79,7 +79,8 @@ OBD-II code reader.
 - **Cable check**: `selftest` measures timer precision and break timing without a car.
 - **Read-only binary**: `kline-agent` for scripts and AI assistants. JSON output, reads only;
   it can prepare a service request for a human but never send one.
-- **Simulator**: an ECU simulator for end-to-end tests without a car.
+- **Simulator**: an ECU simulator for end-to-end tests without a car, and `kline-sim`, a
+  simulated car on a pseudo-terminal to rehearse a session at home (macOS, Linux).
 
 ## Supported ECUs and cars
 
@@ -298,7 +299,22 @@ from a definition. The test suite runs every command against it, in-process on a
 operating systems and over a pseudo-terminal on Linux and macOS. The simulator keeps its own log
 of anything that would change the ECU, and the tests check that it stays empty where it should.
 
-There is no standalone simulator binary yet. What you can run without a car:
+To rehearse a session by hand (macOS and Linux; not available on Windows), run the simulated
+car in one terminal and `kline` in another:
+
+```
+cargo build --release -p kline-sim -p kline-cli
+target/release/kline-sim --write-defs ~/kline-sim-defs     # prints the --port/--sim-control prefix
+target/release/kline --port /dev/ttys004 --sim-control /var/folders/../T/kline-sim.ctl --defs ~/kline-sim-defs dtc --ecu bmt
+```
+
+It simulates the injection, BMT, airbag and ABS on one K line from built-in hand-written
+definitions (or `--ecu ADDR=file.xml` for any definition, `--replay ADDR=capture.jsonl` for a
+capture), with configurable answers and faults, ECUs that leave and rejoin the line, the BMT lock
+memory that does or does not follow the K-line lock outputs, and a transcript of every frame
+([docs/sim.md](docs/sim.md#running-it)).
+
+What else you can run without a car:
 
 ```
 cargo test --workspace                     # every command against the simulator
