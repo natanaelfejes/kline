@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Hand-written kline-sim built-in (not derived from any Renault file), for `kline-sim`'s
-     simulated car. Shaped like an airbag ECU at 0x2C on KWP 5-baud (the key bytes D0 8F are
+     simulated car. Never use it at the car. Shaped like an airbag ECU at 0x2C on KWP 5-baud (the key bytes D0 8F are
      invented; docs/protocol.md only says they match the definition). Names, positions and
      scaling are invented. Variant A: the frames 21 80 to 21 85. -->
-<Target Name="Simulated airbag A" xmlns="http://www-diag.renault.com/2002/ECU">
+<Target Name="kline-sim built-in, not for a car: airbag A" xmlns="http://www-diag.renault.com/2002/ECU">
 <Function Name="Airbag" Address="44"/>
 <K BaudRate="10400">
 <KWP>

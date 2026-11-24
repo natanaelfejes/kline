@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Hand-written kline-sim built-in (not derived from any Renault file), for `kline-sim`'s
-     simulated car. Shaped like the body ECU at 0x26 (KWP 5-baud Multipoint, KW D0 8F). Request
+     simulated car. Never use it at the car. Shaped like the body ECU at 0x26 (KWP 5-baud Multipoint, KW D0 8F). Request
      bytes and the lock bit position (21 A3 data byte 0 bit 7, 1 unlocked) are from
      docs/protocol.md and docs/cli.md; names, other positions and scaling are invented. -->
-<Target Name="Simulated body" xmlns="http://www-diag.renault.com/2002/ECU">
+<Target Name="kline-sim built-in, not for a car: body" xmlns="http://www-diag.renault.com/2002/ECU">
 <Function Name="Body" Address="38"/>
 <K BaudRate="10400">
 <KWP Multipoint="1">

@@ -605,9 +605,18 @@ pub fn default_control_path() -> PathBuf {
 
 /// Remove a socket left by a simulator that was killed (nobody accepts on it). A live one is
 /// an error: two simulators would share the name.
+/// Anything that is not a socket is left alone and refused (a mistyped `--control` must not
+/// delete a file).
 fn clear_stale_socket(path: &Path) -> Result<(), RunnerError> {
-    if !path.exists() {
+    use std::os::unix::fs::FileTypeExt;
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
         return Ok(());
+    };
+    if !meta.file_type().is_socket() {
+        return Err(RunnerError::Setup(format!(
+            "{} exists and is not a socket; pass another --control PATH",
+            path.display()
+        )));
     }
     if std::os::unix::net::UnixStream::connect(path).is_ok() {
         return Err(RunnerError::Setup(format!(

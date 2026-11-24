@@ -340,6 +340,30 @@ fn the_binary_prints_its_port_and_answers_ctl() {
         .output()
         .unwrap();
     assert_eq!(o.status.code(), Some(1));
+    // A --control path that is a file is refused and left alone.
+    let file = dir.join("not-a-socket");
+    std::fs::write(&file, "keep").unwrap();
+    let mut c = Command::new(bin)
+        .arg("--control")
+        .arg(&file)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let t0 = std::time::Instant::now();
+    let status = loop {
+        if let Some(st) = c.try_wait().unwrap() {
+            break Some(st);
+        }
+        if t0.elapsed() > std::time::Duration::from_secs(10) {
+            c.kill().unwrap();
+            let _ = c.wait();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert_eq!(status.and_then(|s| s.code()), Some(3), "refused at once");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "keep");
     // A second simulator on the same socket is refused while the first runs.
     let o = Command::new(bin)
         .arg("--control")

@@ -26,7 +26,7 @@ in-process simulator in the test suite still runs there.
 ```
 cargo build --release -p kline-sim -p kline-cli
 mkdir -p ~/kline-sim-defs
-target/release/kline-sim --write-defs ~/kline-sim-defs
+target/release/kline-sim --write-defs ~/kline-sim-defs --control /tmp/kline-sim.ctl
 ```
 
 Without `--ecu` or `--replay` it runs the whole simulated car: the injection `sirius` (7A), the
@@ -36,17 +36,19 @@ and hand-written (`crates/kline-sim/tests/fixtures/builtin/`, the ABS from
 bytes), with invented names and values, no Renault file. `--write-defs DIR` writes them under the
 car's file names (`SIRIUS32___EMS3132___Soft_RE1_maj.xml`, `BMT_X65_ph1_p.xml`, `AB70_X65.xml`,
 `AB80_X65_X90_V1.xml`, `X24_ABS_Bosch5.3.xml`), so `kline --defs DIR --ecu bmt` and a script's
-`--xml "$AB70"` find them; it never overwrites an existing file. The banner shows what to type:
+`--xml "$AB70"` find them; it never overwrites an existing file. Keep that directory apart
+from the real definitions and never pass it at the car: the files only look like the car's
+(their target names say `kline-sim built-in, not for a car`). The banner shows what to type:
 
 ```
 kline-sim: simulated K line on /dev/ttys004
-  control socket: /var/folders/../T/kline-sim.ctl
+  control socket: /tmp/kline-sim.ctl
   ECU 7A sirius (built-in)
   ECU 26 bmt (built-in), lock memory unlocked and does not follow K-line 31 A0/31 A1
   ECU 2C airbag (built-in)
   ECU 01 abs (built-in)
 run kline against it:
-  kline --port /dev/ttys004 --sim-control /var/folders/../T/kline-sim.ctl --defs /Users/me/kline-sim-defs <command> ..
+  kline --port /dev/ttys004 --sim-control /tmp/kline-sim.ctl --defs /Users/me/kline-sim-defs <command> ..
 ```
 
 In a second terminal, every session command works with that prefix, `exec` included: the
@@ -66,7 +68,7 @@ simulator; the next start removes the socket a killed one left behind.
 | `--bmt-lock-follows true\|false` | the BMT lock memory (`21 A3` data byte 0 bit 7, 1 unlocked) follows K-line `31 A0 00 01` (lock) / `31 A1 00 01` (unlock) after a positive answer, or not. Default `false`: what the car did ([protocol.md](protocol.md)) |
 | `--bmt-lock-initial locked\|unlocked` | the memory at start (default `unlocked`) |
 | `--strict` | the ISO timing windows (default lenient: a pty jitters by a few ms) |
-| `--control PATH` | the control socket (default `kline-sim.ctl` in the temp directory) |
+| `--control PATH` | the control socket (default `kline-sim.ctl` in the temp directory, on macOS a long `/var/folders/..` path; `/tmp/kline-sim.ctl` is shorter to type). A path that exists and is not a socket is refused |
 | `--transcript FILE` | the transcript to FILE instead of stdout |
 | `--write-defs DIR` | above |
 
@@ -79,11 +81,11 @@ The control socket that `kline --sim-control` uses for break and DTR also takes 
 commands, from a third terminal or a script:
 
 ```
-kline-sim ctl /var/folders/../T/kline-sim.ctl ECUS?             # 7A sirius on; 26 bmt on; ...
-kline-sim ctl /var/folders/../T/kline-sim.ctl ECU 26 OFF        # the BMT leaves the line
-kline-sim ctl /var/folders/../T/kline-sim.ctl ECU 26 ON         # and comes back
-kline-sim ctl /var/folders/../T/kline-sim.ctl LOCK 26?          # LOCKED / UNLOCKED
-kline-sim ctl /var/folders/../T/kline-sim.ctl LOCK 26 LOCKED    # press the dashboard button
+kline-sim ctl /tmp/kline-sim.ctl ECUS?             # 7A sirius on; 26 bmt on; ...
+kline-sim ctl /tmp/kline-sim.ctl ECU 26 OFF        # the BMT leaves the line
+kline-sim ctl /tmp/kline-sim.ctl ECU 26 ON         # and comes back
+kline-sim ctl /tmp/kline-sim.ctl LOCK 26?          # LOCKED / UNLOCKED
+kline-sim ctl /tmp/kline-sim.ctl LOCK 26 LOCKED    # press the dashboard button
 ```
 
 An ECU off the line sees no wake-up and no byte and sends nothing; a session it had times out

@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Hand-written kline-sim built-in (not derived from any Renault file), for `kline-sim`'s
-     simulated car. Shaped like the injection ECU at 0x7A (KWP 5-baud Multipoint, KW D0 8F,
+     simulated car. Never use it at the car. Shaped like the injection ECU at 0x7A (KWP 5-baud Multipoint, KW D0 8F,
      docs/protocol.md). Request bytes are the protocol facts of docs/protocol.md and docs/cli.md;
      names, positions and scaling are invented. -->
-<Target Name="Simulated injection" xmlns="http://www-diag.renault.com/2002/ECU">
+<Target Name="kline-sim built-in, not for a car: injection" xmlns="http://www-diag.renault.com/2002/ECU">
 <Function Name="Injection" Address="122"/>
 <Failures Name="Flags" Id="1"/>
 <K BaudRate="10400">

@@ -304,8 +304,8 @@ car in one terminal and `kline` in another:
 
 ```
 cargo build --release -p kline-sim -p kline-cli
-target/release/kline-sim --write-defs ~/kline-sim-defs     # prints the --port/--sim-control prefix
-target/release/kline --port /dev/ttys004 --sim-control /var/folders/../T/kline-sim.ctl --defs ~/kline-sim-defs dtc --ecu bmt
+target/release/kline-sim --write-defs ~/kline-sim-defs --control /tmp/kline-sim.ctl     # prints the --port/--sim-control prefix
+target/release/kline --port /dev/ttys004 --sim-control /tmp/kline-sim.ctl --defs ~/kline-sim-defs dtc --ecu bmt
 ```
 
 It simulates the injection, BMT, airbag and ABS on one K line from built-in hand-written

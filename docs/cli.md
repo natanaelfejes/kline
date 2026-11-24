@@ -315,8 +315,8 @@ kline --port /dev/pts/N --sim-control /tmp/sim.ctl connect --xml crates/kline-cl
 `--defs DIR --ecu bmt` works without Renault files:
 
 ```
-kline-sim --write-defs ~/kline-sim-defs                 # terminal 1
-kline --port /dev/ttys004 --sim-control /var/folders/../T/kline-sim.ctl --defs ~/kline-sim-defs read --ecu bmt 21A3   # terminal 2
+kline-sim --write-defs ~/kline-sim-defs --control /tmp/kline-sim.ctl   # terminal 1
+kline --port /dev/ttys004 --sim-control /tmp/kline-sim.ctl --defs ~/kline-sim-defs read --ecu bmt 21A3   # terminal 2
 ```
 
 Every command behaves as at the car, `exec` with its confirmation code included. The tests start
