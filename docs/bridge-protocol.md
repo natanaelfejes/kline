@@ -20,14 +20,14 @@ kline-sim (`crates/kline-bridge/tests`). See [Not verified](#not-verified).
 - [Response and result codes](#response-and-result-codes)
 - [Raw](#raw)
 - [Roles, pairing, counters, rate limits](#roles-pairing-counters-rate-limits)
-- [Approvals (Tier 1 from the phone)](#approvals-tier-1-from-the-phone)
+- [Approvals (Tier 1 to 3 from the phone)](#approvals-tier-1-to-3-from-the-phone)
 - [Parked LOCK and UNLOCK (fob output)](#parked-lock-and-unlock-fob-output)
 - [Lock-when-moving](#lock-when-moving)
 - [Bridge behaviour](#bridge-behaviour)
 - [Host transport (`kline --transport ble`)](#host-transport-kline---transport-ble)
 - [Test vectors](#test-vectors)
 - [Limits](#limits)
-- [kline-core changes needed](#kline-core-changes-needed)
+- [kline-core changes for the bridge](#kline-core-changes-for-the-bridge)
 - [Not verified](#not-verified)
 
 ## Service and characteristics
@@ -258,7 +258,7 @@ Automaton `kline_bridge::lwm`:
 - Lock again only after more than 60 s at speed 0, or after an owner UNLOCK and a new
   drive-off.
 - Unlock when rpm is 0, or when the bridge has *tried* the Sirius and failed for 3 s with no
-  sample in between (ignition off). Samples that simply stop because the bridge is busy
+  sample in between (ignition off). Samples that stop because the bridge is busy
   elsewhere do not count (review B1).
 - 5 s between actuations; off by default; armed until the owner disarms in the app (owner
   decision 2026-11-23; a reset disarms, since arming is in RAM). Arming allows a lock on the
@@ -393,7 +393,7 @@ Checked by `crates/kline-bridge/tests/vectors.rs`; the CRCs were cross-checked w
   same test (airbag: AB70's, the slower one).
 - The decoders in `kline_bridge::live` are hand-coded positions for this car's ECUs.
 
-## kline-core changes (made in this round)
+## kline-core changes for the bridge
 
 1. `approved-routines` no longer implies `std` (`approved-routines = ["dep:getrandom"]`). The
    firmware builds with `--cfg getrandom_backend="custom"` and provides
