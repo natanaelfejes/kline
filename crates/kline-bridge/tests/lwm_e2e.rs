@@ -148,7 +148,8 @@ fn a_wrong_arming_code_leaves_it_disarmed() {
 
 #[test]
 fn disarm_after_the_lock_still_unlocks_at_engine_stop() {
-    let mut rig = Rig::new(driving_sirius(), bmt_ecu(bmt_scenario(true)));
+    // The BMT reads locked (the disarm's lock-state read must not end the duty).
+    let mut rig = Rig::new(driving_sirius(), bmt_ecu(bmt_scenario(false)));
     rig.connect(OWNER, Role::Owner);
     rig.battery(14_100);
     arm(&mut rig);
@@ -218,6 +219,17 @@ fn clients_cannot_toggle_the_locks_while_driving() {
                 rig.call(client, Op::YieldKline, 1_000).result,
                 ResultCode::LwmActive
             );
+            // Review r3 minor 3: PREPARE_WRITE is held off the BMT as well.
+            let r = rig.call(
+                client,
+                Op::PrepareWrite {
+                    ecu: EcuId::Bmt,
+                    identification: vec![0x61, 0x80, 0x01],
+                    payload: vec![0x3B, 0xD2, 0x03, 0x00],
+                },
+                1_000,
+            );
+            assert_eq!(r.result, ResultCode::LwmActive);
         }
         rig.run_for(12_000);
     }
@@ -451,4 +463,254 @@ fn a_critical_battery_never_shuts_down_over_an_owed_unlock() {
         "{:?}",
         rig.car.sleeps
     );
+}
+
+/// Engine off, standing.
+fn parked_sirius() -> kline_sim::ecu::SpecEcu {
+    sirius_ecu(sirius_scenario().number("Engine speed", 0.0))
+}
+
+fn arm_parked(rig: &mut Rig) {
+    rig.battery(12_600);
+    let (id, code) = challenge(&rig.call(OWNER, Op::LwmArm, 15_000));
+    let (id2, code2) = challenge(&rig.call(
+        OWNER,
+        Op::Confirm {
+            challenge: id,
+            code,
+        },
+        10_000,
+    ));
+    let r = rig.call(
+        OWNER,
+        Op::Confirm {
+            challenge: id2,
+            code: code2,
+        },
+        10_000,
+    );
+    assert_eq!(r.result, ResultCode::Ok, "{r:?}");
+}
+
+fn count(w: &[Vec<u8>], fn_byte: u8) -> usize {
+    w.iter().filter(|p| p[1] == fn_byte).count()
+}
+
+/// Review B-3 (reviewer's break test, adapted to the fix): three refused unlocks make the
+/// bridge give up, disarm and report it; a later drive does not lock; once the owner arms
+/// again, the next lock gets its unlock.
+#[test]
+fn r3_a_give_up_never_poisons_later_unlocks() {
+    let change = |e: kline_sim::ecu::SpecEcu, t: u64, v: f64, rpm: f64| {
+        e.with_change_after(&[0x21, 0xA9], t, "Vehicle speed", Value::Number(v))
+            .with_change_after(&[0x21, 0xA9], t, "Engine speed", Value::Number(rpm))
+    };
+    let mut sirius = parked_sirius();
+    for (t, v, rpm) in [
+        (20_000, 40.0, 2_200.0),
+        (50_000, 0.0, 0.0),
+        (100_000, 40.0, 2_200.0),
+        (130_000, 0.0, 0.0),
+        (230_000, 40.0, 2_200.0),
+        (260_000, 0.0, 0.0),
+    ] {
+        sirius = change(sirius, t, v, rpm);
+    }
+    let bmt = bmt_ecu(bmt_scenario(false)).with_fault(FaultRule {
+        times: Some(3),
+        ..FaultRule::on(&[0x31, 0xA1], ReplyFault::Negative { nrc: 0x22 })
+    });
+    let mut rig = Rig::new(sirius, bmt);
+    rig.connect(OWNER, Role::Owner);
+    rig.send(OWNER, Op::StartLive(Profile::Drive));
+    rig.run_for(3_000);
+    arm_parked(&mut rig);
+    rig.run_until(95_000);
+    let w = bmt_payloads(&rig);
+    assert_eq!((count(&w, 0xA0), count(&w, 0xA1)), (1, 3), "{w:02X?}");
+    assert!(!rig.bridge.lwm().locked_by_us());
+    assert!(!rig.bridge.lwm().is_armed(), "a give-up disarms");
+    let flags = rig.bridge.status().flags;
+    assert_ne!(flags & kline_bridge::gatt::status_flags::LWM_GAVE_UP, 0);
+    assert_eq!(flags & kline_bridge::gatt::status_flags::LWM_ARMED, 0);
+    // Drive 2: no lock without the owner.
+    rig.run_until(190_000);
+    assert_eq!(bmt_payloads(&rig), w, "no lock after a give-up");
+    // The owner arms again (parked, engine off); drive 3 locks and unlocks.
+    arm_parked(&mut rig);
+    assert!(!rig.bridge.lwm().gave_up());
+    rig.run_until(320_000);
+    let w = bmt_payloads(&rig);
+    assert_eq!((count(&w, 0xA0), count(&w, 0xA1)), (2, 4), "{w:02X?}");
+    assert_eq!(w.last().unwrap()[1], 0xA1);
+    assert!(!rig.bridge.lwm().locked_by_us());
+}
+
+/// Review B-3: LWM_DISARM with an unlock owed reads the BMT lock state once; the duty ends only
+/// when a positive read shows the doors unlocked.
+#[test]
+fn r3_disarm_ends_the_duty_once_a_read_shows_the_doors_unlocked() {
+    // Drives off, then stands with the engine idling: the duty stays (no engine stop).
+    let sirius = cruising_sirius()
+        .with_change_after(&[0x21, 0xA9], 30_000, "Vehicle speed", Value::Number(0.0))
+        .with_change_after(&[0x21, 0xA9], 30_000, "Engine speed", Value::Number(800.0));
+    // Locked; the first 21A3 (the first disarm's read) says locked, later reads unlocked (the
+    // owner opened by hand).
+    let bmt = bmt_ecu(bmt_scenario(false)).with_change_after(
+        &[0x21, 0xA3],
+        1,
+        "Door lock memory",
+        text("unlocked"),
+    );
+    let mut rig = Rig::new(sirius, bmt);
+    rig.connect(OWNER, Role::Owner);
+    arm(&mut rig);
+    assert!(rig.run_until_pred(30_000, |r| r.bridge.lwm().locked_by_us()));
+    rig.run_for(40_000);
+    assert!(rig.bridge.lwm().locked_by_us());
+    assert_eq!(rig.call(OWNER, Op::LwmDisarm, 1_000).result, ResultCode::Ok);
+    rig.run_for(15_000);
+    assert!(
+        rig.bridge.lwm().locked_by_us(),
+        "read showed locked: duty stays"
+    );
+    assert_eq!(rig.call(OWNER, Op::LwmDisarm, 1_000).result, ResultCode::Ok);
+    assert!(rig.run_until_pred(15_000, |r| !r.bridge.lwm().locked_by_us()));
+    assert_eq!(bmt_payloads(&rig), vec![vec![0x31, 0xA0, 0x00, 0x01]]);
+    // Nothing is held any more: the K line can be yielded.
+    assert_eq!(
+        rig.call(OWNER, Op::YieldKline, 15_000).result,
+        ResultCode::Ok
+    );
+}
+
+/// Review B-3: the owner's app UNLOCK, verified by the BMT lock bit, ends an unlock duty whose
+/// K-line unlock keeps being refused.
+#[test]
+fn r3_a_verified_app_unlock_ends_the_duty() {
+    let bmt = bmt_ecu(bmt_scenario(false))
+        .with_fault(FaultRule::on(
+            &[0x31, 0xA1],
+            ReplyFault::Negative { nrc: 0x22 },
+        ))
+        .with_change_after(&[0x21, 0xA3], 200, "Door lock memory", text("unlocked"));
+    let mut rig = Rig::new(driving_sirius(), bmt);
+    rig.connect(OWNER, Role::Owner);
+    arm(&mut rig);
+    assert!(rig.run_until_pred(60_000, |r| count(&bmt_payloads(r), 0xA1) == 1));
+    rig.battery(12_600);
+    let r = rig.call(OWNER, Op::Unlock, 30_000);
+    assert_eq!(r.result, ResultCode::Ok, "{r:?}");
+    assert!(!rig.bridge.lwm().locked_by_us());
+    let n = count(&bmt_payloads(&rig), 0xA1);
+    assert!(n < 3, "ended before the give-up");
+    rig.run_for(60_000);
+    assert_eq!(
+        count(&bmt_payloads(&rig), 0xA1),
+        n,
+        "no unlock attempts after it"
+    );
+    assert!(!rig.bridge.lwm().gave_up());
+}
+
+/// Review r3 minor 2: armed and parked, the owner PREPAREs a BMT request and drives off
+/// without confirming. The challenge is dropped as soon as the engine may run (here the
+/// charging voltage), so lock-when-moving gets the Sirius back and locks; its CONFIRM is
+/// answered LwmActive.
+#[test]
+fn r3_a_pending_bmt_challenge_never_hides_the_drive() {
+    let sirius = parked_sirius()
+        .with_change_after(&[0x21, 0xA9], 30_000, "Vehicle speed", Value::Number(40.0))
+        .with_change_after(
+            &[0x21, 0xA9],
+            30_000,
+            "Engine speed",
+            Value::Number(2_200.0),
+        );
+    let mut rig = Rig::new(sirius, bmt_ecu(bmt_scenario(true)));
+    rig.connect(OWNER, Role::Owner);
+    rig.send(OWNER, Op::StartLive(Profile::Drive));
+    rig.run_for(3_000);
+    arm_parked(&mut rig);
+    rig.run_for(3_000);
+    let (id, code) = challenge(&rig.call(
+        OWNER,
+        Op::Prepare {
+            ecu: EcuId::Bmt,
+            payload: vec![0x31, 0xA0, 0x00, 0x01],
+        },
+        15_000,
+    ));
+    let t0 = rig.now();
+    rig.battery(14_100);
+    assert!(rig.run_until_pred(200_000, |r| !r.car.bmt_journal.writes().is_empty()));
+    let w = rig.car.bmt_journal.writes();
+    assert!(
+        w[0].t_ms < t0 + 40_000,
+        "locked at {} (prepare at {t0})",
+        w[0].t_ms
+    );
+    let r = rig.call(
+        OWNER,
+        Op::Confirm {
+            challenge: id,
+            code,
+        },
+        5_000,
+    );
+    assert_eq!(r.result, ResultCode::LwmActive);
+    assert_eq!(rig.car.bmt_journal.writes().len(), 1);
+}
+
+/// Review r3 minor 5: arming at a standstill with the engine idling is refused (parked,
+/// engine off only), at a charging voltage and without one.
+#[test]
+fn r3_arming_with_the_engine_idling_is_refused() {
+    let mut rig = Rig::new(sirius_ecu(sirius_scenario()), bmt_ecu(bmt_scenario(true)));
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(14_100);
+    rig.send(OWNER, Op::StartLive(Profile::Drive));
+    rig.run_for(3_000);
+    // Refused at once, on the command (no BMT session for it).
+    for mv in [14_100, 12_600] {
+        rig.battery(mv);
+        rig.run_for(3_000);
+        let c = rig.send(OWNER, Op::LwmArm);
+        assert!(rig.run_until_pred(15_000, |r| !r.car.responses_for(OWNER, c).is_empty()));
+        let r = rig.car.responses_for(OWNER, c);
+        assert_eq!(
+            r[0].result,
+            ResultCode::VehicleMoving,
+            "at {mv} mV, not queued: {r:?}"
+        );
+    }
+    assert!(!rig.bridge.lwm().is_armed());
+}
+
+/// Review r3 minor 1: parked on a charger (13.6 V, engine off), arming works.
+#[test]
+fn r3_arming_on_a_charger_works() {
+    let mut rig = Rig::new(parked_sirius(), bmt_ecu(bmt_scenario(true)));
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(13_600);
+    rig.run_for(5_000);
+    let (id, code) = challenge(&rig.call(OWNER, Op::LwmArm, 15_000));
+    let (id2, code2) = challenge(&rig.call(
+        OWNER,
+        Op::Confirm {
+            challenge: id,
+            code,
+        },
+        10_000,
+    ));
+    let r = rig.call(
+        OWNER,
+        Op::Confirm {
+            challenge: id2,
+            code: code2,
+        },
+        10_000,
+    );
+    assert_eq!(r.result, ResultCode::Ok, "{r:?}");
+    assert!(rig.bridge.lwm().is_armed());
 }

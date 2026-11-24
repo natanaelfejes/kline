@@ -339,6 +339,9 @@ pub mod status_flags {
     pub const DOOR_REAR_OPEN: u8 = 0x20;
     /// Battery below the write limit (12.0 V, MASTER-PLAN-v2 P6): no Tier 1 and no LOCK/UNLOCK.
     pub const LOW_BATTERY: u8 = 0x40;
+    /// Lock-when-moving gave up an unlock (the doors may still be locked) and disarmed itself;
+    /// cleared when the owner arms again or a lock-state read shows the doors unlocked.
+    pub const LWM_GAVE_UP: u8 = 0x80;
 }
 
 /// Bridge status, 14 bytes.

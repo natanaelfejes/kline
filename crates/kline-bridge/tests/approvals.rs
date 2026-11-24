@@ -424,11 +424,17 @@ fn code_of(r: &Response) -> (u32, String) {
     (id, String::from_utf8(r.data[5..].to_vec()).unwrap())
 }
 
-/// Review M-1: prepared at a standstill, the car drives off while the bridge sits on the ABS
-/// (no fresh speed): CONFIRM is refused, nothing is written.
+/// Sirius parked: engine off, standing.
+fn parked_sirius() -> kline_sim::ecu::SpecEcu {
+    sirius_ecu(sirius_scenario().number("Engine speed", 0.0))
+}
+
+/// Review M-1: prepared parked (engine off), the engine starts and the car drives off while the
+/// bridge sits on the ABS (no fresh speed; the battery rises to a charging voltage): CONFIRM
+/// is refused, nothing is written.
 #[test]
 fn r2_abs_approval_confirmed_while_driving() {
-    let sirius = sirius_ecu(sirius_scenario())
+    let sirius = parked_sirius()
         .with_change_after(
             &[0x21, 0xA9],
             8_000,
@@ -444,10 +450,11 @@ fn r2_abs_approval_confirmed_while_driving() {
     let car = Car::with_others(sirius, bmt_ecu(bmt_scenario(true)), vec![abs_ecu()]);
     let mut rig = Rig::from_car(car, Default::default());
     rig.connect(OWNER, Role::Owner);
-    rig.battery(14_100);
+    rig.battery(12_600);
     rig.send(OWNER, Op::StartLive(kline_bridge::profile::Profile::Drive));
     rig.run_for(5_000);
     let (id, code) = code_of(&rig.call(OWNER, prepare_abs_clear(), 30_000));
+    rig.battery(14_100);
     rig.run_for(6_000);
     let r = rig.call(
         OWNER,
@@ -458,6 +465,167 @@ fn r2_abs_approval_confirmed_while_driving() {
         30_000,
     );
     assert_eq!(r.result, ResultCode::VehicleMoving);
+    rig.car.other_journals[0].assert_no_writes();
+}
+
+/// Review r3 minor 1: with the engine idling at a standstill, a non-Sirius request is refused
+/// at PREPARE already (its CONFIRM, on the other ECU without a speed, could never pass).
+#[test]
+fn r3_engine_idling_refuses_other_ecus_at_prepare() {
+    let car = Car::with_others(
+        sirius_ecu(sirius_scenario()),
+        bmt_ecu(bmt_scenario(true)),
+        vec![abs_ecu()],
+    );
+    let mut rig = Rig::from_car(car, Default::default());
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(12_600);
+    rig.send(OWNER, Op::StartLive(kline_bridge::profile::Profile::Drive));
+    rig.run_for(5_000);
+    // Refused at once, on the command: the bridge never leaves the Sirius for it.
+    let c = rig.send(OWNER, prepare_abs_clear());
+    assert!(rig.run_until_pred(30_000, |r| !r.car.responses_for(OWNER, c).is_empty()));
+    let r = rig.car.responses_for(OWNER, c);
+    assert_eq!(
+        r[0].result,
+        ResultCode::VehicleMoving,
+        "not queued first: {r:?}"
+    );
+    rig.car.other_journals[0].assert_no_writes();
+}
+
+/// Review r3 minor 1: parked, engine off, a battery charger holds 13.6 V. A fresh Sirius sample
+/// shows 0 rpm and 0 km/h, so BMT and ABS work goes through (prepare and confirm).
+#[test]
+fn r3_charger_does_not_block_parked_work() {
+    let car = Car::with_others(
+        parked_sirius(),
+        bmt_ecu(bmt_scenario(true)),
+        vec![abs_ecu()],
+    );
+    let mut rig = Rig::from_car(car, Default::default());
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(13_600);
+    rig.run_for(5_000);
+    let (id, code) = code_of(&rig.call(
+        OWNER,
+        Op::Prepare {
+            ecu: EcuId::Bmt,
+            payload: vec![0x31, 0xA0, 0x00, 0x01],
+        },
+        15_000,
+    ));
+    rig.run_for(10_000);
+    let r = rig.call(
+        OWNER,
+        Op::Confirm {
+            challenge: id,
+            code,
+        },
+        15_000,
+    );
+    assert_eq!(r.result, ResultCode::Ok, "{r:?}");
+    rig.run_for(5_000);
+    let (id, code) = code_of(&rig.call(OWNER, prepare_abs_clear(), 30_000));
+    rig.run_for(10_000);
+    let r = rig.call(
+        OWNER,
+        Op::Confirm {
+            challenge: id,
+            code,
+        },
+        30_000,
+    );
+    assert_eq!(r.result, ResultCode::Ok, "{r:?}");
+    assert_eq!(rig.car.bmt_journal.writes().len(), 1);
+    assert_eq!(rig.car.other_journals[0].writes().len(), 1);
+}
+
+/// Review r3 minor 1: on a charger, a start's voltage dip after the engine-off sample voids it:
+/// CONFIRM is refused.
+#[test]
+fn r3_a_start_dip_voids_the_engine_off_sample() {
+    let car = Car::with_others(
+        parked_sirius(),
+        bmt_ecu(bmt_scenario(true)),
+        vec![abs_ecu()],
+    );
+    let mut rig = Rig::from_car(car, Default::default());
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(13_600);
+    rig.run_for(5_000);
+    let (id, code) = code_of(&rig.call(OWNER, prepare_abs_clear(), 30_000));
+    rig.run_for(3_000);
+    rig.battery(10_400);
+    rig.run_for(200);
+    rig.battery(13_600);
+    rig.run_for(3_000);
+    let r = rig.call(
+        OWNER,
+        Op::Confirm {
+            challenge: id,
+            code,
+        },
+        30_000,
+    );
+    assert_eq!(r.result, ResultCode::VehicleMoving);
+    rig.car.other_journals[0].assert_no_writes();
+}
+
+/// Review r3 minor 1: no fresh speed (the parked profile polls the BMT) and a charger's
+/// voltage: the PREPARE first reads `21 A9` from the Sirius, sees 0 rpm and 0 km/h, and goes on.
+#[test]
+fn r3_a_stale_speed_is_sampled_before_the_prepare() {
+    let car = Car::with_others(
+        parked_sirius(),
+        bmt_ecu(bmt_scenario(true)),
+        vec![abs_ecu()],
+    );
+    let mut rig = Rig::from_car(car, Default::default());
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(13_600);
+    rig.send(OWNER, Op::StartLive(kline_bridge::profile::Profile::Parked));
+    rig.run_for(8_000);
+    let a9 = |rig: &Rig| {
+        rig.car
+            .written_payloads()
+            .iter()
+            .filter(|(t, p)| *t == EcuId::Sirius.address() && p[..] == [0x21, 0xA9])
+            .count()
+    };
+    assert_eq!(a9(&rig), 0, "the parked profile does not poll the Sirius");
+    let (id, code) = code_of(&rig.call(OWNER, prepare_abs_clear(), 30_000));
+    assert!(a9(&rig) > 0, "sampled");
+    let r = rig.call(
+        OWNER,
+        Op::Confirm {
+            challenge: id,
+            code,
+        },
+        30_000,
+    );
+    assert_eq!(r.result, ResultCode::Ok, "{r:?}");
+}
+
+/// Review r3 minor 4 (mutant challenge_ttl_ms -> silence_ms): the engine was running 15 s ago
+/// at 12.6 V (no charging voltage) and the Sirius stopped answering: no ABS non-read.
+#[test]
+fn r3_a_running_engine_is_remembered_for_the_challenge_lifetime() {
+    let sirius = sirius_ecu(sirius_scenario()).with_fault(
+        kline_sim::ecu::FaultRule::on(&[0x21], kline_sim::ecu::ReplyFault::NoReply).after(30),
+    );
+    let car = Car::with_others(sirius, bmt_ecu(bmt_scenario(true)), vec![abs_ecu()]);
+    let mut rig = Rig::from_car(car, Default::default());
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(12_600);
+    rig.send(OWNER, Op::StartLive(kline_bridge::profile::Profile::Drive));
+    rig.run_for(20_000);
+    rig.send(OWNER, Op::StopLive);
+    rig.run_for(2_000);
+    assert_eq!(
+        rig.call(OWNER, prepare_abs_clear(), 60_000).result,
+        ResultCode::VehicleMoving
+    );
     rig.car.other_journals[0].assert_no_writes();
 }
 
@@ -528,4 +696,30 @@ fn a_challenge_dies_with_its_session() {
     assert_eq!(r.result, ResultCode::SessionLost);
     rig.run_for(3_000);
     rig.car.sirius_journal.assert_no_writes();
+}
+
+/// Review r3 minor 1: the motion rule is checked again when the PREPARE job runs on the ECU:
+/// the engine starts (charging voltage) while the bridge initialises the ABS.
+#[test]
+fn r3_prepare_rechecks_motion_when_its_job_runs() {
+    let car = Car::with_others(
+        parked_sirius(),
+        bmt_ecu(bmt_scenario(true)),
+        vec![abs_ecu()],
+    );
+    let mut rig = Rig::from_car(car, Default::default());
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(12_600);
+    rig.send(OWNER, Op::StartLive(kline_bridge::profile::Profile::Drive));
+    rig.run_for(5_000);
+    let c = rig.send(OWNER, prepare_abs_clear());
+    rig.run_for(50);
+    rig.battery(14_100);
+    assert!(rig.run_until_pred(30_000, |r| r
+        .car
+        .responses_for(OWNER, c)
+        .iter()
+        .any(|x| x.result != ResultCode::Accepted)));
+    let r = rig.car.responses_for(OWNER, c).pop().unwrap();
+    assert_eq!(r.result, ResultCode::VehicleMoving, "{r:?}");
 }

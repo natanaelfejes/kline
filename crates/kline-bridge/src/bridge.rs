@@ -50,6 +50,9 @@ pub const BMT_UNLOCK: [u8; 4] = [0x31, 0xA1, 0x00, 0x01];
 const CRITICAL_BATTERY_MV: u16 = 11_800;
 /// BMT lock-state read (`21 A3`, DCODCOND in data byte 0 bit 7).
 const BMT_LOCK_READ: [u8; 2] = [0x21, 0xA3];
+/// Sirius speed and rpm (`21 A9`, the drive profile's frame), read before a PREPARE.
+#[cfg(feature = "approvals")]
+const SIRIUS_SAMPLE: [u8; 2] = [0x21, 0xA9];
 
 /// Tunables. Defaults cite their source.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,6 +220,9 @@ enum JobKind {
         purpose: Purpose,
         /// Tier 2: the `21 80` reply the app chose its definition from.
         identification: Vec<u8>,
+        /// Read `21 A9` from the Sirius first: nothing recent shows that the car stands with
+        /// the engine off (review r3 minor 1).
+        sample: bool,
     },
     #[cfg(feature = "approvals")]
     Confirm {
@@ -231,6 +237,9 @@ enum JobKind {
     },
     #[cfg(feature = "standing-lock")]
     Standing(Intent),
+    /// Read the BMT lock state once (after LWM_DISARM with an unlock owed): a positive read
+    /// showing the doors unlocked ends the duty (review B-3).
+    LockCheck,
 }
 
 #[derive(Debug)]
@@ -331,6 +340,10 @@ pub struct Bridge {
     /// The lock risk confirmed in the first step of an arming, until the second step.
     #[cfg(feature = "standing-lock")]
     arming_lock: Option<kline_core::safety::RiskInfo>,
+    /// The challenge dropped because the car may have started moving while lock-when-moving is
+    /// armed (review r3 minor 2): its CONFIRM is answered `LwmActive`.
+    #[cfg(feature = "standing-lock")]
+    lwm_cancelled: Option<u32>,
     /// Counts the sessions; a challenge belongs to the session it was made on.
     session_gen: u32,
     lwm: LockWhenMoving,
@@ -340,6 +353,12 @@ pub struct Bridge {
     last_engine_sample: Option<(u64, u16)>,
     /// Latest Sirius speed and when it was read.
     last_speed: Option<(u64, u8)>,
+    /// The latest Sirius `21 A9` showing 0 km/h and 0 rpm, and whether the battery read as
+    /// charging then (review r3 minor 1: engine off, whatever a charger does to the voltage).
+    engine_off_at: Option<(u64, bool)>,
+    /// The latest battery reading below the write limit (a start pulls the battery far below
+    /// it): an engine-off proof older than this no longer counts.
+    last_dip_ms: Option<u64>,
     /// Since when the battery reads below the write limit / the critical limit.
     low_since: Option<u64>,
     critical_since: Option<u64>,
@@ -393,12 +412,16 @@ impl Bridge {
             standing: None,
             #[cfg(feature = "standing-lock")]
             arming_lock: None,
+            #[cfg(feature = "standing-lock")]
+            lwm_cancelled: None,
             session_gen: 0,
             last_lwm_tick: now_ms,
             live: LiveSample::default(),
             parked: Parked::default(),
             last_engine_sample: None,
             last_speed: None,
+            engine_off_at: None,
+            last_dip_ms: None,
             low_since: None,
             critical_since: None,
             unclean_end: None,
@@ -494,6 +517,9 @@ impl Bridge {
         if self.lwm.locked_by_us() {
             flags |= status_flags::LWM_LOCKED;
         }
+        if self.lwm.gave_up() {
+            flags |= status_flags::LWM_GAVE_UP;
+        }
         if self.engine_running(self.now_ms) {
             flags |= status_flags::ENGINE_RUNNING;
         }
@@ -549,6 +575,7 @@ impl Bridge {
         self.battery_mv = Some(mv);
         if mv < self.cfg.low_battery_mv {
             self.low_since.get_or_insert(now_ms);
+            self.last_dip_ms = Some(now_ms);
         } else {
             self.low_since = None;
         }
@@ -676,6 +703,16 @@ impl Bridge {
                 } else {
                     self.lwm.disarm();
                     self.drop_standing_if_done();
+                    // An unlock still owed: read the lock state once; if the doors are unlocked
+                    // the duty ends (review B-3). Answered Ok at once.
+                    if self.lwm.locked_by_us() && !self.yielded {
+                        self.jobs.push_back(Job {
+                            client: None,
+                            counter: 0,
+                            kind: JobKind::LockCheck,
+                            since_ms: now_ms,
+                        });
+                    }
                     Ok(())
                 }
             }
@@ -740,9 +777,7 @@ impl Bridge {
             (Tier::ConfigWrite, Some(_)) | (_, None) => {}
             (_, Some(_)) => return Err(ResultCode::BadFrame),
         }
-        if self.moving_for(ecu, self.now_ms) {
-            return Err(ResultCode::VehicleMoving);
-        }
+        let sample = self.motion_check(ecu)?;
         if self.pending_live() {
             return Err(ResultCode::Busy);
         }
@@ -754,6 +789,7 @@ impl Bridge {
                 payload,
                 purpose: Purpose::Send,
                 identification: identification.unwrap_or_default(),
+                sample,
             },
         )
     }
@@ -782,6 +818,11 @@ impl Bridge {
     ) -> Result<(), ResultCode> {
         if role != Role::Owner {
             return Err(ResultCode::NotAllowedForRole);
+        }
+        #[cfg(feature = "standing-lock")]
+        if self.lwm_cancelled == Some(challenge) {
+            self.lwm_cancelled = None;
+            return Err(ResultCode::LwmActive);
         }
         match &self.pending {
             Some(p) if p.client == client && p.id == challenge && self.now_ms < p.expires_ms => {}
@@ -820,9 +861,9 @@ impl Bridge {
         if self.lwm.is_armed() || self.lwm.locked_by_us() || self.lwm_holds_sirius(self.now_ms) {
             return Err(ResultCode::LwmActive);
         }
-        if self.moving_for(EcuId::Bmt, self.now_ms) {
-            return Err(ResultCode::VehicleMoving);
-        }
+        // Parked, engine off (SAFETY.md rule 2, review r3 minor 5): the same rule as any BMT
+        // write, so an idling engine at a standstill is refused too.
+        let sample = self.motion_check(EcuId::Bmt)?;
         if !self.battery_ok() {
             return Err(ResultCode::LowBattery);
         }
@@ -837,6 +878,7 @@ impl Bridge {
                 payload: BMT_LOCK.to_vec(),
                 purpose: Purpose::ArmLock,
                 identification: Vec::new(),
+                sample,
             },
         )
     }
@@ -847,6 +889,18 @@ impl Bridge {
             return Err(ResultCode::NotAllowedForRole);
         }
         Err(ResultCode::Unsupported)
+    }
+
+    /// At PREPARE: refuse when fresh Sirius data already shows the request may not run;
+    /// otherwise whether the job must first read a fresh Sirius sample.
+    #[cfg(feature = "approvals")]
+    fn motion_check(&self, ecu: EcuId) -> Result<bool, ResultCode> {
+        let moving = self.moving_for(ecu, self.now_ms);
+        match self.fresh_speed(self.now_ms) {
+            Some(_) if moving => Err(ResultCode::VehicleMoving),
+            Some(_) => Ok(false),
+            None => Ok(moving),
+        }
     }
 
     #[cfg(feature = "approvals")]
@@ -1058,6 +1112,18 @@ impl Bridge {
         #[cfg(feature = "approvals")]
         if self.pending.as_ref().is_some_and(|p| now >= p.expires_ms) {
             self.pending = None;
+        }
+        // Armed, and a challenge for another ECU keeps the bridge off the Sirius while the car
+        // may have started (charging voltage, a start's voltage dip): drop it so lock-when-moving
+        // gets the Sirius back (review r3 minor 2). Its CONFIRM would be refused anyway.
+        #[cfg(feature = "standing-lock")]
+        if self.lwm.is_armed() {
+            if let Some(p) = &self.pending {
+                if p.ecu != EcuId::Sirius && self.moving_for(p.ecu, now) {
+                    self.lwm_cancelled = Some(p.id);
+                    self.pending = None;
+                }
+            }
         }
         // Expired jobs (not the one whose exchange is running).
         let busy = matches!(self.link, Link::Busy { op: Exch::Job, .. }) || self.awaiting;
@@ -1329,6 +1395,14 @@ impl Bridge {
                 }
             }
             #[cfg(feature = "approvals")]
+            JobKind::Prepare { sample: true, .. } => match s.request(&SIRIUS_SAMPLE, now) {
+                Ok(a) => JobStart::Exchange(a),
+                Err(_) => {
+                    self.finish_job(ResultCode::VehicleMoving, Vec::new());
+                    JobStart::Nothing
+                }
+            },
+            #[cfg(feature = "approvals")]
             JobKind::Prepare {
                 payload,
                 purpose,
@@ -1367,9 +1441,6 @@ impl Bridge {
                             LockState::Unlocked
                         };
                         if seen == Some(target) {
-                            if !lock {
-                                self.lwm.on_manual_unlock();
-                            }
                             self.finish_job(ResultCode::Ok, Vec::new());
                             return JobStart::Nothing;
                         }
@@ -1392,6 +1463,13 @@ impl Bridge {
                 let intent = *intent;
                 self.standing_send(s, intent, now)
             }
+            JobKind::LockCheck => match s.request(&BMT_LOCK_READ, now) {
+                Ok(a) => JobStart::Exchange(a),
+                Err(_) => {
+                    self.finish_job(ResultCode::LinkError, Vec::new());
+                    JobStart::Nothing
+                }
+            },
         }
     }
 
@@ -1408,9 +1486,12 @@ impl Bridge {
             return;
         };
         let (client, counter) = (job.client, job.counter);
-        // Battery and tier again, now: the command may have waited in the queue.
+        // Battery, motion and tier again, now: the command may have waited in the queue.
         if !self.battery_ok() {
             return self.finish_job(ResultCode::LowBattery, Vec::new());
+        }
+        if self.moving_for(ecu, self.now_ms) {
+            return self.finish_job(ResultCode::VehicleMoving, Vec::new());
         }
         // The tier on the session's real target (key bytes of the init that ran).
         let made = match kline_core::safety::tier_of_in(s.definition_guard(), &s.target(), &payload)
@@ -1455,6 +1536,11 @@ impl Bridge {
         use kline_core::safety::Approval;
         // The pending challenge is consumed whatever happens (one try per code).
         let Some(p) = self.pending.take() else {
+            #[cfg(feature = "standing-lock")]
+            if self.lwm_cancelled.take() == Some(challenge) {
+                self.finish_job(ResultCode::LwmActive, Vec::new());
+                return JobStart::Nothing;
+            }
             self.finish_job(ResultCode::ApprovalMismatch, Vec::new());
             return JobStart::Nothing;
         };
@@ -1648,6 +1734,11 @@ impl Bridge {
         match &job.kind {
             // Keep reading until the verify deadline / job timeout.
             JobKind::Fob { .. } => {}
+            // No Sirius sample: nothing shows the car stands with the engine off.
+            #[cfg(feature = "approvals")]
+            JobKind::Prepare { sample: true, .. } => {
+                self.finish_job(ResultCode::VehicleMoving, Vec::new())
+            }
             _ => self.job_finished_with(ResultCode::LinkError),
         }
     }
@@ -1655,6 +1746,22 @@ impl Bridge {
     fn job_reply(&mut self, ecu: EcuId, reply: Reply) {
         if let Reply::Positive(p) = &reply {
             self.positive(ecu, p);
+        }
+        #[cfg(feature = "approvals")]
+        if let Some(Job {
+            kind: JobKind::Prepare { ecu, sample, .. },
+            ..
+        }) = self.jobs.front_mut()
+        {
+            if *sample {
+                // The sample (if positive) was recorded above; decide with it.
+                *sample = false;
+                let ecu = *ecu;
+                if self.moving_for(ecu, self.now_ms) {
+                    self.finish_job(ResultCode::VehicleMoving, Vec::new());
+                }
+                return;
+            }
         }
         let Some(job) = self.jobs.front_mut() else {
             return;
@@ -1747,6 +1854,14 @@ impl Bridge {
             self.lwm.intent_done(self.now_ms, i, Outcome::NotExecuted);
             return;
         }
+        // A Sirius sample that never came: the car may move (yield and battery keep theirs).
+        #[cfg(feature = "approvals")]
+        let code = match (&job.kind, code) {
+            (JobKind::Prepare { sample: true, .. }, ResultCode::LinkError) => {
+                ResultCode::VehicleMoving
+            }
+            _ => code,
+        };
         self.last_error = code as u8;
         if let Some(c) = job.client {
             self.respond(Some(c), job.counter, code, Vec::new());
@@ -1781,6 +1896,9 @@ impl Bridge {
                     self.live.fuel_mlh = v.fuel_mlh;
                     self.live.flags |= live_flags::AA_VALID;
                     self.last_engine_sample = Some((now, v.rpm));
+                    if v.rpm > 0 {
+                        self.engine_off_at = None;
+                    }
                     changed = true;
                 }
                 if let Some(v) = live::sirius_a9(p) {
@@ -1793,6 +1911,11 @@ impl Bridge {
                     self.live.flags |= live_flags::A9_VALID;
                     self.last_engine_sample = Some((now, v.rpm));
                     self.last_speed = Some((now, v.speed_kmh));
+                    self.engine_off_at = if v.rpm == 0 && v.speed_kmh == 0 {
+                        Some((now, self.charging()))
+                    } else {
+                        None
+                    };
                     changed = true;
                     if let Some(intent) = self.lwm.on_sample(now, v.speed_kmh, v.rpm) {
                         self.lwm_intent(intent);
@@ -1826,6 +1949,11 @@ impl Bridge {
                 Some(BmtFrame::Lock(l)) => {
                     self.parked.lock = l;
                     self.parked.lock_at_ms = Some(now);
+                    // The doors are unlocked now: nothing is owed (review B-3).
+                    if l == LockState::Unlocked {
+                        self.lwm.on_verified_unlocked();
+                        self.drop_standing_if_done();
+                    }
                 }
                 Some(BmtFrame::Doors {
                     front_open,
@@ -1902,21 +2030,38 @@ impl Bridge {
         }
     }
 
-    /// A non-read to `ecu` is refused now (review M-1): a fresh (2 s) Sirius speed above 0, or
-    /// no fresh speed while the engine may be running, for every ECU. "May be running": a
-    /// charging voltage, or an rpm above 0 in a Sirius frame of the last `challenge_ttl_ms`
-    /// (so a sample from before a PREPARE still counts at its CONFIRM, while the bridge sits on
-    /// another ECU and sees no speed).
+    /// A non-read to `ecu` is refused now (reviews M-1 and r3). A fresh (2 s) Sirius speed
+    /// above 0 refuses. A fresh standstill is enough on the Sirius itself (its CONFIRM runs on
+    /// the Sirius). Otherwise, and always for the other ECUs (their CONFIRM runs on their own
+    /// session, without a speed), the engine must be known off: see [`Bridge::engine_off_known`].
     #[cfg_attr(not(feature = "approvals"), allow(dead_code))]
-    fn moving_for(&self, _ecu: EcuId, now: u64) -> bool {
-        let fresh_speed = self
-            .last_speed
-            .filter(|(t, _)| now.saturating_sub(*t) <= self.cfg.speed_fresh_ms)
-            .map(|(_, v)| v);
-        match fresh_speed {
-            Some(v) => v > 0,
-            None => self.engine_may_run(now),
+    fn moving_for(&self, ecu: EcuId, now: u64) -> bool {
+        match self.fresh_speed(now) {
+            Some(v) if v > 0 => true,
+            Some(_) if ecu == EcuId::Sirius => false,
+            _ => !self.engine_off_known(now),
         }
+    }
+
+    #[cfg_attr(not(feature = "approvals"), allow(dead_code))]
+    fn fresh_speed(&self, now: u64) -> Option<u8> {
+        self.last_speed
+            .filter(|(t, _)| now.saturating_sub(*t) <= self.cfg.speed_fresh_ms)
+            .map(|(_, v)| v)
+    }
+
+    /// The engine is off as far as the bridge can tell: a Sirius `21 A9` showed 0 km/h and
+    /// 0 rpm within the challenge lifetime and nothing since says the engine started (no
+    /// battery dip below the write limit, no rise to a charging voltage), whatever a charger
+    /// holds the voltage at; or there is no sign at all that it runs.
+    #[cfg_attr(not(feature = "approvals"), allow(dead_code))]
+    fn engine_off_known(&self, now: u64) -> bool {
+        let proof = self.engine_off_at.is_some_and(|(t, charging_then)| {
+            now.saturating_sub(t) <= self.cfg.challenge_ttl_ms
+                && self.last_dip_ms.is_none_or(|d| d < t)
+                && (charging_then || !self.charging())
+        });
+        proof || !self.engine_may_run(now)
     }
 
     /// Charging voltage, or rpm above 0 seen within the challenge lifetime.
@@ -2076,10 +2221,12 @@ fn job_ecu_of(k: &JobKind) -> Option<EcuId> {
     match k {
         JobKind::Request { ecu, .. } => Some(*ecu),
         #[cfg(feature = "approvals")]
+        JobKind::Prepare { sample: true, .. } => Some(EcuId::Sirius),
+        #[cfg(feature = "approvals")]
         JobKind::Prepare { ecu, .. } => Some(*ecu),
         #[cfg(feature = "approvals")]
         JobKind::Confirm { .. } => None,
-        JobKind::Fob { .. } => Some(EcuId::Bmt),
+        JobKind::Fob { .. } | JobKind::LockCheck => Some(EcuId::Bmt),
         #[cfg(feature = "standing-lock")]
         JobKind::Standing(_) => Some(EcuId::Bmt),
     }

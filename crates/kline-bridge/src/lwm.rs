@@ -21,7 +21,13 @@
 //!   owner disarms in the meantime (the unlock is the accident mitigation of 3.1 rule 2).
 //! - ours: a lock that was refused before or by the ECU is not retried; a lock that may have
 //!   been executed (reply lost after the write) keeps the unlock duty. A failed unlock is retried
-//!   after the pause, at most [`LwmConfig::unlock_attempts`] times.
+//!   after the pause, at most [`LwmConfig::unlock_attempts`] times; every lock starts with the
+//!   full number of attempts (review B-3).
+//! - ours: when the unlock attempts are used up the automaton gives up: it drops the duty,
+//!   disarms itself and reports it ([`LockWhenMoving::gave_up`]) until the owner arms again or a
+//!   lock-state read shows the doors unlocked. No lock follows a give-up without the owner.
+//! - ours: a positive BMT lock-state read showing the doors unlocked
+//!   ([`LockWhenMoving::on_verified_unlocked`]) ends the unlock duty, so nothing stays stuck.
 
 /// Parameters, defaults from MASTER-PLAN-v2 3.1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +99,9 @@ pub struct LockWhenMoving {
     last_intent_ms: Option<u64>,
     in_flight: Option<Intent>,
     unlock_failures: u8,
+    /// The unlock attempts were used up; cleared by [`LockWhenMoving::arm`] or
+    /// [`LockWhenMoving::on_verified_unlocked`].
+    gave_up: bool,
 }
 
 impl LockWhenMoving {
@@ -110,6 +119,7 @@ impl LockWhenMoving {
             last_intent_ms: None,
             in_flight: None,
             unlock_failures: 0,
+            gave_up: false,
         }
     }
 
@@ -126,8 +136,18 @@ impl LockWhenMoving {
         self.locked_by_us
     }
 
+    /// The owner armed it (two codes): this is also his acknowledgement of a give-up.
     pub fn arm(&mut self) {
         self.armed = true;
+        self.gave_up = false;
+        // A new arming may lock on the next drive-off, also after a give-up or a refused lock.
+        self.relock_allowed = true;
+    }
+
+    /// The last unlock duty ended by giving up (the doors may still be locked); the automaton
+    /// disarmed itself.
+    pub fn gave_up(&self) -> bool {
+        self.gave_up
     }
 
     /// No new locks. A pending unlock obligation stays (module rules).
@@ -136,9 +156,17 @@ impl LockWhenMoving {
         self.moving_since = None;
     }
 
-    /// The owner unlocked by hand (app UNLOCK): a new drive-off may lock again.
-    pub fn on_manual_unlock(&mut self) {
+    /// A positive BMT lock-state read (`21 A3`) shows the doors unlocked: whatever was owed is
+    /// done (the owner unlocked by the app or by hand), and a new drive-off may lock again. Not
+    /// while a lock is being sent (it may land after the read).
+    pub fn on_verified_unlocked(&mut self) {
+        if self.in_flight == Some(Intent::Lock) {
+            return;
+        }
+        self.locked_by_us = false;
         self.relock_allowed = true;
+        self.unlock_failures = 0;
+        self.gave_up = false;
     }
 
     /// A decoded Sirius sample at `now_ms`. Locks are decided here only, on fresh evidence.
@@ -216,6 +244,8 @@ impl LockWhenMoving {
         if intent == Intent::Lock {
             self.locked_by_us = true;
             self.relock_allowed = false;
+            // This lock's unlock gets all its attempts (review B-3).
+            self.unlock_failures = 0;
         }
         Some(intent)
     }
@@ -240,8 +270,12 @@ impl LockWhenMoving {
             (Intent::Unlock, Outcome::NotExecuted | Outcome::MaybeExecuted) => {
                 self.unlock_failures = self.unlock_failures.saturating_add(1);
                 if self.unlock_failures >= self.cfg.unlock_attempts {
-                    // Give up; report it, do not keep trying forever.
+                    // Give up; do not keep trying forever. No new lock until the owner arms
+                    // again (review B-3); reported through `gave_up`.
                     self.locked_by_us = false;
+                    self.armed = false;
+                    self.moving_since = None;
+                    self.gave_up = true;
                 } else {
                     // Retry on the next tick after the pause, whatever the Sirius does.
                     self.sirius_gone = true;
@@ -250,7 +284,7 @@ impl LockWhenMoving {
         }
     }
 
-    /// Unlock attempts that failed since the last good one.
+    /// Unlock attempts that failed for the current (or last) lock.
     pub fn unlock_failures(&self) -> u8 {
         self.unlock_failures
     }
@@ -369,7 +403,7 @@ mod tests {
     fn manual_unlock_allows_relock_on_next_drive_off() {
         let mut l = armed();
         assert_eq!(drive(&mut l, 0, 5_000, 30, 1500).len(), 1);
-        l.on_manual_unlock();
+        l.on_verified_unlocked();
         assert!(drive(&mut l, 5_000, 8_000, 0, 800).is_empty());
         let v = drive(&mut l, 8_000, 15_000, 30, 1500);
         assert_eq!(v, vec![(11_000, Intent::Lock)]);
@@ -467,6 +501,99 @@ mod tests {
         }
         assert_eq!(n, 3);
         assert!(!l.locked_by_us());
+    }
+
+    /// Lock, then an engine stop where every unlock fails: the automaton gives up.
+    fn lock_then_give_up(l: &mut LockWhenMoving) -> u64 {
+        assert_eq!(drive(l, 0, 5_000, 30, 1500).len(), 1);
+        let mut t = 10_000;
+        let mut n = 0;
+        while t < 60_000 {
+            if let Some(i) = l.on_sample(t, 0, 0) {
+                assert_eq!(i, Intent::Unlock);
+                l.intent_done(t + 300, i, Outcome::NotExecuted);
+                n += 1;
+            }
+            t += 100;
+        }
+        assert_eq!(n, 3);
+        t
+    }
+
+    /// Review B-3 (reviewer's break test): after one give-up, a later lock still gets its
+    /// unlock.
+    #[test]
+    fn r3_unlock_after_give_up_then_new_drive() {
+        let mut l = armed();
+        let mut t = lock_then_give_up(&mut l);
+        assert!(!l.locked_by_us());
+        l.disarm();
+        l.arm();
+        while t < 200_000 {
+            let _ = l.on_sample(t, 0, 0);
+            t += 100;
+        }
+        assert_eq!(drive(&mut l, t, t + 20_000, 40, 2000).len(), 1, "locks");
+        let t = t + 20_000;
+        let v = drive(&mut l, t, t + 30_000, 0, 0);
+        assert_eq!(
+            v.iter().map(|(_, i)| *i).collect::<Vec<_>>(),
+            vec![Intent::Unlock]
+        );
+        assert!(!l.locked_by_us());
+    }
+
+    /// Review B-3: a give-up disarms and is reported; no lock follows until the owner arms.
+    #[test]
+    fn a_give_up_disarms_until_the_owner_arms_again() {
+        let mut l = armed();
+        let t = lock_then_give_up(&mut l);
+        assert!(l.gave_up());
+        assert!(!l.is_armed());
+        assert!(drive(&mut l, t, t + 30_000, 50, 2000).is_empty());
+        l.arm();
+        assert!(!l.gave_up());
+        // The next drive-off locks, without a 60 s standstill first.
+        let t = t + 30_000;
+        assert!(drive(&mut l, t, t + 5_000, 0, 800).is_empty());
+        assert_eq!(drive(&mut l, t + 5_000, t + 15_000, 50, 2000).len(), 1);
+    }
+
+    /// Review B-3: a lock-state read showing the doors unlocked ends the duty and the give-up
+    /// report; not while a lock is in flight.
+    #[test]
+    fn a_verified_unlocked_read_ends_the_duty() {
+        let mut l = armed();
+        assert_eq!(drive(&mut l, 0, 5_000, 30, 1500).len(), 1);
+        assert!(l.locked_by_us());
+        // Engine idling at a standstill: the duty stays...
+        assert!(drive(&mut l, 5_000, 20_000, 0, 800).is_empty());
+        assert!(l.locked_by_us());
+        // ...until a read shows the doors unlocked.
+        l.on_verified_unlocked();
+        assert!(!l.locked_by_us());
+        assert!(
+            drive(&mut l, 20_000, 30_000, 0, 0).is_empty(),
+            "nothing owed"
+        );
+
+        let mut l = armed();
+        let _ = lock_then_give_up(&mut l);
+        l.on_verified_unlocked();
+        assert!(!l.gave_up());
+
+        let mut l = armed();
+        let mut t = 0;
+        while l.on_sample(t, 40, 2000).is_none() {
+            t += 100;
+        }
+        l.on_verified_unlocked();
+        assert!(
+            l.locked_by_us(),
+            "the lock in flight may land after the read"
+        );
+        l.intent_done(t + 300, Intent::Lock, Outcome::Done);
+        assert!(l.locked_by_us());
     }
 
     #[test]
