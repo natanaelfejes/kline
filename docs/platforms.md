@@ -21,9 +21,10 @@ where kline keeps its files.
 
 kline builds and its full test suite runs natively on all three (CI: `.github/workflows/ci.yml`,
 matrix `ubuntu-latest`, `macos-latest`, `windows-latest`). What differs is the cable driver, the
-port name, permissions, the FTDI latency timer, timing precision and where data lives. Nothing
-in this file has been verified with the real FTDI cable on a car; on Windows only the
-Parallels VM with the cable on the Mac's USB (no K-line power) was measured; see [Not verified](#not-verified).
+port name, permissions, the FTDI latency timer, timing precision and where data lives. The FTDI
+cable has been used on a car only from macOS (Apple silicon, built-in AppleUSBFTDI driver). On
+Windows only a Parallels VM with the cable on the Mac's USB (no K-line power) was measured; see
+[Not verified](#not-verified).
 
 ## Build
 
@@ -83,14 +84,14 @@ AppleUSBFTDI refuses it in `tcsetattr` with EINVAL (measured, FT232R, macOS 27; 
 earlier version hit exactly this). Windows has no such flag; whether the FTDI VCP driver delivers a looped-back break as a
 `00` byte is NOT VERIFIED (without it the 5-baud init warns, unless `--strict-loopback`).
 
-Stopping, and K on exit (final critique F05): `kline` and `kline-agent` handle Ctrl-C, SIGTERM
+Stopping, and K on exit: `kline` and `kline-agent` handle Ctrl-C, SIGTERM
 and SIGHUP alike (ctrlc `termination`): the first sets the stop flag, so `live`/`scan` send
 StopCommunication and close the capture, and an init schedule stops before its next attempt or
 retry round (exit 4, `init stopped by Ctrl-C before the next attempt`). A second one releases K
 on the open cable (break off, DTR high; the port is reachable from the signal thread behind a
 mutex, `transport::release_k_line_now`) and exits at once with 130. The release first marks
 the port released: from then on every port call of the main thread fails without touching the
-port, so it cannot assert break again before the exit (re-check R02). If the main thread is
+port, so it cannot assert break again before the exit. If the main thread is
 inside a port call (the lock is busy, e.g. a reply read), K is released at once through a
 second OS handle of the same port (`serialport` `try_clone`: a duplicated file descriptor or
 Windows handle; break-off and DTR are single ioctls the driver serializes), then once more
@@ -191,7 +192,7 @@ edge (code review L9; a unit test checks that a 3 ms drain does not shorten Tini
 
 During an init (`Link::init`) a guard checks the sleeps whose lateness corrupts the wake-up:
 the 5-baud start and data bits (+-10 ms, ISO 9141-2) and the fast-init TiniL and TWuP (2 ms
-late at most, `transport::FAST_INIT_GUARD_TOLERANCE_US`; final critique F12: ISO 14230-2 gives
+late at most, `transport::FAST_INIT_GUARD_TOLERANCE_US`; ISO 14230-2 gives
 the tester +-1 ms, but the guard sees only our thread's wake-up, the break request itself sits
 on the 1 ms USB frame grid the guard cannot see, and the rehearsal on the Mac aborted a fast
 init on a 1.03 ms late wake with nothing else wrong; so a pulse that passes can be up to 2 ms
@@ -201,7 +202,7 @@ keyword read after a complete address. A late pre-sleep is harmless because a fa
 restarts its pacing at the real falling edge (the time the break-on call starts): TiniL and
 TWuP are timed from there and keep their full 25 ms, and the lateness only lengthens the idle
 line. Before this fix TiniL was paced from the pre-sleep's deadline, so a pre-sleep 1.03 ms
-late gave a 23.97 ms TiniL that no guard saw (final critique F03; a unit test now injects
+late gave a 23.97 ms TiniL that no guard saw (a unit test now injects
 1.03, 3 and 5 ms and asserts TiniL and TWuP). When a guarded sleep wakes up too late:
 
 - in a 5-baud address the transport holds K low through the remaining bit slots and the
@@ -217,7 +218,7 @@ late gave a 23.97 ms TiniL that no guard saw (final critique F03; a unit test no
 
 The attempt fails with `init timing missed: a N ms wake-up sleep woke X us late (max Y us);
 attempt aborted, K line released`, and `connect` goes on with the next variant or round; a fast
-init aborted this way is first tried once more right away (final critique F12: the cause was our
+init aborted this way is first tried once more right away (the cause was our
 host, not the ECU, and the ECU saw no StartCommunication), traced as `INIT fast init aborted by
 the timing guard: trying it once more before the next variant`. The
 guard measures only our own sleep; how long the break call itself takes (USB, VM passthrough)
@@ -241,7 +242,7 @@ that does not pace its 5-baud edges from deadlines fails the init there (docs/si
 transport"). This is CI only; no real cable is attached to that runner.
 
 Break edges on the Windows VM (FT232R on the Mac's USB, attached to Parallels "Windows 11"
-ARM64 as COM1; 2026-11-22). `kline selftest` (40 edges, 10 ms half-period; before re-check R06, when the TiniL verdict used
+ARM64 as COM1; 2026-11-22). `kline selftest` (40 edges, 10 ms half-period; before the TiniL verdict changed, when it used
 the edge deviation, which included the break ioctl and a whole-ms rounding of the sleeps; it now
 uses the pulse length) gave max deviation
 0.55-5.74 ms over 8 runs (one outlier 63.7 ms with a 47 ms `set_break`), so TiniL (+-1 ms) is
@@ -289,8 +290,9 @@ sent (NOT VERIFIED on Windows).
 
 ## Not verified
 
-- Anything with the real FTDI cable on a car (powered K line), on any OS: looped-back break as
-  a `00` byte (Windows VCP), echo RTT, DTR behaviour, 10400 baud accuracy, latency timer effect.
+- The FTDI cable on a car from Linux or Windows: looped-back break as a `00` byte (Windows
+  VCP), echo RTT, DTR behaviour, latency timer effect. On macOS the car session showed the break
+  loopback, a 12 to 16 ms echo round trip and working 5-baud inits at 10400 baud.
 - The real FTDI cable on Linux, and on bare-metal Windows (Windows numbers above are from the
   Parallels VM only); whether the write stall also happens without a VM.
 - `--set-latency` against a real `ftdi_sio` sysfs file (tested against a fake sysfs tree).

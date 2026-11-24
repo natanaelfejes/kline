@@ -2,8 +2,7 @@
 
 The bridge sits behind the dashboard on the OBD socket (through a Y-splitter, so the KKL cable
 still fits), talks K line to the Sirius and the BMT, and Bluetooth LE to the phone and the Mac.
-This page is the wiring: pinout, schematic, parts (checked against the MASTER-PLAN-v2 shopping
-list), power budget, the bench test and the car bring-up checklist. The protocol is in
+This page is the wiring: pinout, schematic, parts, power budget, the bench test and the car bring-up checklist. The protocol is in
 [bridge-protocol.md](bridge-protocol.md); the firmware skeleton is `firmware/esp32c3/`.
 
 **Nothing on this page has been built or measured yet.** Values marked *estimate* are from
@@ -47,14 +46,14 @@ therefore never used for an output that moves anything.
 
 | GPIO | Name | Direction | Connects to | Why this pin |
 |---|---|---|---|---|
-| 0 | XTAL_32K_P | analog | 32.768 kHz crystal + 18 pF C0G to GND | the C3's only 32 kHz crystal pins; needed for BLE light sleep in the uA range (PLAN-RESEARCH B1) |
+| 0 | XTAL_32K_P | analog | 32.768 kHz crystal + 18 pF C0G to GND | the C3's only 32 kHz crystal pins; needed for BLE light sleep in the uA range |
 | 1 | XTAL_32K_N | analog | crystal + 18 pF C0G to GND | same |
 | 2 | (strapping) | | not connected | boot mode strap |
-| 3 | VBAT | ADC1_CH3 in | divider 1 MOhm (rail) / 180 kOhm (GND), 100 nF at the pin | ADC1 channel; 15 V -> 2.29 V (PLAN-RESEARCH B5). ADC1 is shared with the TRNG entropy source used for approval codes; the firmware takes it per use |
+| 3 | VBAT | ADC1_CH3 in | divider 1 MOhm (rail) / 180 kOhm (GND), 100 nF at the pin | ADC1 channel; 15 V -> 2.29 V. ADC1 is shared with the TRNG entropy source used for approval codes; the firmware takes it per use |
 | 4 | K_RX | UART1 RX in | L9637D RX (pin 1) | free, not strapping; RX of L9637D has its own pull-up to VCC |
 | 5 | K_TX | UART1 TX out; plain output low while K_PWR is off | 1 kOhm -> TX node -> L9637D TX (pin 4) | free, not strapping; low when the transceiver is off, so it never back-powers it |
-| 6 | K_PWR | out, low at boot | L9637D VCC (pin 3, 100 nF to GND) and 330 Ohm -> AQY212EH #3 LED (pull-up switch); **10 kOhm pull-down to GND** | one pin powers the transceiver and the K pull-up together; low = K released, transceiver unpowered (< 1 uA, PLAN-RESEARCH B2) |
-| 7 | FOB | out, low at boot | 330 Ohm -> AQY212EH #1 LED; **10 kOhm pull-down to GND** | the pull-down keeps the PhotoMOS off while the pin floats during reset (MASTER-PLAN-v2 3.1 rule 3) |
+| 6 | K_PWR | out, low at boot | L9637D VCC (pin 3, 100 nF to GND) and 330 Ohm -> AQY212EH #3 LED (pull-up switch); **10 kOhm pull-down to GND** | one pin powers the transceiver and the K pull-up together; low = K released, transceiver unpowered (< 1 uA) |
+| 7 | FOB | out, low at boot | 330 Ohm -> AQY212EH #1 LED; **10 kOhm pull-down to GND** | the pull-down keeps the PhotoMOS off while the pin floats during reset |
 | 8 | (strapping) | | not connected (onboard LED on some boards) | |
 | 9 | (strapping) | | BOOT button only | |
 | 10 | BREAK_N | open-drain out, high (released) at boot | TX node | pulls the L9637D TX input low for the 5-baud bits while UART1 stays configured |
@@ -79,8 +78,8 @@ and GPIO5 starts low. R6 then pulls nothing (its VCC end is unpowered).
 handler drives GPIO7 (fob) and GPIO6 (K_PWR) low before anything else, then the watchdog
 resets the chip; during the reset the pull-downs R9 and R10 hold both off.
 
-**Not enough pins for CPE button emulation** (MASTER-PLAN-v2 3.1, two outputs for lock and
-unlock): only GPIO20 is left. If the owner chooses that path, it needs an I/O expander or a
+**Not enough pins for central-locking button emulation** (two outputs for lock and
+unlock): only GPIO20 is left. That path needs an I/O expander or a
 board with more pins; GPIO21 must not be used (boot log).
 
 ## Schematic
@@ -119,16 +118,14 @@ GPIO0 --[X1 32.768 kHz]-- GPIO1 ; C8 18 pF GPIO0 to GND ; C9 18 pF GPIO1 to GND
 OBD4, OBD5 -- GND
 ```
 
-Pin numbers of the L9637D (SO-8) are from PLAN-RESEARCH B2; check them against the ST
-datasheet before soldering. The plan's research proposed a P-FET high-side switch for VS and
-the pull-up; this design follows the MASTER-PLAN-v2 shopping list instead (item 27: one
-PhotoMOS for the K pull-up) and keeps VS on the rail, where the L9637D draws < 1 uA with VCC
-off (PLAN-RESEARCH B2, NOT VERIFIED on this board).
+Check the L9637D (SO-8) pin numbers against the ST datasheet before soldering. A P-FET
+high-side switch for VS and the pull-up was considered; this design uses one PhotoMOS for the K
+pull-up instead and keeps VS on the rail, where the L9637D draws < 1 uA with VCC off (datasheet
+value, NOT VERIFIED on this board).
 
 ## Parts
 
-Cross-checked with MASTER-PLAN-v2 section 5.2 (items 20 to 41). Everything the schematic
-needs is on that list; nothing extra has to be bought.
+Everything the schematic needs is in this table.
 
 | Ref | Part | Shopping list item | Note |
 |---|---|---|---|
@@ -150,19 +147,19 @@ needs is on that list; nothing extra has to be bought.
 
 | Consumer | Active (session, BLE connected) | Asleep (BLE advertising, light sleep) |
 |---|---|---|
-| ESP32-C3 | ~20 to 30 mA *estimate* (CPU busy-waits on UART reads in the skeleton) | 0.2 to 0.5 mA *estimate*, decision limit 1.0 mA (MASTER-PLAN-v2 G14) |
+| ESP32-C3 | ~20 to 30 mA *estimate* (CPU busy-waits on UART reads in the skeleton) | 0.2 to 0.5 mA *estimate*, decision limit 1.0 mA |
 | D36V6F3 quiescent | included in conversion loss (~85 %) | < 0.1 mA (datasheet) |
-| L9637D | ~1.4 mA VCC (PLAN-RESEARCH B2) | < 1 uA (VCC off) |
+| L9637D | ~1.4 mA VCC | < 1 uA (VCC off) |
 | K pull-up 510 Ohm | ~28 mA only while K is low (about 40 % of the time while polling) | 0 (PhotoMOS off) |
 | AQY212EH LED (K1) | ~6 mA | 0 |
 | Divider | 12 uA | 12 uA |
 | Fob PhotoMOS | 6 mA only during a 300 ms pulse | 0 |
 | TX node, R6, R10, R9 | 0 (TX low, K_PWR low, fob low: no resistor carries current) | 0 |
 | Watchdog wake-ups | | the firmware wakes every 4 s from light sleep to feed the RTC watchdog: ~1 ms at ~20 mA, about 5 uA on average *estimate* |
-| **Total from 12 V** | ~25 to 35 mA *estimate* | **~0.3 to 0.7 mA** *estimate* (recomputed with the TX-low and watchdog-slice changes: unchanged within the estimate), budget 2 mA (MASTER-PLAN-v2 M8) |
+| **Total from 12 V** | ~25 to 35 mA *estimate* | **~0.3 to 0.7 mA** *estimate* (recomputed with the TX-low and watchdog-slice changes: unchanged within the estimate), budget 2 mA |
 
 At 0.5 mA asleep the bridge takes 12 mAh a day, about 0.36 Ah a month, under 1 % of the 52 Ah
-battery (PLAN-RESEARCH B8). The K-line pull-up leakage with the ignition off (G15) is the one
+battery. The K-line pull-up leakage with the ignition off is the one
 unknown that could dominate; that is why the pull-up is switched.
 
 ## Firmware build
@@ -207,32 +204,31 @@ Power from the 12 V bench supply through the fuse; no car, no ECU.
 7. **Fob pulse.** Remote B on the PhotoMOS, a LOCK command (W7) or a debug build that pulses
    once: one press, 300 ms, then nothing for 5 s.
 8. **Sleep current** (W7): advertising only, 32 kHz crystal fitted, below 1.0 mA; else the
-   nRF52840 fallback (MASTER-PLAN-v2 G14, item 67).
+   nRF52840 fallback.
 
 A simulator-backed bench test (the bridge against kline-sim through the KKL cable) needs an
 ECU-side serial mode in kline-sim that does not exist yet.
 
 ## Car bring-up checklist
 
-Read-only first (MASTER-PLAN-v2 M8). Every step gets a line in the session log.
+Read-only first. Every step gets a line in the session log.
 
-- [ ] Battery at rest 12.4 V or more (P6); one tool on the cable (P7): KKL cable unplugged
+- [ ] Battery at rest 12.4 V or more; one tool on the cable: KKL cable unplugged
       while the bridge has the line, or the bridge yielded.
-- [ ] OBD pin 16 is permanent +12 V with the ignition off (G16), pin 4/5 ground.
+- [ ] OBD pin 16 is permanent +12 V with the ignition off, pin 4/5 ground.
 - [ ] Bridge plugged in through the Y-splitter, cable tied, no strain on the socket.
-- [ ] Quiescent current with the bridge asleep, ignition off: extra draw below 2 mA (M8).
-      Measure once with K_PWR forced on to see the pull-up leakage into the unpowered Sirius
-      (G15).
+- [ ] Quiescent current with the bridge asleep, ignition off: extra draw below 2 mA.
+      Measure once with K_PWR forced on to see the pull-up leakage into the unpowered Sirius.
 - [ ] Ignition on, `--features bench` build: the Sirius init gives `55 D0 8F` and `~addr 85`
       (as the KKL cable did on 2026-11-22); live samples arrive; values match a `kline live`
       capture of the same minute (rpm, coolant, battery).
-- [ ] Engine start with the bridge connected: it re-initialises after the voltage dip (G17).
+- [ ] Engine start with the bridge connected: it re-initialises after the voltage dip.
 - [ ] Ignition cycle: the bridge stops, sleeps, and comes back.
 - [ ] `YIELD_KLINE`, then the KKL cable works; `RESUME_KLINE` takes the line back.
-- [ ] 30 minutes of driving without a dropout (M8).
+- [ ] 30 minutes of driving without a dropout.
 - [ ] Below 12.0 V (bench supply on the OBD pigtail, not the car): the bridge stops and sleeps.
-- [ ] No LOCK/UNLOCK and no lock-when-moving until G4 (inner handles open locked doors), G5
-      (CPE levels) and G6 (lock bit) are answered and the owner decided (MASTER-PLAN-v2 M11).
+- [ ] No LOCK/UNLOCK and no lock-when-moving until it is known that the inner handles open locked doors,
+      the lock button levels are measured and the `21A3` lock bit is confirmed for every lock source.
 
 ## Not verified
 

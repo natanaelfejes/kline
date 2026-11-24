@@ -3,8 +3,8 @@
 `crates/kline-sim` behaves like the car on the K line: it echoes bytes like a KKL cable, detects
 5-baud and fast-init wake-ups from break edges, and answers KWP2000 and ISO 9141 requests from a
 DDT2000 definition. It lets the protocol core and the `kline` CLI be tested end to end without
-the car. Nothing in it is measured on the car, and the last section says plainly what that
-means.
+the car. Its ECU models come from reverse engineering; where the 1999 Clio II has since
+confirmed or contradicted them, the last section says so.
 
 ## Contents
 
@@ -144,19 +144,23 @@ delays. A difference is a `ReplayMismatch` violation and the replay goes silent.
 (both come from [protocol.md](protocol.md) and the same reverse-engineering notes), so where those are wrong, both are
 wrong together:
 
-1. 5-baud byte format: 8 raw bits LSB first, no parity, 200 ms bits, one stop bit.
-2. Which address byte each ECU accepts (plain vs ^0x80) and whether fast init works on 0x7A.
+1. 5-baud byte format: 8 raw bits LSB first, no parity, 200 ms bits, one stop bit (the Clio's
+   Sirius, BMT, airbag and ABS woke up with it).
+2. Which address byte each ECU accepts (plain vs ^0x80) and whether fast init works. On the
+   Clio the plain byte works and fast init is not answered; other cars may differ.
 3. That the ECU answers ~KW2 with ~(address byte) and that a KWP header target is the plain
-   address.
-4. Key bytes `D0 8F` (Sirius, BMT), `C2 85` (Safir 2); the length-in-format rule from KW1; the
-   StartCommunication key bytes after fast init (copied from the 5-baud ones).
+   address (confirmed on the Clio: `85` and `D9`).
+4. Key bytes `D0 8F` (Sirius, BMT: confirmed on the Clio), `C2 85` (Safir 2, not seen on a
+   car); the length-in-format rule from KW1; the StartCommunication key bytes after fast init
+   (copied from the 5-baud ones).
 5. Framing: header layout, 8-bit sum checksum, ISO8 `[N][data][cs]` (car-verified for the
    Bosch 5.3 ABS, 2026-11-23, replayed from `tests/fixtures/abs_car_51.jsonl` and
    `abs_car_58.jsonl`); Safir status replies are
    not simulated.
 6. Positive reply = SID + 0x40 + echo of the request bytes before the first item, length from
    MinBytes and the items; replies to requests without received items (`50 A0`, `7E`, `C2`,
-   `71 C8 00 00 00`) are guesses.
+   `71 C8 00 00 00`) are guesses. The Clio's Sirius answers `10 A0` with `50` alone, not
+   `50 A0`, and the BMT answers `31 C7 00 00 00` with `71 C7 01`.
 7. The ECU's timing: W1 60, W2/W3 10, W4 30, P2 25, P1 0 ms, P3max 5000, P3min = XML
    `ReplyToRequest` (5, where ISO says 55), P4max 20. The real ECUs may differ; e.g. an ECU with
    W1 near the ISO maximum (300) overruns the core's keyword window

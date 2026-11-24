@@ -276,7 +276,7 @@ Encoding is not used for anything this project sends yet. It is not covered by t
 
 - `Value::Number` on scaled data: `raw = round((x * DivideBy - Offset) / Step)`, ties away from
   zero in this (ddt4all) mode. Under `Semantics::Ddt2000` ties go to even, like DDT2000's
-  `__vbaFpI4` (RE: DiagLibs2 ScaledValue Let 0x1100ec40; the author's DDT2000 behaviour notes H5c).
+  `__vbaFpI4` (RE: DiagLibs2 ScaledValue Let 0x1100ec40).
   **Deviation:** ddt4all truncates with `int()`. That loses steps to float error. With truncation,
   the round-trip property test fails at once (Safir_1 `pression collecteur absolue mesuree`:
   raw 3 decodes to 114.1 and truncates back to 2). For an off-grid input, the two can pick

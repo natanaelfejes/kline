@@ -32,7 +32,7 @@ kline-sim (`crates/kline-bridge/tests`). See [Not verified](#not-verified).
 
 ## Service and characteristics
 
-One custom 128-bit service (PLAN-RESEARCH C2). All characteristics require an encrypted,
+One custom 128-bit service. All characteristics require an encrypted,
 authenticated (LE Secure Connections, MITM) link from a bonded peer.
 
 | Characteristic | UUID | Properties | Content |
@@ -65,8 +65,7 @@ Every value on every characteristic is one frame:
 
 ## Live
 
-Notified after every decoded Sirius `21AA` or `21A9` reply (drive profile), 20-byte body
-(PLAN-RESEARCH C2):
+Notified after every decoded Sirius `21AA` or `21A9` reply (drive profile), 20-byte body:
 
 | Offset | Field | Type | Meaning |
 |---|---|---|---|
@@ -82,8 +81,7 @@ Notified after every decoded Sirius `21AA` or `21A9` reply (drive profile), 20-b
 | 17 | batt_cv | u16 | battery, centivolts (21A9 d2 x 0.032 + 8 V) |
 | 19 | flags | u8 | 0x01 21AA valid, 0x02 21A9 valid, 0x04 engine running, 0x08 lock-when-moving armed, 0x10 doors locked by lock-when-moving |
 
-Byte positions and scales are from the 2026-11-22 car captures (SIRIUS-ANALYSIS "21AA
-payload", "21A9 payload"); `d[i]` is data byte `i` after `61 lid`.
+Byte positions and scales are from the 2026-11-22 car captures; `d[i]` is data byte `i` after `61 lid`.
 
 ## Status
 
@@ -127,7 +125,7 @@ bridge accepted from this bond ([counters](#roles-pairing-counters-rate-limits))
 | `0F` | PREPARE_WRITE | ecu u8, identification length u8 (1..64), identification (the `61 80 ..` reply the app chose its definition from), payload | owner | approval challenge for one Tier 2 config write |
 | `10` | LWM_ACK | | owner | acknowledge a lock-when-moving give-up: clears status flag `0x80`; nothing else changes (still disarmed) |
 
-ECU bytes: `7A` Sirius, `26` BMT, `01` Bosch 5.3 ABS (ISO8), `2C` airbag (owner decision
+ECU bytes: `7A` Sirius, `26` BMT, `01` Bosch 5.3 ABS (ISO8), `2C` airbag (maintainer decision
 2026-11-23: BLE scope v1 is everything the CLI can do for these four). Any other byte does not
 decode. While lock-when-moving needs the Sirius (armed with the engine running, or an unlock
 owed), REQUEST and PREPARE for another ECU answer `LwmActive`.
@@ -174,11 +172,11 @@ kline JSONL capture line (rx includes the echo). Broadcast to every client that 
 
 ## Roles, pairing, counters, rate limits
 
-- **Roles** are fixed per bond at pairing time (PLAN-RESEARCH C3; max 2 bonds): the phone is
+- **Roles** are fixed per bond at pairing time (max 2 bonds): the phone is
   **owner**, the Mac is **agent**. The firmware passes the role of the writing bond to
   `Bridge::on_command`; nothing in a frame can claim a role. An unbonded or unencrypted peer is
   `Unbonded` and gets `NotAllowedForRole` for everything.
-- **Agent = Tier 0 only, always** (MASTER-PLAN-v2 M12): REQUEST of a read, live profiles,
+- **Agent = Tier 0 only, always**: REQUEST of a read, live profiles,
   status, yield. PREPARE, CONFIRM, LOCK, UNLOCK and LWM_ARM are refused for the role before any
   tier check, and kline-core's `Session::request` refuses any non-read again.
 - **Counters**: per bond, strictly increasing; the bridge refuses a counter that is not
@@ -195,7 +193,7 @@ kline JSONL capture line (rx includes the echo). Broadcast to every client that 
   holder in NVS and restores it at boot (`Bridge::yield_holder`, `restore_yield`; W7), so a
   reset never makes a second master on the line.
 - **Rate limits** (ours): 20 commands per second in total; LOCK/UNLOCK at most 6 per 10 minutes
-  and at least 5 s apart (MASTER-PLAN-v2 3.1 rule 4).
+  and at least 5 s apart.
 
 ## Approvals (Tier 1 to 3 from the phone)
 
@@ -205,7 +203,7 @@ CLI; forbidden stays forbidden; the agent stays Tier 0.
 
 1. Owner writes `PREPARE ecu payload`. The bridge checks: owner role, the kline-core tier with
    the bridge's guard ([Limits](#limits)) is 1, 2 or 3 (forbidden is `Forbidden`), battery at
-   or above 12.0 V (MASTER-PLAN-v2 P6), and the moving rule (`VehicleMoving`; when nothing
+   or above 12.0 V, and the moving rule (`VehicleMoving`; when nothing
    recent decides it, the job first reads `21A9` from the Sirius).
 2. The bridge opens (or keeps) a session with that ECU and asks kline-core for the challenge
    of the request's tier on the session's real target: `service_challenge`,
@@ -228,14 +226,14 @@ CLI; forbidden stays forbidden; the agent stays Tier 0.
    for another ECU is dropped as soon as the car may have started (its CONFIRM gets
    `LwmActive`), so the bridge goes back to the Sirius.
 
-**What the code is:** the same anti-accident gate as the CLI's `/dev/tty` code (docs/SAFETY.md rule
-2): it stops the app, a script or the agent link from sending a Tier 1 request by mistake. It
+**What the code is:** the same anti-accident gate as the CLI's `/dev/tty` code ([SAFETY.md](SAFETY.md)
+rule 2): it stops the app, a script or the agent link from sending a Tier 1 request by mistake. It
 is not an authentication against software on the owner's phone, which sees the code. What
 keeps an agent out is the role of its bond, not the code.
 
 ## Parked LOCK and UNLOCK (fob output)
 
-For the parked car (MASTER-PLAN-v2 3.1 "Bonus" and PLAN-RESEARCH B6): a PhotoMOS across the
+For the parked car: a PhotoMOS across the
 button of remote B. The remote has one button, so a press toggles; the bridge therefore never
 pulses blind:
 
@@ -253,7 +251,7 @@ drop, and has an external pull-down for the time the GPIO floats in a reset
 
 ## Lock-when-moving
 
-Automaton `kline_bridge::lwm` (MASTER-PLAN-v2 3.1):
+Automaton `kline_bridge::lwm`:
 
 - Lock once when the Sirius `21A9` speed is above 15 km/h for 3 s, from fresh samples only (a
   gap of more than 1.5 s between samples restarts the 3 s; review M5).
@@ -288,7 +286,7 @@ Automaton `kline_bridge::lwm` (MASTER-PLAN-v2 3.1):
   Sirius and toggle the locks (review B1). It never sleeps on a low battery while an unlock is
   owed.
 
-Execution, decision D37 (owner decision, recorded in the owner's DECISIONS.md; build feature
+Execution, decision D37 (maintainer decision; build feature
 `standing-lock`, off by default): the bridge stops the Sirius session, opens the BMT, sends
 `31 A0 00 01` (lock) or `31 A1 00 01` (unlock), stops the BMT and goes back to the Sirius. Both
 are Tier 1 BMT actuator requests. Arming (`LWM_ARM`) needs the owner's code for each of the two
@@ -313,7 +311,7 @@ for when remote B is repaired.
 - **Reconnect**: after a failed init 0.5 s doubling to 10 s, or P3max 5 s when the ECU
   answered; after 3 failed exchanges in a row the session is dropped and re-initialised.
 - **Sleep** (`Output::Sleep` carries the reason): below 12.0 V for 10 s with the engine off
-  (`LowBattery`, wake after 1 h), below 11.8 V for 5 s (`CriticalBattery`, MASTER-PLAN-v2 P6),
+  (`LowBattery`, wake after 1 h), below 11.8 V for 5 s (`CriticalBattery`),
   and after 2 min with no client and nothing to do (`Idle`, wake after 60 s). The debounce
   ignores cranking dips and ADC noise (review M3). Never with the engine running and never while
   lock-when-moving owes an unlock. The firmware sleeps in light-sleep slices that feed the
@@ -404,7 +402,7 @@ Checked by `crates/kline-bridge/tests/vectors.rs`; the CRCs were cross-checked w
    VERIFIED on the chip).
 2. `DefinitionGuard::flagged()`: read access to the flagged prefixes, for the parity test.
 
-Not made: a kline-core `StandingApproval` type. The owner allowed the bridge's standing
+Not made: a kline-core `StandingApproval` type. The maintainer allowed the bridge's standing
 self-approval for exactly the two D37 payloads (SAFETY.md rule 2); a core type would move that
 check into kline-core and is a possible later cleanup.
 
@@ -412,9 +410,10 @@ check into kline-core and is a possible later cleanup.
 
 - Everything on real hardware: ESP32-C3 UART at 10400, the BREAK_N bit-bang timing, break
   loopback through the L9637D, BLE MTU and throughput, NVS counters (not written yet).
-- That the car's BMT updates its lock memory (`21A3` d0 bit 7) after K-line `31 A0`/`31 A1`:
-  the 2026-11-22 notes say it does not (CONTEXT.md, PLAN-RESEARCH B6), which would make D37
-  desynchronise the remote's state; the simulator models it as updating.
-- The `21A3` polarity (0 locked, 1 unlocked) and the `21A0` door bits (BMT-ANALYSIS).
+- Lock memory after K-line `31 A0`/`31 A1`: on the car the BMT's lock memory (`21A3` d0
+  bit 7) did not follow them, so D37 can put the remote's lock state out of step. The
+  simulator offers both models (a memory that follows and one that does not).
+- The `21A3` polarity (0 locked, 1 unlocked) for the remote and the key cylinder; it was
+  observed only with the dashboard button. The `21A0` door bits.
 - The fob path: that one press of remote B toggles the lock with the ignition off, and how
   fast `21A3` follows it.

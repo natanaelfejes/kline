@@ -1,9 +1,10 @@
 # Contributing to kline
 
-Thanks for helping. The most useful contribution right now is a capture from a real car:
-the `.jsonl` file from the capture directory plus the `.trace.txt` from a `--trace` run (see
-[cli.md "First test on the car"](cli.md#first-test-on-the-car)). Tell us the car, the ECU and
-the cable, and remove anything personal first.
+Thanks for helping. The most useful contribution is a capture from a car other than the
+1999 Clio II the project was built on: the `.jsonl` file from the capture directory plus the
+`.trace.txt` from a `--trace` run (see [cli.md "First session on a car"](cli.md#first-session-on-a-car)).
+Tell us the car, the ECU and the cable. Remove anything personal first: identification replies
+can contain the VIN.
 
 ## Checks before a pull request
 
@@ -45,6 +46,11 @@ The rules are in [SAFETY.md](SAFETY.md).
 - `kline-agent` and any future MCP crate must never enable `approved-routines`
   (`crates/kline-agent/tests/agent.rs` checks this).
 - Never add a code path that writes, learns or disables anything immobilizer related.
+
+## Changelog
+
+Add a line under `Unreleased` in [CHANGELOG.md](../CHANGELOG.md) for anything a user would
+notice: a new command or option, a changed default, a new ECU, a safety rule.
 
 ## License
 
