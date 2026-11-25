@@ -56,6 +56,7 @@ pub fn bmt_scenario(unlocked: bool) -> Scenario {
         .number("Door bits", 0.0)
         .number("Supply raw", 164.0)
         .number("Status raw", 16.0)
+        .number("Ignition bits", 0.0)
         .number("Output state", 2.0)
         .text("Part number", "BMT001")
         .number("Option bits", 29.0)

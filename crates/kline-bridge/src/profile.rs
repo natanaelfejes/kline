@@ -144,6 +144,30 @@ pub const DRIVE_SCHEDULE: [u8; 4] = [0xAA, 0xA9, 0xAA, 0xAA];
 /// BMT parked frames: `21A3` lock state, `21A0` inputs (doors), `21A2` values (battery).
 pub const PARKED_SCHEDULE: [u8; 3] = [0xA3, 0xA0, 0xA2];
 
+/// The profile the bridge polls (owner decision 2026-11-25): the drive profile whenever the
+/// engine may run (`engine_may_run`: a charging voltage, or rpm above 0 in a recent Sirius
+/// frame) or lock-when-moving needs the Sirius, whatever a client requested; otherwise the
+/// requested profile (parked, or nothing). Diagnostics jobs and pending challenges take the line
+/// before any profile (`Bridge::desired_ecu`). The app's simulated bridge implements the same
+/// table (`ProfileSelection.select`, checked by the same cases in both test suites).
+pub fn select(requested: Profile, engine_may_run: bool, lwm_holds_sirius: bool) -> Profile {
+    if lwm_holds_sirius || engine_may_run {
+        Profile::Drive
+    } else {
+        requested
+    }
+}
+
+/// BMT transponder status (`21 A4`, Tier 0, exactly 2 bytes): read every
+/// [`TRANSPONDER_EVERY`] parked cycles, because no other parked frame tells the bridge that the
+/// ignition came on; published as an Extra frame once per ignition-on (data byte 1 bit 0x01,
+/// "ignition present" in the definition, NOT VERIFIED on the car).
+pub const TRANSPONDER_READ: u8 = 0xA4;
+pub const TRANSPONDER_EVERY: usize = 8;
+/// BMT doors (`21 A0`), read once more right before the bridge leaves the parked profile for the
+/// drive profile, and published as an Extra frame (the app's drive-off door check).
+pub const PREDRIVE_DOORS_READ: u8 = 0xA0;
+
 /// Live extras (the "advanced" drive profile, `LIVE_EXTRAS`): the other Sirius frames that
 /// carry something the app can show, read one at a time between drive cycles, in turn. All are
 /// Tier 0 reads `21 lid`. From the 2026-11-22 drive analysis (SIRIUS-ANALYSIS 4.2 and 6) and

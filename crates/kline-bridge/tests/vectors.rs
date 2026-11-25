@@ -137,12 +137,46 @@ fn notification_vectors() {
         flags: 0x04,
         last_error: 0,
         uptime_s: 60,
+        soc_pct: SOC_UNKNOWN,
+        soc_conf: 0,
     };
     assert_eq!(
         s.encode(),
-        hex("01 02 0E 00 01 02 7A 01 82 05 00 04 00 3C 00 00 00 3B A7")
+        hex("01 02 10 00 01 02 7A 01 82 05 00 04 00 3C 00 00 00 FF 00 73 FB")
     );
     assert_eq!(Status::decode(&s.encode()), Ok(s));
+    // The 14-byte Status of older firmware still decodes, with the estimate unknown.
+    assert_eq!(
+        Status::decode(&hex(
+            "01 02 0E 00 01 02 7A 01 82 05 00 04 00 3C 00 00 00 3B A7"
+        )),
+        Ok(s)
+    );
+    // Parked, 12.38 V, locked, up 1 h, battery estimate 75 % rested.
+    let parked = Status {
+        fw_major: 0,
+        fw_minor: 1,
+        state: BridgeState::Idle,
+        ecu: 0,
+        profile: Profile::Parked,
+        batt_cv: 1238,
+        lock: LockState::Locked,
+        flags: 0,
+        last_error: 0,
+        uptime_s: 3600,
+        soc_pct: 75,
+        soc_conf: 2,
+    };
+    let v = "01 02 10 00 01 00 00 02 D6 04 01 00 00 10 0E 00 00 4B 02 D2 20";
+    assert_eq!(parked.encode(), hex(v));
+    assert_eq!(Status::decode(&hex(v)), Ok(parked));
+    // A confidence above 2 or a percentage above 100 does not decode.
+    let mut bad = parked;
+    bad.soc_conf = 3;
+    assert_eq!(Status::decode(&bad.encode()), Err(CodecError::BadArgs));
+    bad.soc_conf = 2;
+    bad.soc_pct = 101;
+    assert_eq!(Status::decode(&bad.encode()), Err(CodecError::BadArgs));
 
     let raw = RawFrame {
         t_ms: 2500,
@@ -250,6 +284,16 @@ fn live_extras_vectors() {
     assert_eq!(ExtraFrame::decode(&hex(v)), Ok(x));
     // Not a Live frame, and a Live decoder refuses it.
     assert!(LiveSample::decode(&hex(v)).is_err());
+    // The request length must be 1..=32: 0 and 33 do not decode, 32 does.
+    for (n, ok) in [(0usize, false), (33, false), (32, true)] {
+        let mut body = vec![0u8; 7];
+        body[6] = 0x7A;
+        body.push(n as u8);
+        body.extend(std::iter::repeat_n(0x21, n));
+        body.extend_from_slice(&[0x61, 0xA0]);
+        let f = encode_frame(Channel::Extra, &body).unwrap();
+        assert_eq!(ExtraFrame::decode(&f).is_ok(), ok, "request length {n}");
+    }
     // A reply that does not fit one frame is refused, never truncated.
     let long = ExtraFrame {
         seq: 0,

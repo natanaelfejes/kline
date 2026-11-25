@@ -367,10 +367,21 @@ pub struct Status {
     /// Last error ([`ResultCode`] value), 0 for none.
     pub last_error: u8,
     pub uptime_s: u32,
+    /// Battery state of charge estimated by the bridge (`crate::soc`), percent, or
+    /// [`SOC_UNKNOWN`].
+    pub soc_pct: u8,
+    /// Confidence of `soc_pct`: 0 none, 1 approximate, 2 rested (`crate::soc::Confidence`).
+    pub soc_conf: u8,
 }
 
+/// `Status::soc_pct` when no estimate exists.
+pub const SOC_UNKNOWN: u8 = 0xFF;
+
 impl Status {
-    pub const LEN: usize = 14;
+    pub const LEN: usize = 16;
+    /// The 14-byte Status of firmware before the battery estimate; still decoded (estimate
+    /// unknown).
+    pub const LEN_V1_0: usize = 14;
 
     pub fn encode(&self) -> Vec<u8> {
         let mut b = Vec::with_capacity(Self::LEN);
@@ -384,7 +395,9 @@ impl Status {
         b.push(self.flags);
         b.push(self.last_error);
         b.extend_from_slice(&self.uptime_s.to_le_bytes());
-        encode_frame(Channel::Status, &b).expect("14-byte body fits")
+        b.push(self.soc_pct);
+        b.push(self.soc_conf);
+        encode_frame(Channel::Status, &b).expect("16-byte body fits")
     }
 
     pub fn decode(frame: &[u8]) -> Result<Status, CodecError> {
@@ -401,7 +414,17 @@ impl Status {
             flags: r.u8()?,
             last_error: r.u8()?,
             uptime_s: r.u32()?,
+            soc_pct: SOC_UNKNOWN,
+            soc_conf: 0,
         };
+        let mut s = s;
+        if !r.0.is_empty() {
+            s.soc_pct = r.u8()?;
+            s.soc_conf = r.u8()?;
+            if s.soc_conf > 2 || (s.soc_pct > 100 && s.soc_pct != SOC_UNKNOWN) {
+                return Err(CodecError::BadArgs);
+            }
+        }
         r.end()?;
         Ok(s)
     }

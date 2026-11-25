@@ -201,3 +201,59 @@ fn unbonded_peer_cannot_set_extras() {
     let r = rig.call(STRANGER, Op::LiveExtras(1), 1_000);
     assert_eq!(r.result, ResultCode::NotAllowedForRole);
 }
+
+/// A frame refused in one session is tried again in the next one (per-session reset).
+#[test]
+fn a_refused_frame_is_tried_again_in_a_new_session() {
+    let mut rig = Rig::default_car();
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(14_100);
+    rig.run_until(5_000);
+    assert_eq!(
+        rig.call(OWNER, Op::LiveExtras(1), 1_000).result,
+        ResultCode::Ok
+    );
+    rig.run_for(15_000);
+    let count = |rig: &Rig| sirius_lids(rig).iter().filter(|l| **l == 0xA1).count();
+    assert_eq!(count(&rig), 1);
+    // A new session: yield the line and take it back.
+    assert_eq!(
+        rig.call(OWNER, Op::YieldKline, 5_000).result,
+        ResultCode::Ok
+    );
+    assert_eq!(
+        rig.call(OWNER, Op::ResumeKline, 1_000).result,
+        ResultCode::Ok
+    );
+    rig.run_for(20_000);
+    assert_eq!(count(&rig), 2, "tried again once in the new session");
+}
+
+/// LIVE_EXTRAS restarts the cycle count: sent again just before an extra read was due, the
+/// next extra read comes a full interval later.
+#[test]
+fn live_extras_restarts_the_cycle_count() {
+    let mut rig = Rig::default_car();
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(14_100);
+    rig.run_until(5_000);
+    let a9 = |rig: &Rig| sirius_lids(rig).iter().filter(|l| **l == 0xA9).count();
+    let extras = |rig: &Rig| {
+        sirius_lids(rig)
+            .iter()
+            .filter(|l| EXTRA_SCHEDULE.contains(l))
+            .count()
+    };
+    rig.send(OWNER, Op::LiveExtras(16));
+    let start = a9(&rig);
+    assert!(rig.run_until_pred(30_000, |r| a9(r) >= start + 12));
+    assert_eq!(extras(&rig), 0);
+    rig.send(OWNER, Op::LiveExtras(16));
+    let again = a9(&rig);
+    assert!(rig.run_until_pred(30_000, |r| extras(r) > 0));
+    assert!(
+        a9(&rig) >= again + 15,
+        "a full 16 cycles after the second LIVE_EXTRAS: {} vs {again}",
+        a9(&rig)
+    );
+}

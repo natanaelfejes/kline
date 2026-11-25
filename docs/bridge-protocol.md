@@ -20,6 +20,7 @@ kline-sim (`crates/kline-bridge/tests`). See [Not verified](#not-verified).
 - [Response and result codes](#response-and-result-codes)
 - [Raw](#raw)
 - [Extra (live extras)](#extra-live-extras)
+- [Battery estimate](#battery-estimate)
 - [Roles, pairing, counters, rate limits](#roles-pairing-counters-rate-limits)
 - [Approvals (Tier 1 to 3 from the phone)](#approvals-tier-1-to-3-from-the-phone)
 - [Parked LOCK and UNLOCK (fob output)](#parked-lock-and-unlock-fob-output)
@@ -89,7 +90,8 @@ Byte positions and scales are from the 2026-11-22 car captures; `d[i]` is data b
 ## Status
 
 Notified on change and every second while a client is connected; also the answer to
-`GET_STATUS` (in Response data). 14-byte body:
+`GET_STATUS` (in Response data). 16-byte body (firmware before 2026-11-25 sent the first 14
+bytes; decoders accept both, the battery estimate is then unknown):
 
 | Offset | Field | Type | Meaning |
 |---|---|---|---|
@@ -103,6 +105,8 @@ Notified on change and every second while a client is connected; also the answer
 | 8 | flags | u8 | 0x01 lwm armed, 0x02 lwm locked, 0x04 engine running, 0x08 approvals in this build, 0x10 front door open, 0x20 rear door open (BMT `21A0` d2 0x02 / 0x04, last parked read), 0x40 battery below 12.0 V, 0x80 lock-when-moving gave up an unlock and disarmed itself (doors may be locked; cleared only by arming again or LWM_ACK) |
 | 9 | last_error | u8 | last non-OK [result code](#response-and-result-codes) |
 | 10 | uptime_s | u32 | |
+| 14 | soc_pct | u8 | battery state of charge estimated by the bridge, percent; `FF` unknown ([Battery estimate](#battery-estimate)) |
+| 15 | soc_conf | u8 | 0 none, 1 approximate (rested 1 to 4 h, or still settling), 2 rested (4 h or more, settled) |
 
 ## Command
 
@@ -190,8 +194,9 @@ poll.
   constant, or not useful (2026-11-22 drive analysis) and are never read. Lock-when-moving keeps
   its `21A9` samples: with `every` 1 a cycle takes one read more (about 25 % longer between two
   `21A9`), well inside its 1.5 s sample gap.
-- A frame the ECU answers negatively is skipped for the rest of the session (a new session
-  tries again).
+- A frame the ECU answers negatively, or does not answer, is skipped for the rest of the session
+  (a new session tries again). A timed-out extra read is not a Sirius failure: it never counts
+  toward the ignition-off detection, a re-init, or a restart of the lock-when-moving hold.
 - Notified as an Extra frame (type `06`, on the Live characteristic), to every subscribed
   bonded client: every extra reply, every `21A9` reply and the first `21AA` reply of each cycle
   (the Live struct does not carry throttle, oxygen sensors, advance and the other fields of
@@ -209,6 +214,25 @@ poll.
 The Extra frame of a `21A9` or `21AA` reply is notified just before the Live notification of
 the same reply (same `t_ms`). A reply that does not fit one frame is not sent (never truncated).
 Live notifications and the Live flags are unchanged except flag `0x20`.
+
+## Battery estimate
+
+The bridge estimates the battery state of charge itself (`crate::soc`, owner decision
+2026-11-25); the app only shows it.
+
+- Method: the open-circuit voltage of a rested flooded 12 V lead-acid battery at 20 C:
+  11.89 V 0 %, 12.06 V 25 %, 12.24 V 50 %, 12.45 V 75 %, 12.65 V 100 %, linear in between,
+  rounded to 5 %.
+- Rest time: the bridge's own clock since it last saw rpm above 0 or a charging voltage. After a
+  reset it is unknown until the engine has run again (no guess).
+- Voltage history: one sample of the bridge's divider every 5 minutes while the engine is off
+  and nothing charges (also at sleep wake-ups), the last 24. The newest sample is used.
+- Confidence: none below 1 h of rest, while charging or with the engine running; approximate
+  from 1 h (surface charge reads high, about +-20 %); rested from 4 h with the last three samples
+  within 20 mV (about +-10 %).
+- Caveats: the bridge knows no temperature, and a cold battery reads low (about 5 mV per degree
+  below 20 C); a load while parked lowers the voltage; AGM or EFB batteries need another
+  table; the divider's accuracy is NOT VERIFIED.
 
 ## Roles, pairing, counters, rate limits
 
@@ -338,10 +362,28 @@ for when remote B is repaired.
 ## Bridge behaviour
 
 - **Profiles**: drive (Sirius `21AA, 21A9, 21AA, 21AA`, with [live extras](#extra-live-extras)
-  one more Sirius read every `n` cycles), parked (BMT `21A3, 21A0, 21A2`), and
-  diagnostics on request (REQUEST/PREPARE open a session with their ECU; it ends when nothing
-  needs it). Drive is chosen by itself when the battery reads 13.2 V or more or the engine
-  runs.
+  one more Sirius read every `n` cycles), parked (BMT `21A3, 21A0, 21A2`, and the transponder
+  status `21A4` at the start of a session and then every 8th cycle), and diagnostics on request
+  (REQUEST/PREPARE open a session with their ECU; it ends when nothing needs it).
+- **Profile selection** (owner decision 2026-11-25, `profile::select`): the drive profile
+  whenever the engine may run, whatever a client requested; otherwise the requested profile
+  (the app requests parked). Diagnostics jobs and a pending challenge take the line first.
+  "May run": rpm above 0 in a Sirius frame of the last 3 s, or a charging voltage (13.2 V or
+  more) that the Sirius does not explain as a charger. A charger is recognised by the Sirius
+  itself: a `21A9` with 0 rpm taken while the voltage was already that high (no dip or rise
+  since), or no Sirius answer at all (ignition off); either holds for 120 s, then the bridge
+  looks at the Sirius again. Lock-when-moving holding the Sirius always means drive. After the
+  engine stops (no rpm for 3 s, voltage below 13.2 V) the bridge returns to the requested
+  profile.
+- **Pre-drive door read** (owner decision 2026-11-25): when the bridge leaves a BMT session for
+  the drive profile, it first reads BMT `21A0` once more and sends the reply as an Extra frame
+  (ECU `26`), so the app knows the doors at drive-off.
+- **Transponder status** (owner decision 2026-11-25): in the parked profile the bridge reads BMT
+  `21A4` (Tier 0, exactly 2 bytes) at the start of each BMT session and every 8th cycle, because
+  no other parked frame shows that the ignition came on. It sends the reply as an Extra frame
+  (ECU `26`) once per ignition-on: at the first read with data byte 1 bit 0x01 ("ignition
+  present" in the definition, NOT VERIFIED) set after a read with it clear, or at the first
+  read of a session. Read only; nothing is ever written to the BMT here.
 - **One master**: one kline-core `Session` at a time; a session with another ECU starts only
   after `82` StopCommunication. After a session that ended without a clean Stop (link errors,
   port failure) the next init of any ECU waits P3max (5 s), so the old ECU has timed out.
@@ -416,7 +458,9 @@ Checked by `crates/kline-bridge/tests/vectors.rs`; the CRCs were cross-checked w
 | Response #2 Ok `61 A9 04 35` | `01 04 09 02 00 00 00 00 61 A9 04 35 FB 93` |
 | Response #3 Challenge id 7, tier 1, `ACDEFG` | `01 04 10 03 00 00 00 10 07 00 00 00 01 41 43 44 45 46 47 6A D0` |
 | Live seq 1, t 12345, 1077 rpm, 0 km/h, 7412 us, 1400 mL/h, 19 C, 15 C, 406 mbar, 14.33 V, flags 07 | `01 01 14 01 00 39 30 00 00 35 04 00 F4 1C 78 05 13 0F 96 01 99 05 07 9A EA` |
-| Status fw 0.1, session, 7A, drive, 14.10 V, lock unknown, engine running, up 60 s | `01 02 0E 00 01 02 7A 01 82 05 00 04 00 3C 00 00 00 3B A7` |
+| Status fw 0.1, session, 7A, drive, 14.10 V, lock unknown, engine running, up 60 s, estimate unknown | `01 02 10 00 01 02 7A 01 82 05 00 04 00 3C 00 00 00 FF 00 73 FB` |
+| The same, 14-byte Status of older firmware (still decodes) | `01 02 0E 00 01 02 7A 01 82 05 00 04 00 3C 00 00 00 3B A7` |
+| Status parked, 12.38 V, locked, up 3600 s, battery 75 % rested | `01 02 10 00 01 00 00 02 D6 04 01 00 00 10 0E 00 00 4B 02 D2 20` |
 | Raw tx at 2500 ms, Sirius, `82 7A F1 21 A9 B7` | `01 05 0C C4 09 00 00 00 7A 82 7A F1 21 A9 B7 4C 33` |
 | Command #7 LIVE_EXTRAS 4 | `01 03 06 07 00 00 00 11 04 86 22` |
 | Command #8 LIVE_EXTRAS 0 (off) | `01 03 06 08 00 00 00 11 00 01 A7` |
@@ -453,6 +497,10 @@ check into kline-core and is a possible later cleanup.
 
 ## Not verified
 
+- Profile selection on the car: that a charger and a running engine are told apart as
+  described, and the time the switch to the drive profile takes after a start.
+- The BMT `21A4` "ignition present" bit and the transponder bits; the pre-drive door read.
+- The battery estimate's table against this car's battery.
 - Live extras on the car: that the Sirius answers `21A0`..`21AD` while driving as it did in the
   2026-11-22 scan (positive replies, about 42 ms each), and the Live rate with `every` 1.
 - Everything on real hardware: ESP32-C3 UART at 10400, the BREAK_N bit-bang timing, break

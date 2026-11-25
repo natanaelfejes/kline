@@ -21,6 +21,7 @@
 <Data Name="Door bits"><Bits><Scaled/></Bits></Data>
 <Data Name="Supply raw"><Bits><Scaled/></Bits></Data>
 <Data Name="Status raw"><Bits><Scaled/></Bits></Data>
+<Data Name="Ignition bits"><Bits><Scaled/></Bits></Data>
 <Data Name="Output number"><Bits><Scaled/></Bits></Data>
 <Data Name="Output parameter"><Bits><Scaled/></Bits></Data>
 <Data Name="Output count"><Bits><Scaled/></Bits></Data>
@@ -45,7 +46,7 @@
 </Request>
 <Request Name="Status frame A4">
 <Sent><SentBytes>21A4</SentBytes></Sent>
-<Received MinBytes="7"><DataItem Name="Status raw" Ref="1" FirstByte="3"/></Received>
+<Received MinBytes="7"><DataItem Name="Status raw" Ref="1" FirstByte="3"/><DataItem Name="Ignition bits" Ref="1" FirstByte="4"/></Received>
 </Request>
 <Request Name="Actuator command">
 <Sent><SentBytes>31000000</SentBytes>

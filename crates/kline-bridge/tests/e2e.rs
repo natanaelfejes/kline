@@ -81,7 +81,14 @@ fn parked_profile_polls_the_bmt_only() {
         .map(|(_, x)| x[1])
         .collect();
     assert!(lids.len() > 30);
-    assert_eq!(&lids[..6], &[0xA3, 0xA0, 0xA2, 0xA3, 0xA0, 0xA2]);
+    // The transponder status first (start of a session), then the schedule.
+    assert_eq!(&lids[..7], &[0xA4, 0xA3, 0xA0, 0xA2, 0xA3, 0xA0, 0xA2]);
+    let a4 = lids.iter().filter(|l| **l == 0xA4).count();
+    let a3 = lids.iter().filter(|l| **l == 0xA3).count();
+    assert!(
+        a4 >= 2 && a4 * 6 <= a3 + 6,
+        "about once per 7 cycles: {a4} vs {a3}"
+    );
     let st = last_status(&rig);
     assert_eq!(st.lock, LockState::Unlocked);
     assert_eq!(st.ecu, 0x26);
@@ -791,4 +798,41 @@ fn switching_ecu_after_an_unclean_end_waits_p3max() {
     assert_eq!(rig.car.writes.len(), n, "an init started before P3max");
     rig.run_for(8_000);
     assert!(rig.car.written_payloads().iter().any(|(t, _)| *t == 0x7A));
+}
+
+/// Owner decision 2026-11-25: the battery estimate comes from the bridge. Unknown until the
+/// bridge saw the engine run; after a rest of over 4 h with a settled voltage it is "rested".
+#[test]
+fn battery_estimate_in_status_needs_a_rest_seen_by_the_bridge() {
+    let mut rig = Rig::default_car();
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(12_450);
+    rig.run_for(2_000);
+    let st = last_status(&rig);
+    assert_eq!(
+        st.soc_pct,
+        kline_bridge::gatt::SOC_UNKNOWN,
+        "rest unknown since boot"
+    );
+    // The engine runs (charging), then stops; 5 h parked at 12.45 V.
+    rig.battery(14_100);
+    rig.run_for(5_000);
+    let st = last_status(&rig);
+    assert_eq!(
+        st.soc_pct,
+        kline_bridge::gatt::SOC_UNKNOWN,
+        "never while charging"
+    );
+    rig.battery(12_450);
+    let start = rig.now();
+    let mut t = start;
+    while t < start + 5 * 3_600_000 {
+        t += 60_000;
+        rig.car.wait_until(t);
+        rig.battery(12_450);
+    }
+    rig.run_for(2_000);
+    let st = rig.bridge.status();
+    assert_eq!(st.soc_pct, 75);
+    assert_eq!(st.soc_conf, kline_bridge::soc::Confidence::Rested as u8);
 }

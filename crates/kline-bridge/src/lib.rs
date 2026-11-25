@@ -31,5 +31,6 @@ pub mod lwm;
 pub mod profile;
 pub mod ratelimit;
 pub mod runner;
+pub mod soc;
 
 pub use bridge::{Bridge, BridgeConfig, Output};

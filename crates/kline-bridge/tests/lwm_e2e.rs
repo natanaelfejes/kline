@@ -895,3 +895,71 @@ fn locks_and_unlocks_with_live_extras_on() {
     ]);
     assert!(!rig.bridge.lwm().locked_by_us());
 }
+
+/// Review r1 (MAJOR): with live extras every cycle, an extra frame that gets no answer must not
+/// count as a Sirius failure (that restarted the 3 s hold, so the doors never locked). The
+/// frame is skipped for the session after its first timeout. Returns the time from the first
+/// fast sample after arming to the lock write, and the number of 21A0 reads.
+fn lock_delay_with_extras(silent_a0: bool) -> (u64, usize) {
+    let mut sirius = driving_sirius();
+    if silent_a0 {
+        // 21A0 is read every 535 ms from 5.2 s; the car reaches 40 km/h at 7.6 s: the sixth
+        // read (7.9 s) is the first without an answer, inside the 3 s hold.
+        sirius = sirius.with_fault(FaultRule::on(&[0x21, 0xA0], ReplyFault::NoReply).after(5));
+    }
+    let mut rig = Rig::new(sirius, bmt_model(true, bmt_scenario(true)));
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(14_100);
+    assert_eq!(
+        rig.call(OWNER, Op::LiveExtras(1), 1_000).result,
+        ResultCode::Ok
+    );
+    arm(&mut rig);
+    let armed_at = rig.now();
+    rig.run_for(60_000);
+    let w: Vec<Vec<u8>> = rig
+        .car
+        .bmt_journal
+        .writes()
+        .into_iter()
+        .map(|w| w.payload)
+        .collect();
+    assert_eq!(
+        w,
+        vec![vec![0x31, 0xA0, 0x00, 0x01], vec![0x31, 0xA1, 0x00, 0x01]]
+    );
+    let lock_t = rig.car.bmt_journal.writes()[0].t_ms;
+    let first_fast = rig
+        .car
+        .channel(Channel::Live)
+        .iter()
+        .map(|f| LiveSample::decode(f).unwrap())
+        .find(|s| u64::from(s.t_ms) >= armed_at && s.speed_kmh == 40)
+        .unwrap();
+    let a0 = rig
+        .car
+        .written_payloads()
+        .iter()
+        .filter(|(t, p)| *t == 0x7A && p == &[0x21, 0xA0])
+        .count();
+    (lock_t - u64::from(first_fast.t_ms), a0)
+}
+
+#[test]
+fn a_silent_extra_frame_never_stops_the_lock() {
+    let (normal, a0_normal) = lock_delay_with_extras(false);
+    let (silent, a0_silent) = lock_delay_with_extras(true);
+    // The timed-out 21A0 falls inside the 3 s hold: the lock comes about as early as without
+    // it (the timeout itself costs about half a second); a hold restarted by a "Sirius failure"
+    // costs over 3 s more.
+    assert!(
+        silent <= normal + 1_000,
+        "lock {silent} ms after drive-off with a silent 21A0, {normal} ms without"
+    );
+    // 21A0 is tried once per Sirius session, then skipped.
+    assert!(a0_normal > 5);
+    assert!(
+        a0_silent <= 8,
+        "{a0_silent} 21A0 reads (none after the first timeout)"
+    );
+}

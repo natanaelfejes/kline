@@ -19,6 +19,19 @@ work so far is grouped by milestone under `Unreleased`, newest first. The crates
   Vectors, end-to-end tests against kline-sim (also with lock-when-moving armed),
   docs/bridge-protocol.md "Extra (live extras)".
 
+- kline-bridge (review round 2026-11-25): Status grows to 16 bytes with the bridge's own battery
+  estimate (`soc`: rested OCV table, rest time from the bridge clock, parked voltage history,
+  confidence); 14-byte Status still decodes. The BMT transponder status `21A4` is read in the
+  parked profile and published as an Extra frame once per ignition-on; the BMT doors are read
+  once more before the switch to the drive profile and published. `profile::select`.
+
+#### Changed
+
+- kline-bridge: the drive profile runs whenever the engine may run (rpm seen, or a charging
+  voltage the Sirius does not show to be a charger), whatever was requested; the app requests
+  parked and got no engine data while driving before. A timed-out live-extras read is skipped
+  for the session and never counts as a Sirius failure (it restarted the lock-when-moving hold).
+
 #### Fixed
 
 - kline-bridge: the BMT `21A0` door bits are read from data byte 2 (0x02 front, 0x04 rear), the

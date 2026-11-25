@@ -39,7 +39,7 @@ use crate::gatt::{
 };
 use crate::live::{self, BmtFrame};
 use crate::lwm::{Intent, LockWhenMoving, LwmConfig, Outcome};
-use crate::profile::{EcuId, Profile, EXTRA_SCHEDULE};
+use crate::profile::{self, EcuId, Profile, EXTRA_SCHEDULE};
 use crate::ratelimit::{ClientId, Counters, RateLimiter};
 
 /// BMT actuator "lock all doors", 1 command: `31 A0 00 01` (WRITE-COMMANDS 1.5, decision D37).
@@ -339,6 +339,21 @@ enum PollKind {
     Forward,
     /// Extra read number `i` of [`EXTRA_SCHEDULE`].
     Extra(usize),
+    /// Parked: the BMT transponder status read ([`profile::TRANSPONDER_READ`]).
+    Transponder,
+    /// The BMT door read right before the switch to the drive profile.
+    PreDrive,
+}
+
+/// The parked-profile reads that are not in the schedule.
+#[derive(Debug, Default, Clone, Copy)]
+struct BodyReads {
+    /// Parked cycles since the last transponder read.
+    cycles: usize,
+    /// The ignition bit of the last transponder read in this BMT session.
+    ignition: Option<bool>,
+    /// The pre-drive door read was made in this BMT session.
+    predrive_done: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -407,6 +422,11 @@ pub struct Bridge {
     poll_index: usize,
     extras: Extras,
     poll_kind: PollKind,
+    body_reads: BodyReads,
+    /// A Sirius init failed while the voltage read as charging (a charger, ignition off).
+    sirius_silent_at: Option<u64>,
+    /// Rest time and parked voltage history for the battery estimate (`crate::soc`).
+    soc: crate::soc::History,
     yielded: bool,
     /// Who yielded the line (the lease): only that client or an owner may resume it.
     yield_holder: Option<ClientId>,
@@ -468,6 +488,9 @@ impl Bridge {
             poll_index: 0,
             extras: Extras::default(),
             poll_kind: PollKind::Plain,
+            body_reads: BodyReads::default(),
+            sirius_silent_at: None,
+            soc: crate::soc::History::default(),
             yielded: false,
             yield_holder: None,
             yield_reply: None,
@@ -576,6 +599,11 @@ impl Bridge {
         if !self.battery_ok() {
             flags |= status_flags::LOW_BATTERY;
         }
+        let (soc_pct, soc_conf) = if self.engine_running(self.now_ms) {
+            (None, crate::soc::Confidence::None)
+        } else {
+            self.soc.estimate(self.now_ms, self.charging())
+        };
         Status {
             fw_major: self.cfg.fw_major,
             fw_minor: self.cfg.fw_minor,
@@ -587,6 +615,8 @@ impl Bridge {
             flags,
             last_error: self.last_error,
             uptime_s: (self.now_ms / 1000) as u32,
+            soc_pct: soc_pct.unwrap_or(crate::gatt::SOC_UNKNOWN),
+            soc_conf: soc_conf as u8,
         }
     }
 
@@ -622,6 +652,8 @@ impl Bridge {
         {
             self.engine_off_at = None;
         }
+        let running = self.charging() || self.engine_running(now_ms);
+        self.soc.on_battery(now_ms, mv, running);
         if mv < self.cfg.low_battery_mv {
             self.low_since.get_or_insert(now_ms);
             self.last_dip_ms = Some(now_ms);
@@ -1021,6 +1053,7 @@ impl Bridge {
                         seq: self.extras.seq,
                         ..Extras::default()
                     };
+                    self.body_reads = BodyReads::default();
                     self.unclean_end = None;
                     self.link = Link::Ready { ecu, s, errors: 0 };
                 }
@@ -1050,8 +1083,21 @@ impl Bridge {
                     self.finished(ecu, op, Ok(outcome));
                 }
                 Step::Failed(e) => {
-                    let errors = errors + 1;
-                    if ecu == EcuId::Sirius && matches!(op, Exch::Poll(_) | Exch::TesterPresent) {
+                    // A live-extras read that got no answer is not a Sirius failure (it never
+                    // counts toward ignition off or re-init, and never restarts the
+                    // lock-when-moving hold): the frame is skipped for the rest of the session.
+                    let extra = match (op, self.poll_kind) {
+                        (Exch::Poll(_), PollKind::Extra(i)) => Some(i),
+                        _ => None,
+                    };
+                    if let Some(i) = extra {
+                        self.extras.unsupported |= 1 << i;
+                    }
+                    let errors = if extra.is_some() { errors } else { errors + 1 };
+                    if ecu == EcuId::Sirius
+                        && extra.is_none()
+                        && matches!(op, Exch::Poll(_) | Exch::TesterPresent)
+                    {
                         self.sirius_failed();
                     }
                     if op == Exch::Stop || s.is_closed() {
@@ -1324,6 +1370,26 @@ impl Bridge {
                 if s.is_closed() {
                     return None;
                 }
+                // Leaving the parked profile for the drive profile (the engine started): one
+                // more door read first, for the app's drive-off check.
+                if desired != Some(ecu)
+                    && ecu == EcuId::Bmt
+                    && desired == Some(EcuId::Sirius)
+                    && !self.body_reads.predrive_done
+                    && self.effective_profile(now) == Profile::Drive
+                {
+                    self.body_reads.predrive_done = true;
+                    if let Ok(a) = s.request(&[0x21, profile::PREDRIVE_DOORS_READ], now) {
+                        self.poll_kind = PollKind::PreDrive;
+                        self.link = Link::Busy {
+                            ecu,
+                            s,
+                            errors,
+                            op: Exch::Poll(profile::PREDRIVE_DOORS_READ),
+                        };
+                        return Some(self.hand_out(a));
+                    }
+                }
                 if desired != Some(ecu) {
                     return match s.stop(now) {
                         Ok(a) => {
@@ -1459,6 +1525,15 @@ impl Bridge {
     /// only) one [`EXTRA_SCHEDULE`] read after every `every` completed cycles. The drive
     /// schedule itself is never skipped, so lock-when-moving keeps its `21 A9` samples.
     fn next_poll(&mut self, profile: Profile, schedule: &[u8]) -> (u8, PollKind) {
+        if profile == Profile::Parked && self.poll_index.is_multiple_of(schedule.len()) {
+            // Start of a parked cycle: the transponder status every few cycles (the first
+            // cycle of a session too).
+            let due = self.body_reads.cycles == 0;
+            self.body_reads.cycles = (self.body_reads.cycles + 1) % profile::TRANSPONDER_EVERY;
+            if due {
+                return (profile::TRANSPONDER_READ, PollKind::Transponder);
+            }
+        }
         let extras_on = profile == Profile::Drive && self.extras.every > 0;
         if extras_on && self.extras.due {
             self.extras.due = false;
@@ -1809,8 +1884,20 @@ impl Bridge {
             (Exch::Poll(lid), Ok(SessionOutcome::Reply(Reply::Positive(p)))) => {
                 // The Extra frame first, so the app has the raw fields of a 21A9 before the
                 // Live notification it belongs to.
-                if self.poll_kind != PollKind::Plain {
-                    self.extra_frame(ecu, lid, p.clone());
+                match self.poll_kind {
+                    PollKind::Plain => {}
+                    PollKind::Transponder => {
+                        // Published once per ignition-on (and at the first read of a session
+                        // with the ignition on).
+                        let ign = p.len() > 3 && p[0] == 0x61 && p[1] == lid && p[3] & 0x01 != 0;
+                        if ign && self.body_reads.ignition != Some(true) {
+                            self.extra_frame(ecu, lid, p.clone());
+                        }
+                        self.body_reads.ignition = Some(ign);
+                    }
+                    PollKind::Forward | PollKind::Extra(_) | PollKind::PreDrive => {
+                        self.extra_frame(ecu, lid, p.clone())
+                    }
                 }
                 self.positive(ecu, &p);
             }
@@ -2044,6 +2131,7 @@ impl Bridge {
         let now = self.now_ms;
         match ecu {
             EcuId::Sirius => {
+                self.sirius_silent_at = None;
                 let mut changed = false;
                 if let Some(v) = live::sirius_aa(p) {
                     self.live.rpm = v.rpm;
@@ -2053,6 +2141,7 @@ impl Bridge {
                     self.last_engine_sample = Some((now, v.rpm));
                     if v.rpm > 0 {
                         self.engine_off_at = None;
+                        self.soc.on_engine_running(now);
                     }
                     changed = true;
                 }
@@ -2161,21 +2250,41 @@ impl Bridge {
         self.effective_profile(now).ecu()
     }
 
-    /// The requested profile, or Drive on its own when the engine runs (so lock-when-moving
-    /// and the dashboard work without a command).
+    /// Drive whenever the engine may run (so lock-when-moving and the dashboard work whatever
+    /// the app requested), else the requested profile ([`profile::select`]).
     fn effective_profile(&self, now: u64) -> Profile {
-        // Lock-when-moving needs the Sirius: to see the engine stop, and a Sirius that no
-        // longer answers is the ignition-off signal (review M9).
-        if self.lwm_holds_sirius(now) {
-            return Profile::Drive;
+        // Lock-when-moving needs the Sirius (to see the engine stop; a Sirius that no longer
+        // answers is the ignition-off signal, review M9), and a running engine always gets the
+        // drive profile, whatever was requested (owner decision 2026-11-25: the app asks for
+        // parked and relies on this).
+        profile::select(
+            self.requested,
+            self.engine_may_run_for_profile(now),
+            self.lwm_holds_sirius(now),
+        )
+    }
+
+    /// For the profile choice: rpm above 0 in a recent Sirius frame, or a charging voltage that
+    /// nothing explains as a charger. A charger (13.2 V or more with the engine off) is told
+    /// apart by the Sirius itself: a 21A9 with 0 rpm taken while the voltage was already that
+    /// high (no dip or rise since, the engine-off proof), or a Sirius that does not answer at all
+    /// (ignition off). Either holds for the challenge lifetime (120 s); then the bridge looks
+    /// at the Sirius again, so an engine started on a charger is still found.
+    fn engine_may_run_for_profile(&self, now: u64) -> bool {
+        if self.engine_running(now) {
+            return true;
         }
-        if self.requested != Profile::Off {
-            return self.requested;
+        if !self.charging() {
+            return false;
         }
-        if self.charging() || self.engine_running(now) {
-            return Profile::Drive;
-        }
-        Profile::Off
+        let ttl = self.cfg.challenge_ttl_ms;
+        let off_proof = self.engine_off_at.is_some_and(|(t, charging_then, _)| {
+            charging_then && now.saturating_sub(t) <= ttl && self.last_dip_ms.is_none_or(|d| d < t)
+        });
+        let silent = self.sirius_silent_at.is_some_and(|t| {
+            now.saturating_sub(t) <= ttl && self.last_dip_ms.is_none_or(|d| d < t)
+        });
+        !(off_proof || silent)
     }
 
     /// Lock-when-moving needs the Sirius session now: an unlock is owed, or it is armed and the
@@ -2186,6 +2295,10 @@ impl Bridge {
 
     /// The bridge tried the Sirius and it did not answer.
     fn sirius_failed(&mut self) {
+        if self.charging() && !self.engine_running(self.now_ms) {
+            // A charging voltage and no Sirius answer: a charger with the ignition off.
+            self.sirius_silent_at = Some(self.now_ms);
+        }
         if let Some(intent) = self.lwm.on_sirius_failure(self.now_ms) {
             self.lwm_intent(intent);
         }

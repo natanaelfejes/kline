@@ -572,8 +572,10 @@ fn r3_a_start_dip_voids_the_engine_off_sample() {
     rig.car.other_journals[0].assert_no_writes();
 }
 
-/// Review r3 minor 1: no fresh speed (the parked profile polls the BMT) and a charger's
-/// voltage: the PREPARE first reads `21 A9` from the Sirius, sees 0 rpm and 0 km/h, and goes on.
+/// Review r3 minor 1: a charger's voltage with the engine off. Since 2026-11-25 a charging
+/// voltage makes the bridge look at the Sirius first (the engine may run): its `21 A9` shows
+/// 0 rpm and 0 km/h with the voltage already high (a charger), so it goes back to the requested
+/// parked profile, and the PREPARE on the ABS goes on with that engine-off proof.
 #[test]
 fn r3_a_stale_speed_is_sampled_before_the_prepare() {
     let car = Car::with_others(
@@ -593,9 +595,24 @@ fn r3_a_stale_speed_is_sampled_before_the_prepare() {
             .filter(|(t, p)| *t == EcuId::Sirius.address() && p[..] == [0x21, 0xA9])
             .count()
     };
-    assert_eq!(a9(&rig), 0, "the parked profile does not poll the Sirius");
+    let probed = a9(&rig);
+    assert!(
+        probed > 0,
+        "a charging voltage: the Sirius is looked at first"
+    );
+    let tail: Vec<u8> = rig
+        .car
+        .written_payloads()
+        .iter()
+        .rev()
+        .take(6)
+        .map(|(t, _)| *t)
+        .collect();
+    assert!(
+        tail.iter().all(|t| *t == EcuId::Bmt.address()),
+        "then the parked profile: {tail:02X?}"
+    );
     let (id, code) = code_of(&rig.call(OWNER, prepare_abs_clear(), 30_000));
-    assert!(a9(&rig) > 0, "sampled");
     let r = rig.call(
         OWNER,
         Op::Confirm {
