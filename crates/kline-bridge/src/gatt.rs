@@ -340,9 +340,9 @@ pub mod status_flags {
     pub const ENGINE_RUNNING: u8 = 0x04;
     /// This build can accept Tier 1 approvals from the owner (feature `approvals`).
     pub const APPROVALS: u8 = 0x08;
-    /// A front door is open (BMT `21 A0` data byte 5 bit 0x02, NOT VERIFIED).
+    /// A front door is open (BMT `21 A0` data byte 2 bit 0x02, NOT VERIFIED).
     pub const DOOR_FRONT_OPEN: u8 = 0x10;
-    /// A rear door is open (BMT `21 A0` data byte 5 bit 0x04, NOT VERIFIED).
+    /// A rear door is open (BMT `21 A0` data byte 2 bit 0x04, NOT VERIFIED).
     pub const DOOR_REAR_OPEN: u8 = 0x20;
     /// Battery below the write limit (12.0 V, MASTER-PLAN-v2 P6): no Tier 1 and no LOCK/UNLOCK.
     pub const LOW_BATTERY: u8 = 0x40;

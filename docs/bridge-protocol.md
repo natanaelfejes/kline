@@ -100,7 +100,7 @@ Notified on change and every second while a client is connected; also the answer
 | 4 | profile | u8 | 0 off, 1 drive, 2 parked, 3 diagnostics |
 | 5 | batt_cv | u16 | bridge's own divider, centivolts, 0 = not measured |
 | 7 | lock | u8 | 0 unknown, 1 locked, 2 unlocked (BMT `21A3` d0 bit 7) |
-| 8 | flags | u8 | 0x01 lwm armed, 0x02 lwm locked, 0x04 engine running, 0x08 approvals in this build, 0x10 front door open, 0x20 rear door open, 0x40 battery below 12.0 V, 0x80 lock-when-moving gave up an unlock and disarmed itself (doors may be locked; cleared only by arming again or LWM_ACK) |
+| 8 | flags | u8 | 0x01 lwm armed, 0x02 lwm locked, 0x04 engine running, 0x08 approvals in this build, 0x10 front door open, 0x20 rear door open (BMT `21A0` d2 0x02 / 0x04, last parked read), 0x40 battery below 12.0 V, 0x80 lock-when-moving gave up an unlock and disarmed itself (doors may be locked; cleared only by arming again or LWM_ACK) |
 | 9 | last_error | u8 | last non-OK [result code](#response-and-result-codes) |
 | 10 | uptime_s | u32 | |
 

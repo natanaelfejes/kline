@@ -5,7 +5,9 @@ mod common;
 use common::*;
 use kline_bridge::bridge::SleepReason;
 use kline_bridge::gate::Role;
-use kline_bridge::gatt::{BridgeState, Channel, LiveSample, LockState, Op, ResultCode, Status};
+use kline_bridge::gatt::{
+    status_flags, BridgeState, Channel, LiveSample, LockState, Op, ResultCode, Status,
+};
 use kline_bridge::hal::Clock;
 use kline_bridge::profile::{EcuId, Profile};
 use kline_bridge::runner::Stepped;
@@ -96,6 +98,28 @@ fn locked_bmt_reports_locked() {
     rig.send(OWNER, Op::StartLive(Profile::Parked));
     rig.run_for(5_000);
     assert_eq!(last_status(&rig).lock, LockState::Locked);
+}
+
+/// BMT `21A0` data byte 2: 0x02 front, 0x04 rear door open (definition position; NOT
+/// VERIFIED on the car) reach the Status flags.
+#[test]
+fn bmt_door_bits_reach_the_status_flags() {
+    for (bits, front, rear) in [
+        (0u8, false, false),
+        (2, true, false),
+        (4, false, true),
+        (6, true, true),
+    ] {
+        let scenario = bmt_scenario(true).number("Door bits", f64::from(bits));
+        let mut rig = Rig::new(sirius_ecu(sirius_scenario()), bmt_ecu(scenario));
+        rig.connect(OWNER, Role::Owner);
+        rig.battery(12_600);
+        rig.send(OWNER, Op::StartLive(Profile::Parked));
+        rig.run_for(5_000);
+        let f = last_status(&rig).flags;
+        assert_eq!(f & status_flags::DOOR_FRONT_OPEN != 0, front, "bits {bits}");
+        assert_eq!(f & status_flags::DOOR_REAR_OPEN != 0, rear, "bits {bits}");
+    }
 }
 
 #[test]

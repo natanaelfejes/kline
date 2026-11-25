@@ -19,6 +19,12 @@ work so far is grouped by milestone under `Unreleased`, newest first. The crates
   Vectors, end-to-end tests against kline-sim (also with lock-when-moving armed),
   docs/bridge-protocol.md "Extra (live extras)".
 
+#### Fixed
+
+- kline-bridge: the BMT `21A0` door bits are read from data byte 2 (0x02 front, 0x04 rear), the
+  definition's position (FirstByte 5); they were read from data byte 5, which is constant 0 in
+  every capture, so an open door could never show. Still NOT VERIFIED on the car.
+
 ### Standalone simulator (2026-11-24)
 
 #### Added

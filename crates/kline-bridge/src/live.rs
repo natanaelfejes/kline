@@ -3,8 +3,8 @@
 //! Byte positions and scales are from the car's captures of 2026-11-22, cross-checked there
 //! against the definitions' decoding: Sirius `21AA`/`21A9` in SIRIUS-ANALYSIS.md ("21AA
 //! payload", "21A9 payload"), BMT `21A3`/`21A0`/`21A2` in BMT-ANALYSIS.md section 6. `d[i]` is
-//! data byte `i` after the `61 lid` header. The door bits are NOT VERIFIED (BMT-ANALYSIS: "not
-//! confirmed in this log").
+//! data byte `i` after the `61 lid` header. The door bits are NOT VERIFIED on the car (no door
+//! was opened in a capture); their position is the BMT definition's (see [`BmtFrame::Doors`]).
 
 use crate::gatt::LockState;
 
@@ -32,7 +32,12 @@ pub struct SiriusA9 {
 pub enum BmtFrame {
     /// `61 A3`: DCODCOND, d0 bit 7, 1 = unlocked (BMT-ANALYSIS: polarity inferred).
     Lock(LockState),
-    /// `61 A0`: door bits in d5 (0x02 front, 0x04 rear), NOT VERIFIED.
+    /// `61 A0`: door bits in d2, 0x02 front, 0x04 rear. The definition places them at
+    /// FirstByte 5 (1-based over the reply from `61`), BitOffset 6 and 5 (from the MSB), that
+    /// is data byte 2; the same convention puts the indicator at d3 0x08, which the 2026-11-22
+    /// capture confirmed (BMT-ANALYSIS: "A0 d3.3" toggling at 1.46 Hz). An earlier note
+    /// ("byte 5") was read as d5, which is constant 0 in every capture. Polarity (1 = open) is
+    /// the definition's; NOT VERIFIED on the car.
     Doors { front_open: bool, rear_open: bool },
     /// `61 A2`: filtered battery voltage d4 x 0.077 V.
     Battery { batt_cv: u16 },
@@ -95,10 +100,10 @@ pub fn bmt(payload: &[u8]) -> Option<BmtFrame> {
             }))
         }
         0xA0 => {
-            let d = data(payload, 0xA0, 6)?;
+            let d = data(payload, 0xA0, 3)?;
             Some(BmtFrame::Doors {
-                front_open: d[5] & 0x02 != 0,
-                rear_open: d[5] & 0x04 != 0,
+                front_open: d[2] & 0x02 != 0,
+                rear_open: d[2] & 0x04 != 0,
             })
         }
         0xA2 => {
@@ -158,5 +163,44 @@ mod tests {
         );
         assert_eq!(bmt(&[0x61, 0xA3]), None);
         assert_eq!(bmt(&[0x7F, 0x21, 0x12]), None);
+    }
+
+    /// The 2026-11-22 BMT capture `61 A0 C0 00 00 02 00 00 00` (doors closed, lanterns on):
+    /// closed. The doors are in d2; d3 bit 0x02 (lanterns) and d5 are not doors.
+    #[test]
+    fn bmt_door_bits_are_in_data_byte_2() {
+        let closed = [0x61, 0xA0, 0xC0, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00];
+        assert_eq!(
+            bmt(&closed),
+            Some(BmtFrame::Doors {
+                front_open: false,
+                rear_open: false
+            })
+        );
+        let front = [0x61, 0xA0, 0xC0, 0x00, 0x02, 0x02, 0x00, 0x00, 0x00];
+        assert_eq!(
+            bmt(&front),
+            Some(BmtFrame::Doors {
+                front_open: true,
+                rear_open: false
+            })
+        );
+        let rear = [0x61, 0xA0, 0xC0, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00];
+        assert_eq!(
+            bmt(&rear),
+            Some(BmtFrame::Doors {
+                front_open: false,
+                rear_open: true
+            })
+        );
+        // Bits elsewhere (d5) are not doors.
+        let d5 = [0x61, 0xA0, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x06, 0x00];
+        assert_eq!(
+            bmt(&d5),
+            Some(BmtFrame::Doors {
+                front_open: false,
+                rear_open: false
+            })
+        );
     }
 }

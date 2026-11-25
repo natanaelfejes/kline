@@ -37,7 +37,7 @@
 </Request>
 <Request Name="Inputs frame">
 <Sent><SentBytes>21A0</SentBytes></Sent>
-<Received MinBytes="8"><DataItem Name="Door bits" Ref="1" FirstByte="8"/></Received>
+<Received MinBytes="8"><DataItem Name="Door bits" Ref="1" FirstByte="5"/></Received>
 </Request>
 <Request Name="Values frame">
 <Sent><SentBytes>21A2</SentBytes></Sent>
