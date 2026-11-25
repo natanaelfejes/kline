@@ -20,12 +20,14 @@ kline-sim (`crates/kline-bridge/tests`). See [Not verified](#not-verified).
 - [Response and result codes](#response-and-result-codes)
 - [Raw](#raw)
 - [Extra (live extras)](#extra-live-extras)
+- [Body read at a stop](#body-read-at-a-stop)
 - [Battery estimate](#battery-estimate)
 - [Roles, pairing, counters, rate limits](#roles-pairing-counters-rate-limits)
 - [Approvals (Tier 1 to 3 from the phone)](#approvals-tier-1-to-3-from-the-phone)
 - [Parked LOCK and UNLOCK (fob output)](#parked-lock-and-unlock-fob-output)
 - [Lock-when-moving](#lock-when-moving)
 - [Bridge behaviour](#bridge-behaviour)
+- [Power states](#power-states)
 - [Host transport (`kline --transport ble`)](#host-transport-kline---transport-ble)
 - [Test vectors](#test-vectors)
 - [Limits](#limits)
@@ -132,6 +134,7 @@ bridge accepted from this bond ([counters](#roles-pairing-counters-rate-limits))
 | `0F` | PREPARE_WRITE | ecu u8, identification length u8 (1..64), identification (the `61 80 ..` reply the app chose its definition from), payload | owner | approval challenge for one Tier 2 config write |
 | `10` | LWM_ACK | | owner | acknowledge a lock-when-moving give-up: clears status flag `0x80`; nothing else changes (still disarmed) |
 | `11` | LIVE_EXTRAS | every u8 (0 off, 1..16) | owner, agent | the "advanced" drive profile: one extra Sirius read after every `every` drive cycles and the raw replies as [Extra](#extra-live-extras) frames; reads only; `Ok` at once; a value above 16 does not decode (`BadFrame`) |
+| `12` | READ_BODY_ONCE | | owner, agent | one BMT body read at a stop with the engine running ([Body read at a stop](#body-read-at-a-stop)): `Accepted`, then `Ok` once BMT `21A0` and `21A3` are read and sent as Extra frames; `Ok` at once when the drive profile does not run (the parked profile reads the body anyway); `VehicleMoving` unless a fresh Sirius speed is 0; `LwmActive` while lock-when-moving owes an unlock; `RateLimited` for a second one in the same stop |
 
 ECU bytes: `7A` Sirius, `26` BMT, `01` Bosch 5.3 ABS (ISO8), `2C` airbag (maintainer decision
 2026-11-23: BLE scope v1 is everything the CLI can do for these four). Any other byte does not
@@ -215,6 +218,28 @@ The Extra frame of a `21A9` or `21AA` reply is notified just before the Live not
 the same reply (same `t_ms`). A reply that does not fit one frame is not sent (never truncated).
 Live notifications and the Live flags are unchanged except flag `0x20`.
 
+The same Extra frame also carries BMT replies (`ecu` `26`): the transponder status `21A4`
+in the parked profile, the pre-drive door read `21A0`, and the body read at a stop (`21A0`,
+then `21A3`). These are sent whether live extras are on or not.
+
+## Body read at a stop
+
+Owner decision 2026-11-25: the doors and locks while the engine runs, at a stop. The drive
+profile cannot read the BMT (one master on the K line), so the bridge pauses the Sirius for a
+few seconds: StopCommunication, BMT init, `21 A0` (doors) and `21 A3` (locks), each sent as an
+Extra frame (`ecu` `26`), then back to the Sirius. Tier 0 reads only; nothing is written.
+
+- On request: `READ_BODY_ONCE` (`12`, no arguments). Body `[counter u32][12]`.
+- Automatically: stopped (fresh Sirius speed 0) for more than 3 s with the engine running
+  (rpm above 0), when the last pre-drive door read said a door was open, nothing else queued,
+  and no unlock owed by lock-when-moving.
+- At most once per stop (a speed above 0 starts a new stop), never while moving, never while
+  lock-when-moving owes an unlock (it must keep watching the Sirius for the engine stop). Armed
+  lock-when-moving without a lock yet does not refuse it: with speed 0 it does not lock, and
+  the Sirius is back before the car can move far (the lock waits for the next 21A9 samples).
+- Response: `Accepted` (queued), then `Ok` after the `21A3` reply (`LinkError`,
+  `NegativeReply` or `Yielded` as for REQUEST). Unbonded: `NotAllowedForRole`.
+
 ## Battery estimate
 
 The bridge estimates the battery state of charge itself (`crate::soc`, owner decision
@@ -226,7 +251,11 @@ The bridge estimates the battery state of charge itself (`crate::soc`, owner dec
 - Rest time: the bridge's own clock since it last saw rpm above 0 or a charging voltage. After a
   reset it is unknown until the engine has run again (no guess).
 - Voltage history: one sample of the bridge's divider every 5 minutes while the engine is off
-  and nothing charges (also at sleep wake-ups), the last 24. The newest sample is used.
+  and nothing charges (also at sleep wake-ups), the last 24. Readings below 11.5 V (a load, a
+  start, a bad reading) and readings within 60 s after a dip below 12.0 V are not sampled. The
+  estimate uses the median of the last three samples (the newest alone while there are fewer).
+- A charging voltage counts as the engine running for the rest time, also after a reset (a
+  charger then starts the rest time like a drive).
 - Confidence: none below 1 h of rest, while charging or with the engine running; approximate
   from 1 h (surface charge reads high, about +-20 %); rested from 4 h with the last three samples
   within 20 mV (about +-10 %).
@@ -371,8 +400,11 @@ for when remote B is repaired.
   "May run": rpm above 0 in a Sirius frame of the last 3 s, or a charging voltage (13.2 V or
   more) that the Sirius does not explain as a charger. A charger is recognised by the Sirius
   itself: a `21A9` with 0 rpm taken while the voltage was already that high (no dip or rise
-  since), or no Sirius answer at all (ignition off); either holds for 120 s, then the bridge
-  looks at the Sirius again. Lock-when-moving holding the Sirius always means drive. After the
+  since), or two Sirius inits in a row unanswered (ignition off) while the charging voltage
+  looks like a charger (no dip in the 30 s before it began or since, no rise by more than 300 mV
+  since it began, no rpm in 120 s). Either holds for 120 s, then the bridge looks at the Sirius
+  again. A dip, a rise, or the BMT transponder status saying the ignition is on ends the
+  "no answer" proof at once. One missed answer never parks the bridge. Lock-when-moving holding the Sirius always means drive. After the
   engine stops (no rpm for 3 s, voltage below 13.2 V) the bridge returns to the requested
   profile.
 - **Pre-drive door read** (owner decision 2026-11-25): when the bridge leaves a BMT session for
@@ -381,10 +413,11 @@ for when remote B is repaired.
 - **Transponder status** (owner decision 2026-11-25): in the parked profile the bridge reads BMT
   `21A4` (Tier 0, exactly 2 bytes) at the start of each BMT session and every 8th cycle, because
   no other parked frame shows that the ignition came on. It sends the reply as an Extra frame
-  (ECU `26`) once per ignition-on: at the first read with data byte 1 bit 0x01 ("ignition
-  present" in the definition, NOT VERIFIED) set after a read with it clear, or at the first
-  read of a session; and once when the bit clears again (the app then knows a battery reading
-  is rested, not loaded). Read only; nothing is ever written to the BMT here.
+  (ECU `26`) at the first read of every BMT session, whatever the bit says, and at every change
+  of data byte 1 bit 0x01 ("ignition present" in the definition, NOT VERIFIED). The last state
+  is kept across sessions, so the first parked session after a drive always reports the
+  ignition-off. The bit set also ends the charger's "no answer" proof (the Sirius should answer
+  now). Read only; nothing is ever written to the BMT here.
 - **One master**: one kline-core `Session` at a time; a session with another ECU starts only
   after `82` StopCommunication. After a session that ended without a clean Stop (link errors,
   port failure) the next init of any ECU waits P3max (5 s), so the old ECU has timed out.
@@ -393,12 +426,34 @@ for when remote B is repaired.
 - **Keep-alive**: kline-core's TesterPresent when idle (3 s).
 - **Reconnect**: after a failed init 0.5 s doubling to 10 s, or P3max 5 s when the ECU
   answered; after 3 failed exchanges in a row the session is dropped and re-initialised.
-- **Sleep** (`Output::Sleep` carries the reason): below 12.0 V for 10 s with the engine off
-  (`LowBattery`, wake after 1 h), below 11.8 V for 5 s (`CriticalBattery`),
-  and after 2 min with no client and nothing to do (`Idle`, wake after 60 s). The debounce
-  ignores cranking dips and ADC noise. Never with the engine running and never while
-  lock-when-moving owes an unlock. The firmware sleeps in light-sleep slices that feed the
-  watchdog, never in a busy-wait.
+- **Sleep** (`Output::Sleep` carries the reason, `SleepReason::mode` the kind of sleep): below
+  12.0 V for 10 s with the engine off (`LowBattery`, hard off: deep sleep), below 11.8 V for
+  5 s (`CriticalBattery`, deep sleep), after 2 min with no client and nothing to do (`Idle`,
+  light sleep, wake after 60 s), with no client for 10 min outside the drive profile whatever
+  was requested (`NoClient`, the stuck-awake watchdog, light sleep), and once the engine has
+  not run for 48 h (`ParkedLong`, deep sleep). The debounce ignores cranking dips and ADC noise.
+  Never with the engine running and never while lock-when-moving owes an unlock. See
+  [Power states](#power-states).
+
+## Power states
+
+Owner decision 2026-11-25. The bridge is powered from the OBD socket pin 16 (permanent 12 V):
+no ignition wire, no 32 kHz crystal for now. Currents are estimates, NOT VERIFIED:
+
+| State | When | What runs | Current |
+|---|---|---|---|
+| Driving | the drive profile runs | CPU, BLE, K-line transceiver | 30 to 80 mA |
+| Parked, awake | a client, a job or a parked profile | CPU, BLE, BMT polling | 25 to 40 mA |
+| Light sleep | `Idle`, `NoClient`, at most 48 h after the engine last ran (since boot when it has not run since) | light sleep with BLE advertising, a wake every 60 s for the battery | about 2.3 mA |
+| Deep sleep | `ParkedLong` (48 h), `LowBattery` (below 12.0 V rested, hard off), `CriticalBattery` | a timer wake every 30 s for one ADC reading; no BLE | about 0.1 to 0.2 mA |
+
+From deep sleep the firmware resumes only when the battery reads 13.2 V or more at two wakes in
+a row (the engine runs, or a charger); otherwise it goes straight back to deep sleep. The wake
+resets the chip: lock-when-moving is disarmed and the battery estimate's rest time is unknown
+until the engine runs again. The firmware keeps the wake count in RTC memory; the 10 kOhm
+pull-downs keep the fob and K_PWR outputs off while their pads float in deep sleep. A hardware
+supervisor (a comparator that powers the board at about 13 V) can replace the timer wakes later.
+The firmware light-sleeps in slices that feed the watchdog, never in a busy-wait.
 - **Moving**: no non-read while a fresh (2 s) Sirius speed is above 0. A
   fresh standstill is enough for a Sirius request (its CONFIRM runs on the Sirius). For the ABS,
   BMT and airbag (their CONFIRM runs on their own session, without a speed) the engine must be
@@ -466,6 +521,7 @@ Checked by `crates/kline-bridge/tests/vectors.rs`; the CRCs were cross-checked w
 | Command #7 LIVE_EXTRAS 4 | `01 03 06 07 00 00 00 11 04 86 22` |
 | Command #8 LIVE_EXTRAS 0 (off) | `01 03 06 08 00 00 00 11 00 01 A7` |
 | LIVE_EXTRAS 17 (above 16) | `01 03 06 09 00 00 00 11 11 B1 E0` -> BadFrame |
+| Command #10 READ_BODY_ONCE | `01 03 05 0A 00 00 00 12 B3 99` |
 | Extra seq 1, t 2500, Sirius, `21 A0` -> `61 A0 00 10 00 00 00 00 00` | `01 06 13 01 00 C4 09 00 00 7A 02 21 A0 61 A0 00 10 00 00 00 00 00 BD 71` |
 | Bad CRC (last byte of #1 + 1) | `01 03 06 01 00 00 00 01 01 B1 FD` -> BadFrame |
 
@@ -500,7 +556,12 @@ check into kline-core and is a possible later cleanup.
 
 - Profile selection on the car: that a charger and a running engine are told apart as
   described, and the time the switch to the drive profile takes after a start.
-- The BMT `21A4` "ignition present" bit and the transponder bits; the pre-drive door read.
+- The BMT `21A4` "ignition present" bit and the transponder bits; the pre-drive door read; the
+  body read at a stop (that the BMT answers with the engine running, and the time the Sirius
+  pause takes).
+- Power: every current in [Power states](#power-states), BLE advertising in light sleep (not
+  made yet), the deep-sleep timer wake and RTC memory on the chip, and the pad state of the fob
+  and K_PWR outputs in deep sleep (the pull-downs should hold them).
 - The battery estimate's table against this car's battery.
 - Live extras on the car: that the Sirius answers `21A0`..`21AD` while driving as it did in the
   2026-11-22 scan (positive replies, about 42 ms each), and the Live rate with `every` 1.

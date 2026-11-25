@@ -258,6 +258,14 @@ fn live_extras_vectors() {
             op: Op::LiveExtras(0),
         },
     );
+    // READ_BODY_ONCE (no arguments).
+    cmd(
+        "01 03 05 0A 00 00 00 12 B3 99",
+        Command {
+            counter: 10,
+            op: Op::ReadBodyOnce,
+        },
+    );
     // 17 is above MAX_EXTRA_EVERY: refused by both directions.
     assert_eq!(
         Command::decode(&hex("01 03 06 09 00 00 00 11 11 B1 E0")),

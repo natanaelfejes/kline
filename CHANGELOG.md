@@ -7,6 +7,36 @@ work so far is grouped by milestone under `Unreleased`, newest first. The crates
 
 ## [Unreleased]
 
+### Bridge power states and body reads (2026-11-25, review round 3)
+
+#### Added
+
+- kline-bridge: `READ_BODY_ONCE` (`0x12`, no arguments): at a fresh standstill with the
+  engine running, once per stop, the bridge pauses the Sirius, reads BMT `21A0` and `21A3`
+  (Tier 0) and sends both as Extra frames (ECU `26`). Refused while moving (`VehicleMoving`),
+  while lock-when-moving owes an unlock (`LwmActive`) and a second time in the same stop
+  (`RateLimited`). Also automatic after 3 s stopped when the pre-drive door read said open.
+- kline-bridge `power`: power states for a board powered from OBD pin 16 (light sleep with BLE
+  advertising for at most 48 h after the engine last ran, then deep sleep with a 30 s timer
+  wake that resumes at 13.2 V read twice; deep sleep below 12.0 V rested), current estimates,
+  `SleepReason::{NoClient, ParkedLong}` and `SleepReason::mode`; the stuck-awake watchdog (no
+  client for 10 min outside the drive profile: sleep). Firmware: deep sleep with the wake count
+  in RTC memory.
+
+#### Changed
+
+- kline-bridge: the charger's "no Sirius answer" proof needs two inits in a row unanswered
+  while the charging voltage began over 30 s after the last dip, with no rise and no rpm; a
+  dip restarts the count and the BMT ignition bit ends the proof (one missed answer of a
+  running engine parked the bridge for 120 s).
+- kline-bridge: the transponder status `21A4` is published at the first read of every BMT
+  session and at every change of the ignition bit, which is kept across sessions (the
+  ignition-off after a drive was never sent); read every 8th parked cycle (was every 7th).
+- kline-bridge `soc`: readings below 11.5 V and within 60 s after a dip are not sampled; the
+  estimate uses the median of the last three samples.
+- kline-bridge: `LowBattery` and `CriticalBattery` sleep deep with a 30 s timer wake (was a 1 h
+  light-sleep wake).
+
 ### Bridge live extras (2026-11-25)
 
 #### Added

@@ -3,8 +3,9 @@
 //!
 //! What runs here today: the kline-bridge state machine over the real UART and GPIOs, the fob
 //! output driver (low before anything else), the RTC watchdog, the K-line power switch, the
-//! battery divider on the ADC, light sleep in watchdog-fed slices, the TX pin held low while the
-//! transceiver is off. What is not here yet (W7): BLE (the `BleSink` below drops notifications;
+//! battery divider on the ADC, light sleep in watchdog-fed slices, deep sleep with a 30 s timer
+//! wake for the long parked and low-battery sleeps (kline-bridge `power`), the TX pin held low
+//! while the transceiver is off. What is not here yet (W7): BLE (the `BleSink` below drops notifications;
 //! `--features bench` prints live samples on the USB serial console instead), BLE wake-up and
 //! the 32 kHz crystal, NVS for the command counters and the yield holder
 //! (`Bridge::restore_counters`, `Bridge::restore_yield` are ready for it).
@@ -23,7 +24,8 @@ use esp_hal::analog::adc::{Adc, AdcConfig, AdcPin, Attenuation};
 use esp_hal::gpio::{DriveMode, Level, Output, OutputConfig};
 use esp_hal::peripherals::{ADC1, GPIO3, GPIO4, GPIO5, GPIO6, GPIO7, UART1};
 use esp_hal::rtc_cntl::sleep::{LowPower, RtcSleepConfig};
-use esp_hal::rtc_cntl::{Rtc, Rwdt, RwdtStage};
+use esp_hal::rtc_cntl::{reset_reason, Rtc, Rwdt, RwdtStage, SocResetReason};
+use esp_hal::system::Cpu;
 use esp_hal::time::{Duration, Instant};
 use esp_hal::uart::{Config as UartConfig, Uart};
 use esp_hal::{main, Blocking};
@@ -31,6 +33,7 @@ use kline_bridge::bridge::{Bridge, BridgeConfig, SleepReason};
 use kline_bridge::fob::{FobDriver, FobTiming};
 use kline_bridge::gatt::Channel;
 use kline_bridge::hal::{BleSink, Clock, KLinePort, OutputPin, PortError, Power, Watchdog};
+use kline_bridge::power::{DeepWake, SleepMode, DEEP_WAKE_MS};
 use kline_bridge::ratelimit::ClientId;
 use kline_bridge::runner::{self, Stepped};
 use kline_core::{Action, Event};
@@ -353,12 +356,61 @@ impl Watchdog for Board<'_> {
 /// feed it. ours: half the watchdog time.
 const SLEEP_SLICE_MS: u64 = WATCHDOG_MS / 2;
 
+/// Marks the RTC state below as written by [`deep_sleep`] (persistent RAM starts as random
+/// bytes after some resets).
+const DEEP_MAGIC: u32 = 0xC110_DEE9;
+
+/// Deep-sleep state kept in RTC fast memory across the sleeps (each wake resets the chip).
+#[esp_hal::ram(unstable(rtc_fast, persistent))]
+static mut DEEP_MARK: u32 = 0;
+#[esp_hal::ram(unstable(rtc_fast, persistent))]
+static mut DEEP_HIGH: u8 = 0;
+
+/// Deep sleep for [`DEEP_WAKE_MS`] (kline-bridge `power`): no BLE, one ADC reading per wake in
+/// [`resume_from_deep_sleep`]. Called with the K line already released (the bridge sleeps only
+/// with no session). The fob and K_PWR pads float during deep sleep; the 10 kOhm pull-downs
+/// keep both off (docs/bridge-hardware.md).
+fn deep_sleep(low_power: &mut LowPower<'_>, rwdt: &mut Rwdt, high: u8) -> ! {
+    // SAFETY: single-threaded; nothing else touches these statics.
+    unsafe {
+        DEEP_HIGH = high;
+        DEEP_MARK = DEEP_MAGIC;
+    }
+    // The RTC watchdog would reset the chip in the middle of the sleep.
+    rwdt.disable();
+    low_power.set_wakeup_deadline(Instant::now() + Duration::from_millis(DEEP_WAKE_MS));
+    low_power.sleep_deep(RtcSleepConfig::deep())
+}
+
+/// At boot after a deep-sleep wake: one battery reading, then back to deep sleep unless
+/// [`DeepWake`] says resume (two readings in a row at 13.2 V or more). Returns on a cold boot,
+/// on any other reset, and on resume.
+fn resume_from_deep_sleep(low_power: &mut LowPower<'_>, rwdt: &mut Rwdt) {
+    // SAFETY: single-threaded; read before anything writes them.
+    let (mark, high) = unsafe { (DEEP_MARK, DEEP_HIGH) };
+    if reset_reason(Cpu::ProCpu) != Some(SocResetReason::CoreDeepSleep) || mark != DEEP_MAGIC {
+        // SAFETY: as above.
+        unsafe { DEEP_MARK = 0 };
+        return;
+    }
+    let mut wake = DeepWake { high };
+    if wake.on_wake(battery_millivolts()) {
+        // SAFETY: as above.
+        unsafe { DEEP_MARK = 0 };
+        return;
+    }
+    deep_sleep(low_power, rwdt, wake.high)
+}
+
 impl Power for Board<'_> {
     /// Light sleep in slices of [`SLEEP_SLICE_MS`] (never a busy-wait), feeding the watchdog
-    /// between slices. W7: wake on a BLE connection too, and deep sleep for the long low-battery
-    /// sleep.
+    /// between slices; deep sleep (does not return, the wake resets the chip) when the reason
+    /// asks for it. W7: wake on a BLE connection too.
     fn sleep(&mut self, wake_after_ms: Option<u64>, reason: SleepReason) {
         esp_println::println!("sleep {reason:?} {wake_after_ms:?}");
+        if reason.mode() == SleepMode::DeepTimer {
+            deep_sleep(&mut self.low_power, &mut self.rwdt, 0);
+        }
         let end = self.now_ms() + wake_after_ms.unwrap_or(1_000);
         while self.now_ms() < end {
             let slice = (end - self.now_ms()).min(SLEEP_SLICE_MS);
@@ -442,6 +494,11 @@ fn main() -> ! {
     // ADC1/GPIO3 (battery) and RNG/ADC1 (TRNG) are taken per use, see `battery_millivolts`.
     let _ = (p.ADC1, p.GPIO3, p.RNG);
 
+    // After a deep-sleep wake: back to sleep until the battery reads charging (needs ADC1, still
+    // unused here).
+    let mut low_power = LowPower::new(p.LPWR);
+    resume_from_deep_sleep(&mut low_power, &mut rtc.rwdt);
+
     let mut board = Board {
         kline: KLine {
             uart: None,
@@ -453,7 +510,7 @@ fn main() -> ! {
             battery: BatteryWatch::default(),
         },
         rwdt: rtc.rwdt,
-        low_power: LowPower::new(p.LPWR),
+        low_power,
     };
     let mut fob = fob;
     let mut bridge = Bridge::new(BridgeConfig::default(), board.now_ms());

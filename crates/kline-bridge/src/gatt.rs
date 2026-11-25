@@ -452,6 +452,7 @@ pub mod opcode {
     pub const PREPARE_WRITE: u8 = 0x0F;
     pub const LWM_ACK: u8 = 0x10;
     pub const LIVE_EXTRAS: u8 = 0x11;
+    pub const READ_BODY_ONCE: u8 = 0x12;
 }
 
 /// Largest interval of `LIVE_EXTRAS` (drive cycles between two extra reads). ours: 16 cycles
@@ -505,6 +506,10 @@ pub enum Op {
     LiveExtras(u8),
     /// Answer with one Status frame on Response.
     GetStatus,
+    /// One body read at a standstill with the engine running (owner decision 2026-11-25): the
+    /// bridge leaves the Sirius, reads BMT `21 A0` and `21 A3`, publishes both as Extra frames
+    /// (ECU `26`) and goes back. Reads only; at most once per stop.
+    ReadBodyOnce,
 }
 
 /// A command frame: a per-client counter that must strictly increase, and the operation.
@@ -585,6 +590,7 @@ impl Command {
                 b.push(opcode::LIVE_EXTRAS);
                 b.push(*every);
             }
+            Op::ReadBodyOnce => b.push(opcode::READ_BODY_ONCE),
         }
         encode_frame(Channel::Command, &b)
     }
@@ -664,6 +670,7 @@ impl Command {
                 }
                 Op::LiveExtras(every)
             }
+            opcode::READ_BODY_ONCE => Op::ReadBodyOnce,
             other => return Err(CodecError::BadOpcode(other)),
         };
         r.end()?;

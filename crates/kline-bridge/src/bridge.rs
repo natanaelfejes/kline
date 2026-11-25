@@ -48,6 +48,11 @@ pub const BMT_LOCK: [u8; 4] = [0x31, 0xA0, 0x00, 0x01];
 pub const BMT_UNLOCK: [u8; 4] = [0x31, 0xA1, 0x00, 0x01];
 /// MASTER-PLAN-v2 P6: below 11.8 V switch off.
 const CRITICAL_BATTERY_MV: u16 = 11_800;
+/// A charging voltage that begins within this long after a dip is a start, not a charger.
+/// ours: a start takes about 1 to 3 s from the cranking dip to the alternator's voltage.
+const START_WINDOW_MS: u64 = 30_000;
+/// The automatic body read waits this long at a standstill (owner decision 2026-11-25).
+const AUTO_BODY_READ_AFTER_MS: u64 = 3_000;
 /// BMT lock-state read (`21 A3`, DCODCOND in data byte 0 bit 7).
 const BMT_LOCK_READ: [u8; 2] = [0x21, 0xA3];
 /// Sirius speed and rpm (`21 A9`, the drive profile's frame), read before a PREPARE.
@@ -69,7 +74,15 @@ pub struct BridgeConfig {
     /// Wake-up interval while asleep, to look at the battery. ours: 60 s idle, 1 h on low
     /// battery (PLAN-RESEARCH B8 "deep sleep with hourly wake").
     pub idle_wake_ms: u64,
-    pub low_battery_wake_ms: u64,
+    /// Deep sleep (low battery, critical battery, parked for long): a timer wake this often
+    /// for one ADC reading, no BLE ([`crate::power`]). ours: 30 s (owner decision 2026-11-25).
+    pub deep_wake_ms: u64,
+    /// Parked light sleep (BLE advertising) at most this long after the engine last ran, then
+    /// deep sleep. ours: 48 h (owner decision 2026-11-25).
+    pub parked_light_max_ms: u64,
+    /// Watchdog against a stuck-awake bridge: no client and not in the drive profile for this
+    /// long, sleep. ours: 10 min (owner decision 2026-11-25).
+    pub stuck_awake_ms: u64,
     /// First wait after a failed init; doubles up to `backoff_max_ms`. ours (DDT2000 waits
     /// 500 ms between init rounds, docs/protocol.md "DDT2000 retry behaviour").
     pub backoff_ms: u64,
@@ -126,7 +139,9 @@ impl Default for BridgeConfig {
             charging_mv: 13_200,
             idle_sleep_ms: 120_000,
             idle_wake_ms: 60_000,
-            low_battery_wake_ms: 3_600_000,
+            deep_wake_ms: crate::power::DEEP_WAKE_MS,
+            parked_light_max_ms: crate::power::PARKED_LIGHT_MAX_MS,
+            stuck_awake_ms: crate::power::STUCK_AWAKE_MS,
             backoff_ms: 500,
             backoff_max_ms: 10_000,
             answered_wait_ms: 5_000,
@@ -179,12 +194,30 @@ pub enum Output {
 /// Why the bridge sleeps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SleepReason {
-    /// Below 12.0 V for the debounce time, engine off (MASTER-PLAN-v2 P6).
+    /// Below 12.0 V for the debounce time, engine off (MASTER-PLAN-v2 P6): hard off, deep sleep.
     LowBattery,
-    /// Below 11.8 V for the debounce time (P6: switch off at once).
+    /// Below 11.8 V for the debounce time (P6: switch off at once): deep sleep.
     CriticalBattery,
-    /// No client, no profile, nothing to do.
+    /// No client, no profile, nothing to do: light sleep with BLE advertising.
     Idle,
+    /// No client and not in the drive profile for `stuck_awake_ms` (the stuck-awake watchdog):
+    /// light sleep with BLE advertising.
+    NoClient,
+    /// Parked for more than `parked_light_max_ms` since the engine last ran: deep sleep.
+    ParkedLong,
+}
+
+impl SleepReason {
+    /// How the firmware sleeps for this reason ([`crate::power`]).
+    pub fn mode(self) -> crate::power::SleepMode {
+        use crate::power::SleepMode;
+        match self {
+            SleepReason::Idle | SleepReason::NoClient => SleepMode::LightAdvertising,
+            SleepReason::LowBattery | SleepReason::CriticalBattery | SleepReason::ParkedLong => {
+                SleepMode::DeepTimer
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,6 +278,11 @@ enum JobKind {
     /// Read the BMT lock state once (after LWM_DISARM with an unlock owed): a positive read
     /// showing the doors unlocked ends the duty (review B-3).
     LockCheck,
+    /// One body read at a standstill (READ_BODY_ONCE or the automatic one): `21 lid` on the
+    /// BMT, published as an Extra frame.
+    BodyRead {
+        lid: u8,
+    },
 }
 
 #[derive(Debug)]
@@ -354,6 +392,10 @@ struct BodyReads {
     ignition: Option<bool>,
     /// The pre-drive door read was made in this BMT session.
     predrive_done: bool,
+    /// The transponder status was published in this BMT session.
+    transponder_sent: bool,
+    /// `poll_index` of the last cycle start counted (a transponder read does not advance it).
+    cycle_mark: Option<usize>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -427,6 +469,18 @@ pub struct Bridge {
     sirius_silent_at: Option<u64>,
     /// Rest time and parked voltage history for the battery estimate (`crate::soc`).
     soc: crate::soc::History,
+    /// Since when (and from which voltage) the battery reads charging.
+    charging_since: Option<(u64, u16)>,
+    /// Sirius inits in a row that got no answer.
+    sirius_init_failures: u32,
+    /// The last time a client was connected (the stuck-awake watchdog).
+    last_client_ms: u64,
+    /// READ_BODY_ONCE / the automatic body read: the current standstill (fresh 21A9 speed 0).
+    stopped_since: Option<u64>,
+    /// A body read was made in this standstill (at most one per stop).
+    body_read_this_stop: bool,
+    /// The doors of the last pre-drive read were open (the automatic body read at a stop).
+    predrive_doors_open: bool,
     yielded: bool,
     /// Who yielded the line (the lease): only that client or an owner may resume it.
     yield_holder: Option<ClientId>,
@@ -491,6 +545,12 @@ impl Bridge {
             body_reads: BodyReads::default(),
             sirius_silent_at: None,
             soc: crate::soc::History::default(),
+            charging_since: None,
+            sirius_init_failures: 0,
+            last_client_ms: now_ms,
+            stopped_since: None,
+            body_read_this_stop: false,
+            predrive_doors_open: false,
             yielded: false,
             yield_holder: None,
             yield_reply: None,
@@ -599,11 +659,8 @@ impl Bridge {
         if !self.battery_ok() {
             flags |= status_flags::LOW_BATTERY;
         }
-        let (soc_pct, soc_conf) = if self.engine_running(self.now_ms) {
-            (None, crate::soc::Confidence::None)
-        } else {
-            self.soc.estimate(self.now_ms, self.charging())
-        };
+        // While the engine runs the rest time is 0, so the estimate is unknown by itself.
+        let (soc_pct, soc_conf) = self.soc.estimate(self.now_ms, self.charging());
         Status {
             fw_major: self.cfg.fw_major,
             fw_minor: self.cfg.fw_minor,
@@ -632,12 +689,14 @@ impl Bridge {
             self.clients.insert(client, role);
         }
         self.last_activity_ms = now_ms;
+        self.last_client_ms = now_ms;
     }
 
     pub fn on_disconnect(&mut self, client: ClientId, now_ms: u64) {
         self.now_ms = now_ms;
         self.clients.remove(&client);
         self.last_activity_ms = now_ms;
+        self.last_client_ms = now_ms;
     }
 
     /// Battery voltage from the bridge's divider (PLAN-RESEARCH B5).
@@ -652,11 +711,18 @@ impl Bridge {
         {
             self.engine_off_at = None;
         }
+        if mv >= self.cfg.charging_mv {
+            self.charging_since.get_or_insert((now_ms, mv));
+        } else {
+            self.charging_since = None;
+        }
         let running = self.charging() || self.engine_running(now_ms);
-        self.soc.on_battery(now_ms, mv, running);
+        self.soc.on_battery(now_ms, mv, running, self.last_dip_ms);
         if mv < self.cfg.low_battery_mv {
             self.low_since.get_or_insert(now_ms);
             self.last_dip_ms = Some(now_ms);
+            // New evidence (maybe a start): the two-failure count for the silent proof restarts.
+            self.sirius_init_failures = 0;
         } else {
             self.low_since = None;
         }
@@ -818,6 +884,8 @@ impl Bridge {
                 self.raw = on;
                 Ok(())
             }
+            // Reads only: any bonded role.
+            Op::ReadBodyOnce => self.read_body_once(client, counter, now_ms),
             // Reads only: any bonded role. The counters restart, the session stays.
             Op::LiveExtras(every) => {
                 self.extras.every = every;
@@ -1046,6 +1114,9 @@ impl Bridge {
                 Step::Done(outcome) => {
                     let mut s = Session::new(outcome, now_ms);
                     s.set_definition_guard(gate::guard(ecu));
+                    if ecu == EcuId::Sirius {
+                        self.sirius_init_failures = 0;
+                    }
                     self.session_gen = self.session_gen.wrapping_add(1);
                     self.poll_index = 0;
                     self.extras = Extras {
@@ -1053,13 +1124,26 @@ impl Bridge {
                         seq: self.extras.seq,
                         ..Extras::default()
                     };
-                    self.body_reads = BodyReads::default();
+                    // Per session: the transponder period and the pre-drive read. The last
+                    // ignition state is kept across sessions (review: the ignition-off publish
+                    // after a drive).
+                    self.body_reads = BodyReads {
+                        ignition: self.body_reads.ignition,
+                        ..BodyReads::default()
+                    };
                     self.unclean_end = None;
                     self.link = Link::Ready { ecu, s, errors: 0 };
                 }
                 Step::Failed(e) => {
                     self.init_failed(ecu, failures + 1, &e);
                     if ecu == EcuId::Sirius {
+                        self.sirius_init_failures = self.sirius_init_failures.saturating_add(1);
+                        // A charger with the ignition off: two inits in a row unanswered while
+                        // the charging voltage predates any dip or rise and no rpm was seen
+                        // (review: one missed answer of a running engine parked the bridge).
+                        if self.sirius_init_failures >= 2 && self.charger_like(now_ms) {
+                            self.sirius_silent_at = Some(now_ms);
+                        }
                         self.sirius_failed();
                     }
                 }
@@ -1525,9 +1609,13 @@ impl Bridge {
     /// only) one [`EXTRA_SCHEDULE`] read after every `every` completed cycles. The drive
     /// schedule itself is never skipped, so lock-when-moving keeps its `21 A9` samples.
     fn next_poll(&mut self, profile: Profile, schedule: &[u8]) -> (u8, PollKind) {
-        if profile == Profile::Parked && self.poll_index.is_multiple_of(schedule.len()) {
-            // Start of a parked cycle: the transponder status every few cycles (the first
-            // cycle of a session too).
+        if profile == Profile::Parked
+            && self.poll_index.is_multiple_of(schedule.len())
+            && self.body_reads.cycle_mark != Some(self.poll_index)
+        {
+            // Start of a parked cycle (counted once): the transponder status every
+            // TRANSPONDER_EVERY cycles, the first cycle of a session too.
+            self.body_reads.cycle_mark = Some(self.poll_index);
             let due = self.body_reads.cycles == 0;
             self.body_reads.cycles = (self.body_reads.cycles + 1) % profile::TRANSPONDER_EVERY;
             if due {
@@ -1666,7 +1754,80 @@ impl Bridge {
                     JobStart::Nothing
                 }
             },
+            JobKind::BodyRead { lid } => {
+                let lid = *lid;
+                // The car started moving while the bridge switched over: no body read.
+                if self.last_speed.is_some_and(|(_, v)| v > 0) {
+                    self.finish_job(ResultCode::VehicleMoving, Vec::new());
+                    return JobStart::Nothing;
+                }
+                match s.request(&[0x21, lid], now) {
+                    Ok(a) => JobStart::Exchange(a),
+                    Err(_) => {
+                        self.finish_job(ResultCode::LinkError, Vec::new());
+                        JobStart::Nothing
+                    }
+                }
+            }
         }
+    }
+
+    /// Queue the body read (doors `21 A0`, lock `21 A3`) for this standstill; the answer to
+    /// `client` (if any) follows the second read.
+    fn queue_body_read(
+        &mut self,
+        client: Option<ClientId>,
+        counter: u32,
+    ) -> Result<(), ResultCode> {
+        if self.yielded {
+            return Err(ResultCode::Yielded);
+        }
+        if self.jobs.len() + 2 > self.cfg.max_queue {
+            return Err(ResultCode::Busy);
+        }
+        let now = self.now_ms;
+        self.jobs.push_back(Job {
+            client: None,
+            counter: 0,
+            kind: JobKind::BodyRead { lid: 0xA0 },
+            since_ms: now,
+        });
+        self.jobs.push_back(Job {
+            client,
+            counter,
+            kind: JobKind::BodyRead { lid: 0xA3 },
+            since_ms: now,
+        });
+        self.body_read_this_stop = true;
+        Ok(())
+    }
+
+    /// READ_BODY_ONCE (owner decision 2026-11-25): only at a fresh standstill, at most once per
+    /// stop, never while lock-when-moving owes an unlock (it must watch the engine stop). With
+    /// the engine off the parked profile reads the body anyway: `Ok` at once.
+    fn read_body_once(
+        &mut self,
+        client: ClientId,
+        counter: u32,
+        now: u64,
+    ) -> Result<(), ResultCode> {
+        if self.effective_profile(now) != Profile::Drive {
+            return Ok(());
+        }
+        let speed = self
+            .last_speed
+            .filter(|(t, _)| now.saturating_sub(*t) <= self.cfg.speed_fresh_ms)
+            .map(|(_, v)| v);
+        if speed != Some(0) {
+            return Err(ResultCode::VehicleMoving);
+        }
+        if self.lwm.locked_by_us() {
+            return Err(ResultCode::LwmActive);
+        }
+        if self.body_read_this_stop {
+            return Err(ResultCode::RateLimited);
+        }
+        self.queue_body_read(Some(client), counter)
     }
 
     #[cfg(feature = "approvals")]
@@ -1887,19 +2048,29 @@ impl Bridge {
                 match self.poll_kind {
                     PollKind::Plain => {}
                     PollKind::Transponder => {
-                        // Published once per ignition-on (and at the first read of a session
-                        // with the ignition on), and once when it goes off again (so the app
-                        // knows a battery reading is loaded or rested).
+                        // Published at the first read of every BMT session, whatever the bit
+                        // says, and at every change of the ignition bit (kept across sessions),
+                        // so an ignition-off after a drive is seen (review r2).
                         let ign = p.len() > 3 && p[0] == 0x61 && p[1] == lid && p[3] & 0x01 != 0;
                         let prev = self.body_reads.ignition;
-                        if (ign && prev != Some(true)) || (!ign && prev == Some(true)) {
+                        if !self.body_reads.transponder_sent || prev != Some(ign) {
                             self.extra_frame(ecu, lid, p.clone());
+                            self.body_reads.transponder_sent = true;
                         }
                         self.body_reads.ignition = Some(ign);
+                        if ign {
+                            // The ignition is on: the Sirius should answer now (look again).
+                            self.sirius_silent_at = None;
+                        }
                     }
-                    PollKind::Forward | PollKind::Extra(_) | PollKind::PreDrive => {
+                    PollKind::PreDrive => {
+                        self.predrive_doors_open = matches!(
+                            live::bmt(&p),
+                            Some(BmtFrame::Doors { front_open, rear_open }) if front_open || rear_open
+                        );
                         self.extra_frame(ecu, lid, p.clone())
                     }
+                    PollKind::Forward | PollKind::Extra(_) => self.extra_frame(ecu, lid, p.clone()),
                 }
                 self.positive(ecu, &p);
             }
@@ -2005,6 +2176,16 @@ impl Bridge {
                     self.finish_job(ResultCode::VehicleMoving, Vec::new());
                 }
                 return;
+            }
+        }
+        if let Some(Job {
+            kind: JobKind::BodyRead { lid },
+            ..
+        }) = self.jobs.front()
+        {
+            if let Reply::Positive(p) = &reply {
+                let lid = *lid;
+                self.extra_frame(EcuId::Bmt, lid, p.clone());
             }
         }
         let Some(job) = self.jobs.front_mut() else {
@@ -2133,7 +2314,8 @@ impl Bridge {
         let now = self.now_ms;
         match ecu {
             EcuId::Sirius => {
-                self.sirius_silent_at = None;
+                // (A Sirius answer needs no step here: an rpm above 0 is a running engine, an
+                // rpm 0 21A9 at a charging voltage is the engine-off proof.)
                 let mut changed = false;
                 if let Some(v) = live::sirius_aa(p) {
                     self.live.rpm = v.rpm;
@@ -2165,6 +2347,24 @@ impl Bridge {
                     changed = true;
                     if let Some(intent) = self.lwm.on_sample(now, v.speed_kmh, v.rpm) {
                         self.lwm_intent(intent);
+                    }
+                    // Standstill tracking for the body read (at most one per stop).
+                    if v.speed_kmh == 0 {
+                        let since = *self.stopped_since.get_or_insert(now);
+                        // Automatic: stopped over 3 s with the engine running and the doors
+                        // open at the pre-drive read.
+                        if v.rpm > 0
+                            && now.saturating_sub(since) > AUTO_BODY_READ_AFTER_MS
+                            && self.predrive_doors_open
+                            && !self.body_read_this_stop
+                            && !self.lwm.locked_by_us()
+                            && self.jobs.is_empty()
+                        {
+                            let _ = self.queue_body_read(None, 0);
+                        }
+                    } else {
+                        self.stopped_since = None;
+                        self.body_read_this_stop = false;
                     }
                 }
                 if changed {
@@ -2238,6 +2438,9 @@ impl Bridge {
         {
             return None;
         }
+        if self.stuck_awake(now) {
+            return None;
+        }
         if let Some(j) = self.jobs.front() {
             if let Some(e) = self.job_ecu(&j.kind) {
                 return Some(e);
@@ -2283,10 +2486,38 @@ impl Bridge {
         let off_proof = self.engine_off_at.is_some_and(|(t, charging_then, _)| {
             charging_then && now.saturating_sub(t) <= ttl && self.last_dip_ms.is_none_or(|d| d < t)
         });
-        let silent = self.sirius_silent_at.is_some_and(|t| {
-            now.saturating_sub(t) <= ttl && self.last_dip_ms.is_none_or(|d| d < t)
-        });
+        // A dip since the proof also ends `charger_like` (the charging state restarts).
+        let silent = self
+            .sirius_silent_at
+            .is_some_and(|t| now.saturating_sub(t) <= ttl && self.charger_like(now));
         !(off_proof || silent)
+    }
+
+    /// The stuck-awake watchdog (owner decision 2026-11-25): no client for `stuck_awake_ms`, not
+    /// in the drive profile, nothing queued, no unlock owed.
+    fn stuck_awake(&self, now: u64) -> bool {
+        self.clients.is_empty()
+            && self.jobs.is_empty()
+            && !self.lwm.locked_by_us()
+            && self.effective_profile(now) != Profile::Drive
+            && now.saturating_sub(self.last_client_ms) >= self.cfg.stuck_awake_ms
+    }
+
+    /// The charging voltage looks like a charger: no dip below the write limit since it began
+    /// and none in the [`START_WINDOW_MS`] before (a start pulls the battery far down, then the
+    /// alternator brings it up), no rise by `start_rise_mv` since it began (an alternator on top
+    /// of a charger), and no rpm above 0 within the challenge lifetime.
+    fn charger_like(&self, now: u64) -> bool {
+        let ttl = self.cfg.challenge_ttl_ms;
+        self.charging_since.is_some_and(|(t, mv0)| {
+            self.last_dip_ms
+                .is_none_or(|d| d.saturating_add(START_WINDOW_MS) < t)
+                && self
+                    .battery_mv
+                    .is_some_and(|mv| mv <= mv0.saturating_add(self.cfg.start_rise_mv))
+        }) && !self
+            .last_engine_sample
+            .is_some_and(|(t, rpm)| rpm > 0 && now.saturating_sub(t) <= ttl)
     }
 
     /// Lock-when-moving needs the Sirius session now: an unlock is owed, or it is armed and the
@@ -2297,10 +2528,6 @@ impl Bridge {
 
     /// The bridge tried the Sirius and it did not answer.
     fn sirius_failed(&mut self) {
-        if self.charging() && !self.engine_running(self.now_ms) {
-            // A charging voltage and no Sirius answer: a charger with the ignition off.
-            self.sirius_silent_at = Some(self.now_ms);
-        }
         if let Some(intent) = self.lwm.on_sirius_failure(self.now_ms) {
             self.lwm_intent(intent);
         }
@@ -2399,21 +2626,38 @@ impl Bridge {
     /// When the bridge should sleep now (link already off), how long and why.
     fn should_sleep(&self, now: u64) -> Option<(u64, SleepReason)> {
         if self.critical_battery(now) {
-            return Some((self.cfg.low_battery_wake_ms, SleepReason::CriticalBattery));
+            return Some((self.cfg.deep_wake_ms, SleepReason::CriticalBattery));
         }
         if self.low_battery_sleep(now) {
-            return Some((self.cfg.low_battery_wake_ms, SleepReason::LowBattery));
+            return Some((self.cfg.deep_wake_ms, SleepReason::LowBattery));
         }
         if !self.jobs.is_empty() || self.lwm.locked_by_us() || self.engine_running(now) {
             return None;
         }
-        if self.clients.is_empty()
-            && self.effective_profile(now) == Profile::Off
-            && now.saturating_sub(self.last_activity_ms) >= self.cfg.idle_sleep_ms
-        {
-            return Some((self.cfg.idle_wake_ms, SleepReason::Idle));
+        let profile = self.effective_profile(now);
+        let idle = self.clients.is_empty()
+            && profile == Profile::Off
+            && now.saturating_sub(self.last_activity_ms) >= self.cfg.idle_sleep_ms;
+        // The stuck-awake watchdog: no client and not in the drive profile for 10 min (a parked
+        // request outlives the phone that made it).
+        let stuck = self.stuck_awake(now);
+        if !idle && !stuck {
+            return None;
         }
-        None
+        // Light sleep with BLE advertising for at most 48 h after the engine last ran (since
+        // boot when it has not run since), then deep sleep with a timer wake.
+        let since_run = now.saturating_sub(self.soc.last_run_ms().unwrap_or(0));
+        if since_run >= self.cfg.parked_light_max_ms {
+            return Some((self.cfg.deep_wake_ms, SleepReason::ParkedLong));
+        }
+        Some((
+            self.cfg.idle_wake_ms,
+            if idle {
+                SleepReason::Idle
+            } else {
+                SleepReason::NoClient
+            },
+        ))
     }
 
     // -----------------------------------------------------------------------------------------
@@ -2502,7 +2746,7 @@ fn job_ecu_of(k: &JobKind) -> Option<EcuId> {
         JobKind::Prepare { ecu, .. } => Some(*ecu),
         #[cfg(feature = "approvals")]
         JobKind::Confirm { .. } => None,
-        JobKind::Fob { .. } | JobKind::LockCheck => Some(EcuId::Bmt),
+        JobKind::Fob { .. } | JobKind::LockCheck | JobKind::BodyRead { .. } => Some(EcuId::Bmt),
         #[cfg(feature = "standing-lock")]
         JobKind::Standing(_) => Some(EcuId::Bmt),
     }

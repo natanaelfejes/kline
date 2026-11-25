@@ -28,6 +28,7 @@ pub mod guard_rules;
 pub mod hal;
 pub mod live;
 pub mod lwm;
+pub mod power;
 pub mod profile;
 pub mod ratelimit;
 pub mod runner;

@@ -963,3 +963,57 @@ fn a_silent_extra_frame_never_stops_the_lock() {
         "{a0_silent} 21A0 reads (none after the first timeout)"
     );
 }
+
+/// READ_BODY_ONCE and lock-when-moving: refused while an unlock is owed (the bridge must see
+/// the engine stop); allowed at a standstill while only armed, and the lock still comes at the
+/// next drive-off.
+#[test]
+fn read_body_once_keeps_the_lock_when_moving_invariants() {
+    // Armed, standing with the engine idling: allowed; then the drive-off still locks.
+    let sirius = sirius_ecu(sirius_scenario())
+        .with_change_after(&[0x21, 0xA9], 20_000, "Vehicle speed", Value::Number(40.0))
+        .with_change_after(
+            &[0x21, 0xA9],
+            20_000,
+            "Engine speed",
+            Value::Number(2_200.0),
+        )
+        // A stop at a light, the engine still running.
+        .with_change_after(&[0x21, 0xA9], 60_000, "Vehicle speed", Value::Number(0.0));
+    let mut rig = Rig::new(sirius, bmt_model(true, bmt_scenario(true)));
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(14_100);
+    arm(&mut rig);
+    rig.run_for(5_000);
+    assert_eq!(
+        rig.call(OWNER, Op::ReadBodyOnce, 20_000).result,
+        ResultCode::Ok
+    );
+    rig.run_for(30_000);
+    let w: Vec<Vec<u8>> = rig
+        .car
+        .bmt_journal
+        .writes()
+        .into_iter()
+        .map(|w| w.payload)
+        .collect();
+    assert_eq!(
+        w,
+        vec![vec![0x31, 0xA0, 0x00, 0x01]],
+        "locked after the read"
+    );
+    // Locked by lock-when-moving: refused while moving, and at the stop too (an unlock is owed).
+    assert!(rig.bridge.lwm().locked_by_us());
+    assert_eq!(
+        rig.call(OWNER, Op::ReadBodyOnce, 2_000).result,
+        ResultCode::VehicleMoving
+    );
+    rig.run_for(45_000);
+    let last = rig.car.channel(Channel::Live).last().cloned().unwrap();
+    assert_eq!(LiveSample::decode(&last).unwrap().speed_kmh, 0, "stopped");
+    assert!(rig.bridge.lwm().locked_by_us());
+    assert_eq!(
+        rig.call(OWNER, Op::ReadBodyOnce, 2_000).result,
+        ResultCode::LwmActive
+    );
+}

@@ -390,6 +390,8 @@ pub struct SpecEcu {
     scenario: Scenario,
     journal: Journal,
     init_fault: Option<InitFault>,
+    /// The init fault applies to this many more wake-ups addressed to this ECU (None: all).
+    init_fault_left: Option<u32>,
     faults: Vec<FaultRule>,
     changes: Vec<ScenarioChange>,
     /// Scenario changes a positive reply makes ([`SpecEcu::with_effect`]).
@@ -424,6 +426,7 @@ impl SpecEcu {
             scenario,
             journal: Journal::new(),
             init_fault: None,
+            init_fault_left: None,
             faults: Vec::new(),
             changes: Vec::new(),
             effects: Vec::new(),
@@ -440,6 +443,14 @@ impl SpecEcu {
 
     pub fn with_init_fault(mut self, f: InitFault) -> SpecEcu {
         self.init_fault = Some(f);
+        self
+    }
+
+    /// `f` for the first `wakes` wake-ups addressed to this ECU, then normal inits (an ECU that
+    /// boots slowly, or an ignition that comes on).
+    pub fn with_init_fault_for(mut self, f: InitFault, wakes: u32) -> SpecEcu {
+        self.init_fault = Some(f);
+        self.init_fault_left = Some(wakes);
         self
     }
 
@@ -778,6 +789,16 @@ impl SpecEcu {
 impl Responder for SpecEcu {
     fn on_wake(&mut self, wake: Wake, out: &mut Out) {
         self.asm.clear();
+        if let (Some(left), Wake::FiveBaud { byte, .. }) = (self.init_fault_left, &wake) {
+            if self.profile.accepts(*byte) {
+                if left == 0 {
+                    self.init_fault = None;
+                    self.init_fault_left = None;
+                } else {
+                    self.init_fault_left = Some(left - 1);
+                }
+            }
+        }
         if self.init_fault == Some(InitFault::Silent) {
             self.journal.note(0, "wake-up ignored (InitFault::Silent)");
             return;

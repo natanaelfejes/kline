@@ -191,7 +191,10 @@ fn parked_profile_never_reads_sirius_extras() {
     rig.run_for(10_000);
     let p = rig.car.written_payloads();
     assert!(p.iter().all(|(t, _)| *t == 0x26), "only the BMT: {p:02X?}");
-    assert!(rig.car.channel(Channel::Extra).is_empty());
+    // Only the BMT transponder status (first read of the session), no Sirius extra.
+    assert!(extras(&rig)
+        .iter()
+        .all(|f| f.ecu == 0x26 && f.request == [0x21, 0xA4]));
 }
 
 #[test]
@@ -256,4 +259,43 @@ fn live_extras_restarts_the_cycle_count() {
         "a full 16 cycles after the second LIVE_EXTRAS: {} vs {again}",
         a9(&rig)
     );
+}
+
+/// A timed-out extra read is not an exchange error: here the last 21AA of a cycle, the extra
+/// read after it and the first 21AA of the next cycle get no answer. Two base failures in a
+/// row are not the three that drop the session, so the Sirius session stays.
+#[test]
+fn a_timed_out_extra_read_is_not_counted_as_an_exchange_error() {
+    use kline_bridge::gatt::BridgeState;
+    use kline_sim::ecu::{FaultRule, ReplyFault};
+    // Requests (from the first): 0 AA, 1 A9, 2 AA, 3 AA, 4 extra, 5 AA, ...: 3, 4 and 5 fail.
+    let sirius = sirius_ecu(sirius_scenario()).with_fault(
+        FaultRule {
+            times: Some(3),
+            ..FaultRule::on(&[0x21], ReplyFault::NoReply)
+        }
+        .after(3),
+    );
+    let mut rig = Rig::new(sirius, bmt_ecu(bmt_scenario(true)));
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(14_100);
+    rig.send(OWNER, Op::LiveExtras(1));
+    let mut inits = 0;
+    let mut was = false;
+    rig.run_until_pred(20_000, |r| {
+        let st = r.bridge.status();
+        let init = st.state == BridgeState::Init && st.ecu == 0x7A;
+        if init && !was {
+            inits += 1;
+        }
+        was = init;
+        false
+    });
+    let lids = sirius_lids(&rig);
+    assert_eq!(
+        &lids[..6],
+        &[0xAA, 0xA9, 0xAA, 0xAA, 0xA0, 0xAA],
+        "{lids:02X?}"
+    );
+    assert_eq!(inits, 1, "the session was never dropped");
 }

@@ -408,7 +408,7 @@ fn sleeps_below_twelve_volts_with_the_engine_off() {
     rig.run_for(3_000);
     assert_eq!(
         rig.car.sleeps.first().map(|s| (s.1, s.2)),
-        Some((Some(3_600_000), SleepReason::LowBattery))
+        Some((Some(30_000), SleepReason::LowBattery))
     );
     assert!(!rig.car.power);
 }
