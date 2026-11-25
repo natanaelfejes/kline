@@ -863,3 +863,35 @@ fn r4_repeated_disarms_queue_one_lock_check() {
     assert_eq!(reads(&rig) - before, 1);
     assert!(rig.bridge.lwm().locked_by_us());
 }
+
+/// Live extras at the highest rate do not change lock-when-moving: same lock and unlock, the
+/// drive schedule keeps its `21 A9` samples (review: "Sirius stays polled").
+#[test]
+fn locks_and_unlocks_with_live_extras_on() {
+    let mut rig = Rig::new(driving_sirius(), bmt_model(true, bmt_scenario(true)));
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(14_100);
+    assert_eq!(
+        rig.call(OWNER, Op::LiveExtras(1), 1_000).result,
+        ResultCode::Ok
+    );
+    arm(&mut rig);
+    rig.run_for(60_000);
+    let w: Vec<Vec<u8>> = rig
+        .car
+        .bmt_journal
+        .writes()
+        .into_iter()
+        .map(|w| w.payload)
+        .collect();
+    assert_eq!(
+        w,
+        vec![vec![0x31, 0xA0, 0x00, 0x01], vec![0x31, 0xA1, 0x00, 0x01]]
+    );
+    assert!(!rig.car.channel(Channel::Extra).is_empty());
+    rig.assert_wire_tier0_except(&[
+        (0x26, vec![0x31, 0xA0, 0x00, 0x01]),
+        (0x26, vec![0x31, 0xA1, 0x00, 0x01]),
+    ]);
+    assert!(!rig.bridge.lwm().locked_by_us());
+}

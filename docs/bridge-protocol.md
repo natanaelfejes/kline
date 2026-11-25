@@ -19,6 +19,7 @@ kline-sim (`crates/kline-bridge/tests`). See [Not verified](#not-verified).
 - [Command](#command)
 - [Response and result codes](#response-and-result-codes)
 - [Raw](#raw)
+- [Extra (live extras)](#extra-live-extras)
 - [Roles, pairing, counters, rate limits](#roles-pairing-counters-rate-limits)
 - [Approvals (Tier 1 to 3 from the phone)](#approvals-tier-1-to-3-from-the-phone)
 - [Parked LOCK and UNLOCK (fob output)](#parked-lock-and-unlock-fob-output)
@@ -38,7 +39,7 @@ authenticated (LE Secure Connections, MITM) link from a bonded peer.
 | Characteristic | UUID | Properties | Content |
 |---|---|---|---|
 | Service | `b3340ce9-0893-4302-b20a-d4f96eb056ee` | | |
-| Live | `b3340cea-0893-4302-b20a-d4f96eb056ee` | notify | [Live](#live) |
+| Live | `b3340cea-0893-4302-b20a-d4f96eb056ee` | notify | [Live](#live); also [Extra](#extra-live-extras) frames while live extras are on |
 | Status | `b3340ceb-0893-4302-b20a-d4f96eb056ee` | read, notify | [Status](#status) |
 | Command | `b3340cec-0893-4302-b20a-d4f96eb056ee` | write with response | [Command](#command) |
 | Response | `b3340ced-0893-4302-b20a-d4f96eb056ee` | notify, to the writing client only | [Response](#response-and-result-codes) |
@@ -53,7 +54,9 @@ Every value on every characteristic is one frame:
 [version u8 = 0x01][type u8][N u8][body: N bytes][CRC u16 little endian]
 ```
 
-- `type` is the characteristic: `01` Live, `02` Status, `03` Command, `04` Response, `05` Raw.
+- `type` is the message: `01` Live, `02` Status, `03` Command, `04` Response, `05` Raw, each on
+  its own characteristic, and `06` Extra, on the Live characteristic (only while live extras are
+  on, so a client that never sends `LIVE_EXTRAS` never sees one).
 - `N` is the body length; the frame is exactly `3 + N + 2` bytes.
 - CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF, not reflected, no final XOR; check value of
   `"123456789"` is `0x29B1`) over version, type, N and body.
@@ -79,7 +82,7 @@ Notified after every decoded Sirius `21AA` or `21A9` reply (drive profile), 20-b
 | 14 | iat_c | i8 | intake air, C (21A9 d6 x 0.625 - 40) |
 | 15 | map_mbar | u16 | manifold pressure (21A9 d3 x 3.7 + 103) |
 | 17 | batt_cv | u16 | battery, centivolts (21A9 d2 x 0.032 + 8 V) |
-| 19 | flags | u8 | 0x01 21AA valid, 0x02 21A9 valid, 0x04 engine running, 0x08 lock-when-moving armed, 0x10 doors locked by lock-when-moving |
+| 19 | flags | u8 | 0x01 21AA valid, 0x02 21A9 valid, 0x04 engine running, 0x08 lock-when-moving armed, 0x10 doors locked by lock-when-moving, 0x20 live extras on |
 
 Byte positions and scales are from the 2026-11-22 car captures; `d[i]` is data byte `i` after `61 lid`.
 
@@ -124,6 +127,7 @@ bridge accepted from this bond ([counters](#roles-pairing-counters-rate-limits))
 | `0E` | GET_STATUS | | owner, agent | Status frame in the Response data |
 | `0F` | PREPARE_WRITE | ecu u8, identification length u8 (1..64), identification (the `61 80 ..` reply the app chose its definition from), payload | owner | approval challenge for one Tier 2 config write |
 | `10` | LWM_ACK | | owner | acknowledge a lock-when-moving give-up: clears status flag `0x80`; nothing else changes (still disarmed) |
+| `11` | LIVE_EXTRAS | every u8 (0 off, 1..16) | owner, agent | the "advanced" drive profile: one extra Sirius read after every `every` drive cycles and the raw replies as [Extra](#extra-live-extras) frames; reads only; `Ok` at once; a value above 16 does not decode (`BadFrame`) |
 
 ECU bytes: `7A` Sirius, `26` BMT, `01` Bosch 5.3 ABS (ISO8), `2C` airbag (maintainer decision
 2026-11-23: BLE scope v1 is everything the CLI can do for these four). Any other byte does not
@@ -169,6 +173,41 @@ splits long reads into several frames.
 
 Off by default. Body: `[t_ms u32][dir u8: 0 tx, 1 rx][ecu u8][bytes]`, the same meaning as a
 kline JSONL capture line (rx includes the echo). Broadcast to every client that subscribed.
+
+## Extra (live extras)
+
+The "advanced" drive profile, for the app's advanced dashboard and alerts. Off by default and
+after every reset (the setting is in RAM); `LIVE_EXTRAS every` turns it on (1..16) or off (0)
+for every client, and it applies whenever the drive profile runs (requested or automatic).
+Reads only: every extra request is a Tier 0 `21 lid` that kline-core's policy checks like every
+poll.
+
+- The drive schedule `21AA, 21A9, 21AA, 21AA` is unchanged; after every `every` completed
+  cycles one read of the extra list follows, in turn: Sirius `21A0` (input faults, present and
+  stored), `21A1` (output faults), `21A2` (input and state flags), `21A4` (output states: fan,
+  fuel pump relay, warning lamps), `21A8` (fault summary), `21AB` (idle regulation), `21AD`
+  (OBD status: misfire, oxygen sensor heaters). The other Sirius frames are copies of these,
+  constant, or not useful (2026-11-22 drive analysis) and are never read. Lock-when-moving keeps
+  its `21A9` samples: with `every` 1 a cycle takes one read more (about 25 % longer between two
+  `21A9`), well inside its 1.5 s sample gap.
+- A frame the ECU answers negatively is skipped for the rest of the session (a new session
+  tries again).
+- Notified as an Extra frame (type `06`, on the Live characteristic), to every subscribed
+  bonded client: every extra reply, every `21A9` reply and the first `21AA` reply of each cycle
+  (the Live struct does not carry throttle, oxygen sensors, advance and the other fields of
+  those two frames). Body:
+
+| Offset | Field | Type | Meaning |
+|---|---|---|---|
+| 0 | seq | u16 | +1 per Extra notification (own counter) |
+| 2 | t_ms | u32 | bridge uptime when decoded |
+| 6 | ecu | u8 | `7A` |
+| 7 | n | u8 | request length (1..32) |
+| 8 | request | n bytes | e.g. `21 A0` |
+| 8 + n | reply | rest | the positive reply payload from the response SID (`61 A0 ..`) |
+
+A reply that does not fit one frame is not sent (never truncated). Live notifications and the
+Live flags are unchanged except flag `0x20`.
 
 ## Roles, pairing, counters, rate limits
 
@@ -297,7 +336,8 @@ for when remote B is repaired.
 
 ## Bridge behaviour
 
-- **Profiles**: drive (Sirius `21AA, 21A9, 21AA, 21AA`), parked (BMT `21A3, 21A0, 21A2`), and
+- **Profiles**: drive (Sirius `21AA, 21A9, 21AA, 21AA`, with [live extras](#extra-live-extras)
+  one more Sirius read every `n` cycles), parked (BMT `21A3, 21A0, 21A2`), and
   diagnostics on request (REQUEST/PREPARE open a session with their ECU; it ends when nothing
   needs it). Drive is chosen by itself when the battery reads 13.2 V or more or the engine
   runs.
@@ -377,6 +417,10 @@ Checked by `crates/kline-bridge/tests/vectors.rs`; the CRCs were cross-checked w
 | Live seq 1, t 12345, 1077 rpm, 0 km/h, 7412 us, 1400 mL/h, 19 C, 15 C, 406 mbar, 14.33 V, flags 07 | `01 01 14 01 00 39 30 00 00 35 04 00 F4 1C 78 05 13 0F 96 01 99 05 07 9A EA` |
 | Status fw 0.1, session, 7A, drive, 14.10 V, lock unknown, engine running, up 60 s | `01 02 0E 00 01 02 7A 01 82 05 00 04 00 3C 00 00 00 3B A7` |
 | Raw tx at 2500 ms, Sirius, `82 7A F1 21 A9 B7` | `01 05 0C C4 09 00 00 00 7A 82 7A F1 21 A9 B7 4C 33` |
+| Command #7 LIVE_EXTRAS 4 | `01 03 06 07 00 00 00 11 04 86 22` |
+| Command #8 LIVE_EXTRAS 0 (off) | `01 03 06 08 00 00 00 11 00 01 A7` |
+| LIVE_EXTRAS 17 (above 16) | `01 03 06 09 00 00 00 11 11 B1 E0` -> BadFrame |
+| Extra seq 1, t 2500, Sirius, `21 A0` -> `61 A0 00 10 00 00 00 00 00` | `01 06 13 01 00 C4 09 00 00 7A 02 21 A0 61 A0 00 10 00 00 00 00 00 BD 71` |
 | Bad CRC (last byte of #1 + 1) | `01 03 06 01 00 00 00 01 01 B1 FD` -> BadFrame |
 
 ## Limits
@@ -390,7 +434,8 @@ Checked by `crates/kline-bridge/tests/vectors.rs`; the CRCs were cross-checked w
   skipped when `ddt-xml/` is absent; when the owner adds a definition, run it again.
 - The link settings (`EcuId::link_config`) are the definitions' `<K>` values, checked by the
   same test (airbag: AB70's, the slower one).
-- The decoders in `kline_bridge::live` are hand-coded positions for this car's ECUs.
+- The decoders in `kline_bridge::live` are hand-coded positions for this car's ECUs. Extra
+  frames are not decoded on the bridge; the app decodes them.
 
 ## kline-core changes for the bridge
 
@@ -407,6 +452,8 @@ check into kline-core and is a possible later cleanup.
 
 ## Not verified
 
+- Live extras on the car: that the Sirius answers `21A0`..`21AD` while driving as it did in the
+  2026-11-22 scan (positive replies, about 42 ms each), and the Live rate with `every` 1.
 - Everything on real hardware: ESP32-C3 UART at 10400, the BREAK_N bit-bang timing, break
   loopback through the L9637D, BLE MTU and throughput, NVS counters (not written yet).
 - Lock memory after K-line `31 A0`/`31 A1`: on the car the BMT's lock memory (`21A3` d0

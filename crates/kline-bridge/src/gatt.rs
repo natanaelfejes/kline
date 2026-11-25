@@ -68,6 +68,10 @@ pub enum Channel {
     Command = 0x03,
     Response = 0x04,
     Raw = 0x05,
+    /// An extra-frame notification ([`ExtraFrame`]). It travels on the Live characteristic,
+    /// only while live extras are on (`LIVE_EXTRAS`), so a v1 app that never asks for them
+    /// never receives one.
+    Extra = 0x06,
 }
 
 impl Channel {
@@ -78,6 +82,7 @@ impl Channel {
             0x03 => Channel::Command,
             0x04 => Channel::Response,
             0x05 => Channel::Raw,
+            0x06 => Channel::Extra,
             _ => return None,
         })
     }
@@ -204,6 +209,8 @@ pub mod live_flags {
     pub const LWM_ARMED: u8 = 0x08;
     /// Lock-when-moving locked the doors and has not unlocked them yet.
     pub const LWM_LOCKED: u8 = 0x10;
+    /// Live extras are on (`LIVE_EXTRAS` with a non-zero interval): Extra frames follow.
+    pub const EXTRAS_ON: u8 = 0x20;
 }
 
 /// The packed v1 live struct (PLAN-RESEARCH C2), 20 bytes.
@@ -421,7 +428,13 @@ pub mod opcode {
     pub const GET_STATUS: u8 = 0x0E;
     pub const PREPARE_WRITE: u8 = 0x0F;
     pub const LWM_ACK: u8 = 0x10;
+    pub const LIVE_EXTRAS: u8 = 0x11;
 }
+
+/// Largest interval of `LIVE_EXTRAS` (drive cycles between two extra reads). ours: 16 cycles
+/// is about 3 s per extra read at the measured rate, so each of the extra frames still comes
+/// about every 20 s.
+pub const MAX_EXTRA_EVERY: u8 = 16;
 
 /// What a Command asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -463,6 +476,10 @@ pub enum Op {
     LwmAck,
     /// Raw frame notifications on or off.
     RawStream(bool),
+    /// Live extras (the "advanced" drive profile): 0 off, `n` = one extra Sirius read
+    /// (`profile::EXTRA_SCHEDULE`, in turn) after every `n` drive cycles, plus the raw
+    /// `21 A9` and one `21 AA` per cycle, all as [`ExtraFrame`]s. Reads only (Tier 0).
+    LiveExtras(u8),
     /// Answer with one Status frame on Response.
     GetStatus,
 }
@@ -538,6 +555,13 @@ impl Command {
                 b.push(u8::from(*on));
             }
             Op::GetStatus => b.push(opcode::GET_STATUS),
+            Op::LiveExtras(every) => {
+                if *every > MAX_EXTRA_EVERY {
+                    return Err(CodecError::BadArgs);
+                }
+                b.push(opcode::LIVE_EXTRAS);
+                b.push(*every);
+            }
         }
         encode_frame(Channel::Command, &b)
     }
@@ -610,6 +634,13 @@ impl Command {
                 _ => return Err(CodecError::BadArgs),
             },
             opcode::GET_STATUS => Op::GetStatus,
+            opcode::LIVE_EXTRAS => {
+                let every = r.u8()?;
+                if every > MAX_EXTRA_EVERY {
+                    return Err(CodecError::BadArgs);
+                }
+                Op::LiveExtras(every)
+            }
             other => return Err(CodecError::BadOpcode(other)),
         };
         r.end()?;
@@ -793,6 +824,67 @@ impl RawFrame {
             },
             ecu: r.u8()?,
             bytes: r.rest().to_vec(),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Extra
+
+/// One extra read of the live profile, raw (docs/bridge-protocol.md "Extra"): the app decodes
+/// it. Body: `[seq u16][t_ms u32][ecu u8][request length u8][request][reply]`, where the reply
+/// is the positive reply payload from the response SID (`61 lid ..`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtraFrame {
+    /// +1 per Extra notification (its own counter, not the Live `seq`).
+    pub seq: u16,
+    /// Bridge uptime when the reply was decoded.
+    pub t_ms: u32,
+    /// ECU address (`7A` Sirius).
+    pub ecu: u8,
+    /// The request that was sent, e.g. `21 A0`.
+    pub request: Vec<u8>,
+    /// The positive reply payload.
+    pub reply: Vec<u8>,
+}
+
+/// Fixed part of an [`ExtraFrame`] body.
+pub const EXTRA_HEADER: usize = 8;
+
+impl ExtraFrame {
+    /// The frame, or `BodyTooLong` when request and reply do not fit one frame (never
+    /// truncated: the bridge then sends nothing for that read).
+    pub fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        if self.request.is_empty() || self.request.len() > MAX_REQUEST {
+            return Err(CodecError::BadArgs);
+        }
+        let mut b = Vec::with_capacity(EXTRA_HEADER + self.request.len() + self.reply.len());
+        b.extend_from_slice(&self.seq.to_le_bytes());
+        b.extend_from_slice(&self.t_ms.to_le_bytes());
+        b.push(self.ecu);
+        b.push(self.request.len() as u8);
+        b.extend_from_slice(&self.request);
+        b.extend_from_slice(&self.reply);
+        encode_frame(Channel::Extra, &b)
+    }
+
+    pub fn decode(frame: &[u8]) -> Result<ExtraFrame, CodecError> {
+        let body = expect(frame, Channel::Extra)?;
+        let mut r = Rd(body);
+        let seq = r.u16()?;
+        let t_ms = r.u32()?;
+        let ecu = r.u8()?;
+        let n = r.u8()? as usize;
+        if n == 0 || n > MAX_REQUEST {
+            return Err(CodecError::BadArgs);
+        }
+        let request = r.take(n)?.to_vec();
+        Ok(ExtraFrame {
+            seq,
+            t_ms,
+            ecu,
+            request,
+            reply: r.rest().to_vec(),
         })
     }
 }

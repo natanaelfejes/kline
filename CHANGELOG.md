@@ -7,6 +7,18 @@ work so far is grouped by milestone under `Unreleased`, newest first. The crates
 
 ## [Unreleased]
 
+### Bridge live extras (2026-11-25)
+
+#### Added
+
+- kline-bridge: `LIVE_EXTRAS` command (`0x11`, every 0..16), the "advanced" drive profile for
+  Clio Link: one extra Sirius read (`21A0`, `21A1`, `21A2`, `21A4`, `21A8`, `21AB`, `21AD`, in
+  turn) after every n drive cycles, the drive schedule unchanged; the raw replies, every `21A9`
+  and one `21AA` per cycle as Extra frames (type `0x06`, on the Live characteristic); Live
+  flag `0x20`. Reads only (Tier 0); a frame the ECU refuses is skipped for the session.
+  Vectors, end-to-end tests against kline-sim (also with lock-when-moving armed),
+  docs/bridge-protocol.md "Extra (live extras)".
+
 ### Standalone simulator (2026-11-24)
 
 #### Added

@@ -99,6 +99,7 @@ fn op() -> impl Strategy<Value = Op> {
         Just(Op::LwmAck),
         any::<bool>().prop_map(Op::RawStream),
         Just(Op::GetStatus),
+        (0u8..=kline_bridge::gatt::MAX_EXTRA_EVERY).prop_map(Op::LiveExtras),
     ]
 }
 

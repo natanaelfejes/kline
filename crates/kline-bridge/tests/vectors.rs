@@ -205,3 +205,58 @@ fn long_data_is_refused_not_truncated() {
     };
     assert_eq!(raw.encode(), Err(CodecError::BodyTooLong));
 }
+
+/// LIVE_EXTRAS (the "advanced" drive profile) and the Extra frame, docs/bridge-protocol.md
+/// "Extra". CRCs from Python's `binascii.crc_hqx(data, 0xFFFF)`.
+#[test]
+fn live_extras_vectors() {
+    cmd(
+        "01 03 06 07 00 00 00 11 04 86 22",
+        Command {
+            counter: 7,
+            op: Op::LiveExtras(4),
+        },
+    );
+    cmd(
+        "01 03 06 08 00 00 00 11 00 01 A7",
+        Command {
+            counter: 8,
+            op: Op::LiveExtras(0),
+        },
+    );
+    // 17 is above MAX_EXTRA_EVERY: refused by both directions.
+    assert_eq!(
+        Command::decode(&hex("01 03 06 09 00 00 00 11 11 B1 E0")),
+        Err(CodecError::BadArgs)
+    );
+    assert_eq!(
+        Command {
+            counter: 9,
+            op: Op::LiveExtras(MAX_EXTRA_EVERY + 1)
+        }
+        .encode(),
+        Err(CodecError::BadArgs)
+    );
+
+    let x = ExtraFrame {
+        seq: 1,
+        t_ms: 2500,
+        ecu: 0x7A,
+        request: vec![0x21, 0xA0],
+        reply: hex("61 A0 00 10 00 00 00 00 00"),
+    };
+    let v = "01 06 13 01 00 C4 09 00 00 7A 02 21 A0 61 A0 00 10 00 00 00 00 00 BD 71";
+    assert_eq!(x.encode().unwrap(), hex(v));
+    assert_eq!(ExtraFrame::decode(&hex(v)), Ok(x));
+    // Not a Live frame, and a Live decoder refuses it.
+    assert!(LiveSample::decode(&hex(v)).is_err());
+    // A reply that does not fit one frame is refused, never truncated.
+    let long = ExtraFrame {
+        seq: 0,
+        t_ms: 0,
+        ecu: 0x7A,
+        request: vec![0x21, 0xA0],
+        reply: vec![0; MAX_BODY - EXTRA_HEADER - 1],
+    };
+    assert_eq!(long.encode(), Err(CodecError::BodyTooLong));
+}

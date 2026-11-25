@@ -34,12 +34,12 @@ use kline_core::{Action, Event, LinkError, Step};
 use crate::fob::{FobError, FobTiming};
 use crate::gate::{self, Role};
 use crate::gatt::{
-    live_flags, status_flags, BridgeState, Channel, Command, LiveSample, LockState, Op, RawDir,
-    RawFrame, Response, ResultCode, Status,
+    live_flags, status_flags, BridgeState, Channel, Command, ExtraFrame, LiveSample, LockState, Op,
+    RawDir, RawFrame, Response, ResultCode, Status,
 };
 use crate::live::{self, BmtFrame};
 use crate::lwm::{Intent, LockWhenMoving, LwmConfig, Outcome};
-use crate::profile::{EcuId, Profile};
+use crate::profile::{EcuId, Profile, EXTRA_SCHEDULE};
 use crate::ratelimit::{ClientId, Counters, RateLimiter};
 
 /// BMT actuator "lock all doors", 1 command: `31 A0 00 01` (WRITE-COMMANDS 1.5, decision D37).
@@ -311,6 +311,36 @@ enum Link {
     },
 }
 
+/// Live extras (`LIVE_EXTRAS`, the "advanced" drive profile). The setting is in RAM: a reset
+/// turns it off. The counters restart with every Sirius session.
+#[derive(Debug, Default, Clone, Copy)]
+struct Extras {
+    /// 0 off, `n`: one extra read after every `n` drive cycles.
+    every: u8,
+    /// Drive cycles completed since the last extra read.
+    cycles: u8,
+    /// An extra read is due before the next drive poll.
+    due: bool,
+    /// Next position in [`EXTRA_SCHEDULE`].
+    next: usize,
+    /// [`EXTRA_SCHEDULE`] positions the ECU answered negatively in this session (bit i).
+    unsupported: u8,
+    /// Extra notifications sent (the [`ExtraFrame`] seq).
+    seq: u16,
+}
+
+/// What the poll in progress is, for the extras.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum PollKind {
+    /// A drive-profile poll whose reply is not forwarded.
+    #[default]
+    Plain,
+    /// A drive-profile poll whose raw reply is forwarded as an Extra frame (extras on).
+    Forward,
+    /// Extra read number `i` of [`EXTRA_SCHEDULE`].
+    Extra(usize),
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 struct Parked {
     lock: LockState,
@@ -375,6 +405,8 @@ pub struct Bridge {
     /// The job exchange in progress wrote its request (a lost reply may mean it executed).
     job_written: bool,
     poll_index: usize,
+    extras: Extras,
+    poll_kind: PollKind,
     yielded: bool,
     /// Who yielded the line (the lease): only that client or an owner may resume it.
     yield_holder: Option<ClientId>,
@@ -434,6 +466,8 @@ impl Bridge {
             unclean_end: None,
             job_written: false,
             poll_index: 0,
+            extras: Extras::default(),
+            poll_kind: PollKind::Plain,
             yielded: false,
             yield_holder: None,
             yield_reply: None,
@@ -752,6 +786,13 @@ impl Bridge {
                 self.raw = on;
                 Ok(())
             }
+            // Reads only: any bonded role. The counters restart, the session stays.
+            Op::LiveExtras(every) => {
+                self.extras.every = every;
+                self.extras.cycles = 0;
+                self.extras.due = false;
+                Ok(())
+            }
             Op::GetStatus => {
                 let s = self.status().encode();
                 self.respond(Some(client), counter, ResultCode::Ok, s);
@@ -975,6 +1016,11 @@ impl Bridge {
                     s.set_definition_guard(gate::guard(ecu));
                     self.session_gen = self.session_gen.wrapping_add(1);
                     self.poll_index = 0;
+                    self.extras = Extras {
+                        every: self.extras.every,
+                        seq: self.extras.seq,
+                        ..Extras::default()
+                    };
                     self.unclean_end = None;
                     self.link = Link::Ready { ecu, s, errors: 0 };
                 }
@@ -1381,8 +1427,8 @@ impl Bridge {
             &[]
         };
         if !schedule.is_empty() {
-            let lid = schedule[self.poll_index % schedule.len()];
-            self.poll_index = self.poll_index.wrapping_add(1);
+            let (lid, kind) = self.next_poll(profile, schedule);
+            self.poll_kind = kind;
             if let Ok(a) = s.request(&[0x21, lid], now) {
                 self.link = Link::Busy {
                     ecu,
@@ -1407,6 +1453,49 @@ impl Bridge {
         }
         self.link = Link::Ready { ecu, s, errors };
         Some(self.idle(now))
+    }
+
+    /// The next profile poll: the schedule in turn, and with live extras on (drive profile
+    /// only) one [`EXTRA_SCHEDULE`] read after every `every` completed cycles. The drive
+    /// schedule itself is never skipped, so lock-when-moving keeps its `21 A9` samples.
+    fn next_poll(&mut self, profile: Profile, schedule: &[u8]) -> (u8, PollKind) {
+        let extras_on = profile == Profile::Drive && self.extras.every > 0;
+        if extras_on && self.extras.due {
+            self.extras.due = false;
+            let n = EXTRA_SCHEDULE.len();
+            for k in 0..n {
+                let i = (self.extras.next + k) % n;
+                if self.extras.unsupported & (1 << i) == 0 {
+                    self.extras.next = (i + 1) % n;
+                    return (EXTRA_SCHEDULE[i], PollKind::Extra(i));
+                }
+            }
+            // Every extra frame was refused in this session: plain drive polling.
+        }
+        let pos = self.poll_index % schedule.len();
+        let lid = schedule[pos];
+        self.poll_index = self.poll_index.wrapping_add(1);
+        if !extras_on {
+            return (lid, PollKind::Plain);
+        }
+        if self.poll_index.is_multiple_of(schedule.len()) {
+            self.extras.cycles = self.extras.cycles.saturating_add(1);
+            if self.extras.cycles >= self.extras.every {
+                self.extras.cycles = 0;
+                self.extras.due = true;
+            }
+        }
+        // Forward every 21A9 and the first 21AA of a cycle: the fields Live v1 does not carry
+        // (throttle, oxygen sensors, advance, ...), each about 5 times per second.
+        let forward = lid == 0xA9 || pos == 0;
+        (
+            lid,
+            if forward {
+                PollKind::Forward
+            } else {
+                PollKind::Plain
+            },
+        )
     }
 
     #[cfg_attr(not(feature = "approvals"), allow(unused_variables))]
@@ -1717,8 +1806,17 @@ impl Bridge {
 
     fn finished(&mut self, ecu: EcuId, op: Exch, r: Result<SessionOutcome, SessionError>) {
         match (op, r) {
-            (Exch::Poll(_), Ok(SessionOutcome::Reply(Reply::Positive(p)))) => {
-                self.positive(ecu, &p)
+            (Exch::Poll(lid), Ok(SessionOutcome::Reply(Reply::Positive(p)))) => {
+                self.positive(ecu, &p);
+                if self.poll_kind != PollKind::Plain {
+                    self.extra_frame(ecu, lid, p);
+                }
+            }
+            (Exch::Poll(_), Ok(SessionOutcome::Reply(Reply::Negative { .. }))) => {
+                // The ECU does not know this extra frame: skip it for the rest of the session.
+                if let PollKind::Extra(i) = self.poll_kind {
+                    self.extras.unsupported |= 1 << i;
+                }
             }
             (Exch::Job, Ok(SessionOutcome::Reply(reply))) => self.job_reply(ecu, reply),
             (Exch::Job, Err(e)) => {
@@ -1734,6 +1832,29 @@ impl Bridge {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Forward one raw poll reply as an Extra frame (live extras on).
+    fn extra_frame(&mut self, ecu: EcuId, lid: u8, reply: Vec<u8>) {
+        if self.clients.is_empty() {
+            return;
+        }
+        let f = ExtraFrame {
+            seq: self.extras.seq,
+            t_ms: self.now_ms as u32,
+            ecu: ecu.address(),
+            request: alloc::vec![0x21, lid],
+            reply,
+        };
+        // A reply too long for one frame is not sent (never truncated).
+        if let Ok(frame) = f.encode() {
+            self.extras.seq = self.extras.seq.wrapping_add(1);
+            self.out.push_back(Output::Notify {
+                to: None,
+                channel: Channel::Extra,
+                frame,
+            });
         }
     }
 
@@ -1965,6 +2086,9 @@ impl Bridge {
                     }
                     if self.lwm.locked_by_us() {
                         flags |= live_flags::LWM_LOCKED;
+                    }
+                    if self.extras.every > 0 {
+                        flags |= live_flags::EXTRAS_ON;
                     }
                     self.live.flags = flags;
                     if !self.clients.is_empty() {

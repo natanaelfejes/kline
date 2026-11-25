@@ -143,3 +143,14 @@ impl Profile {
 pub const DRIVE_SCHEDULE: [u8; 4] = [0xAA, 0xA9, 0xAA, 0xAA];
 /// BMT parked frames: `21A3` lock state, `21A0` inputs (doors), `21A2` values (battery).
 pub const PARKED_SCHEDULE: [u8; 3] = [0xA3, 0xA0, 0xA2];
+
+/// Live extras (the "advanced" drive profile, `LIVE_EXTRAS`): the other Sirius frames that
+/// carry something the app can show, read one at a time between drive cycles, in turn. All are
+/// Tier 0 reads `21 lid`. From the 2026-11-22 drive analysis (SIRIUS-ANALYSIS 4.2 and 6) and
+/// the definition's item list: `A0` input faults (present and stored), `A1` output faults,
+/// `A2` input and state flags, `A4` output states (fan, fuel pump relay, warning lamps),
+/// `A8` fault summary, `AB` idle regulation, `AD` OBD status (misfire, oxygen sensor heaters).
+/// Not read: the copies `A3`, `A5` to `A7`, the constant `AC`, `AE`, `AF`, `82`, `E0`, the
+/// counters `C6`/`C7`, and `BD` (immobilizer related; reading would be Tier 0, but the app
+/// has no use for it).
+pub const EXTRA_SCHEDULE: [u8; 7] = [0xA0, 0xA1, 0xA2, 0xA4, 0xA8, 0xAB, 0xAD];

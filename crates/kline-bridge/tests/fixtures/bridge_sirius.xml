@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Hand-written kline-bridge fixture (not derived from any Renault file). An injection ECU at
      0x7A, KWP 5-baud, KW D0 8F (docs/protocol.md). The `21AA`/`21A9` byte positions are the ones
-     kline-bridge decodes (src/live.rs, from the car captures); names are invented and every
+     kline-bridge decodes (src/live.rs, from the car captures); `21A0`/`21AB` stand for two of the
+     live-extras frames (the others are answered negatively here); names are invented and every
      value is raw (no scaling). -->
 <Target Name="Bridge fixture injection" xmlns="http://www-diag.renault.com/2002/ECU">
 <Function Name="Injection" Address="122"/>
@@ -25,6 +26,8 @@
 <Data Name="Coolant raw"><Bits><Scaled/></Bits></Data>
 <Data Name="Air raw"><Bits><Scaled/></Bits></Data>
 <Data Name="Vehicle speed"><Bits><Scaled/></Bits></Data>
+<Data Name="Fault bits"><Bits><Scaled/></Bits></Data>
+<Data Name="Idle target"><Bits count="16"><Scaled/></Bits></Data>
 <Data Name="Output id"><Bits><Scaled/></Bits></Data>
 <Data Name="Output command"><Bits><Scaled/></Bits></Data>
 <Data Name="Output cycles"><Bits><Scaled/></Bits></Data>
@@ -51,6 +54,19 @@
 <DataItem Name="Coolant raw" Ref="1" FirstByte="8"/>
 <DataItem Name="Air raw" Ref="1" FirstByte="9"/>
 <DataItem Name="Vehicle speed" Ref="1" FirstByte="12"/>
+</Received>
+</Request>
+<Request Name="Extra A0">
+<Sent><SentBytes>21A0</SentBytes></Sent>
+<Received MinBytes="9">
+<DataItem Name="Fault bits" Ref="1" FirstByte="4"/>
+</Received>
+</Request>
+<Request Name="Extra AB">
+<Sent><SentBytes>21AB</SentBytes></Sent>
+<Received MinBytes="12">
+<DataItem Name="Engine speed" Ref="1" FirstByte="3"/>
+<DataItem Name="Idle target" Ref="1" FirstByte="5"/>
 </Received>
 </Request>
 <Request Name="Clear faults">
