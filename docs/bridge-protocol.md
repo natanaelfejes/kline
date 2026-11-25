@@ -206,8 +206,9 @@ poll.
 | 8 | request | n bytes | e.g. `21 A0` |
 | 8 + n | reply | rest | the positive reply payload from the response SID (`61 A0 ..`) |
 
-A reply that does not fit one frame is not sent (never truncated). Live notifications and the
-Live flags are unchanged except flag `0x20`.
+The Extra frame of a `21A9` or `21AA` reply is notified just before the Live notification of
+the same reply (same `t_ms`). A reply that does not fit one frame is not sent (never truncated).
+Live notifications and the Live flags are unchanged except flag `0x20`.
 
 ## Roles, pairing, counters, rate limits
 

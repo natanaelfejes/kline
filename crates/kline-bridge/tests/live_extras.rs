@@ -103,6 +103,36 @@ fn every_cycle_interleaves_one_extra_read_and_forwards_raw_replies() {
 
     let last = LiveSample::decode(rig.car.channel(Channel::Live).last().unwrap()).unwrap();
     assert_ne!(last.flags & live_flags::EXTRAS_ON, 0);
+    // A forwarded 21A9 comes right before the Live notification it belongs to.
+    let order: Vec<(Channel, Vec<u8>)> = rig
+        .car
+        .notes
+        .iter()
+        .filter(|(_, _, c, _)| matches!(c, Channel::Live | Channel::Extra))
+        .map(|(_, _, c, f)| (*c, f.clone()))
+        .collect();
+    let extra_a9_positions: Vec<usize> = rig
+        .car
+        .notes
+        .iter()
+        .filter(|(_, _, c, _)| matches!(c, Channel::Live | Channel::Extra))
+        .enumerate()
+        .filter(|(_, (_, _, c, f))| {
+            *c == Channel::Extra && ExtraFrame::decode(f).unwrap().request == [0x21, 0xA9]
+        })
+        .map(|(i, _)| i)
+        .collect();
+    assert!(!extra_a9_positions.is_empty());
+    for i in extra_a9_positions {
+        let x = ExtraFrame::decode(&order[i].1).unwrap();
+        let (c, f) = &order[i + 1];
+        assert_eq!(*c, Channel::Live, "Live follows the Extra 21A9");
+        assert_eq!(
+            LiveSample::decode(f).unwrap().t_ms,
+            x.t_ms,
+            "the same reply"
+        );
+    }
     rig.assert_wire_tier0_except(&[]);
     rig.car.sirius_journal.assert_no_writes();
     rig.car.sirius_journal.assert_no_violations();

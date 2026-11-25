@@ -1807,10 +1807,12 @@ impl Bridge {
     fn finished(&mut self, ecu: EcuId, op: Exch, r: Result<SessionOutcome, SessionError>) {
         match (op, r) {
             (Exch::Poll(lid), Ok(SessionOutcome::Reply(Reply::Positive(p)))) => {
-                self.positive(ecu, &p);
+                // The Extra frame first, so the app has the raw fields of a 21A9 before the
+                // Live notification it belongs to.
                 if self.poll_kind != PollKind::Plain {
-                    self.extra_frame(ecu, lid, p);
+                    self.extra_frame(ecu, lid, p.clone());
                 }
+                self.positive(ecu, &p);
             }
             (Exch::Poll(_), Ok(SessionOutcome::Reply(Reply::Negative { .. }))) => {
                 // The ECU does not know this extra frame: skip it for the rest of the session.
