@@ -192,4 +192,25 @@ fn transponder_status_is_published_once_per_ignition_on() {
         .collect();
     assert_eq!(published.len(), 1);
     assert!(published[0].t_ms >= 10_000);
+    // And off again: published once more (ignition bit clear).
+    let bmt = bmt_ecu(bmt_scenario(true).number("Ignition bits", 1.0)).with_change_after(
+        &[0x21, 0xA4],
+        10_000,
+        "Ignition bits",
+        Value::Number(0.0),
+    );
+    let mut rig = Rig::new(sirius_ecu(sirius_scenario()), bmt);
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(12_600);
+    rig.send(OWNER, Op::StartLive(Profile::Parked));
+    rig.run_for(30_000);
+    let bits: Vec<u8> = rig
+        .car
+        .channel(Channel::Extra)
+        .iter()
+        .map(|f| ExtraFrame::decode(f).unwrap())
+        .filter(|f| f.request == [0x21, 0xA4])
+        .map(|f| f.reply[3] & 0x01)
+        .collect();
+    assert_eq!(bits, vec![1, 0], "on at the first read, then off");
 }

@@ -160,8 +160,8 @@ pub fn select(requested: Profile, engine_may_run: bool, lwm_holds_sirius: bool) 
 
 /// BMT transponder status (`21 A4`, Tier 0, exactly 2 bytes): read every
 /// [`TRANSPONDER_EVERY`] parked cycles, because no other parked frame tells the bridge that the
-/// ignition came on; published as an Extra frame once per ignition-on (data byte 1 bit 0x01,
-/// "ignition present" in the definition, NOT VERIFIED on the car).
+/// ignition came on; published as an Extra frame once per ignition-on and once per ignition-off
+/// (data byte 1 bit 0x01, "ignition present" in the definition, NOT VERIFIED on the car).
 pub const TRANSPONDER_READ: u8 = 0xA4;
 pub const TRANSPONDER_EVERY: usize = 8;
 /// BMT doors (`21 A0`), read once more right before the bridge leaves the parked profile for the

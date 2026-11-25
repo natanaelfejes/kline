@@ -1888,9 +1888,11 @@ impl Bridge {
                     PollKind::Plain => {}
                     PollKind::Transponder => {
                         // Published once per ignition-on (and at the first read of a session
-                        // with the ignition on).
+                        // with the ignition on), and once when it goes off again (so the app
+                        // knows a battery reading is loaded or rested).
                         let ign = p.len() > 3 && p[0] == 0x61 && p[1] == lid && p[3] & 0x01 != 0;
-                        if ign && self.body_reads.ignition != Some(true) {
+                        let prev = self.body_reads.ignition;
+                        if (ign && prev != Some(true)) || (!ign && prev == Some(true)) {
                             self.extra_frame(ecu, lid, p.clone());
                         }
                         self.body_reads.ignition = Some(ign);

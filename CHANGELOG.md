@@ -22,7 +22,7 @@ work so far is grouped by milestone under `Unreleased`, newest first. The crates
 - kline-bridge (review round 2026-11-25): Status grows to 16 bytes with the bridge's own battery
   estimate (`soc`: rested OCV table, rest time from the bridge clock, parked voltage history,
   confidence); 14-byte Status still decodes. The BMT transponder status `21A4` is read in the
-  parked profile and published as an Extra frame once per ignition-on; the BMT doors are read
+  parked profile and published as an Extra frame at every ignition change; the BMT doors are read
   once more before the switch to the drive profile and published. `profile::select`.
 
 #### Changed

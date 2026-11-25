@@ -383,7 +383,8 @@ for when remote B is repaired.
   no other parked frame shows that the ignition came on. It sends the reply as an Extra frame
   (ECU `26`) once per ignition-on: at the first read with data byte 1 bit 0x01 ("ignition
   present" in the definition, NOT VERIFIED) set after a read with it clear, or at the first
-  read of a session. Read only; nothing is ever written to the BMT here.
+  read of a session; and once when the bit clears again (the app then knows a battery reading
+  is rested, not loaded). Read only; nothing is ever written to the BMT here.
 - **One master**: one kline-core `Session` at a time; a session with another ECU starts only
   after `82` StopCommunication. After a session that ended without a clean Stop (link errors,
   port failure) the next init of any ECU waits P3max (5 s), so the old ECU has timed out.
