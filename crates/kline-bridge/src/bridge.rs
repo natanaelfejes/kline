@@ -53,6 +53,9 @@ const CRITICAL_BATTERY_MV: u16 = 11_800;
 const START_WINDOW_MS: u64 = 30_000;
 /// The automatic body read waits this long at a standstill (owner decision 2026-11-25).
 const AUTO_BODY_READ_AFTER_MS: u64 = 3_000;
+/// The longest a body read keeps "engine running" (review r5: a hard bound). ours: the read
+/// takes about 5.3 s in the sim, 11 s at worst on the car.
+const SIRIUS_OWED_MS: u64 = 15_000;
 /// BMT lock-state read (`21 A3`, DCODCOND in data byte 0 bit 7).
 const BMT_LOCK_READ: [u8; 2] = [0x21, 0xA3];
 /// Sirius speed and rpm (`21 A9`, the drive profile's frame), read before a PREPARE.
@@ -483,9 +486,12 @@ pub struct Bridge {
     /// When the last body read was queued (at most one per [`profile::BODY_READ_MIN_GAP_MS`]).
     last_body_read_ms: Option<u64>,
     /// The bridge left a running engine's Sirius for a body read and has not tried the Sirius
-    /// since: the engine still counts as running (a pause the bridge made itself never ends
-    /// "engine running", review r4 MAJOR-1), so the bridge goes back to the Sirius.
-    sirius_owed: bool,
+    /// since: until this time the engine still counts as running (a pause the bridge made
+    /// itself never ends "engine running", review r4 MAJOR-1), so the bridge goes back to the
+    /// Sirius. Bounded: [`SIRIUS_OWED_MS`] after the read started, and cleared by a yield. (Not
+    /// cleared when a job for another ECU follows the read: that would end "engine running"
+    /// again, the MAJOR-1 case; the bound covers it.)
+    sirius_owed_until: Option<u64>,
     yielded: bool,
     /// Who yielded the line (the lease): only that client or an owner may resume it.
     yield_holder: Option<ClientId>,
@@ -556,7 +562,7 @@ impl Bridge {
             stopped_since: None,
             body_read_this_stop: false,
             last_body_read_ms: None,
-            sirius_owed: false,
+            sirius_owed_until: None,
             yielded: false,
             yield_holder: None,
             yield_reply: None,
@@ -824,6 +830,8 @@ impl Bridge {
             Op::YieldKline if self.yielded => r(ResultCode::Yielded),
             Op::YieldKline => {
                 self.yielded = true;
+                // The line goes to the client, not back to the Sirius (review r5 MAJOR-A).
+                self.sirius_owed_until = None;
                 self.yield_holder = Some(client);
                 self.fail_jobs(|_| true, ResultCode::Yielded);
                 // Answered Ok only once the session is stopped and the transceiver is off.
@@ -1124,7 +1132,7 @@ impl Bridge {
                         // the first 21A9 of a drive); a new drive (not the return from a body
                         // read) may read the body at its first stop.
                         self.stopped_since = None;
-                        if !self.sirius_owed {
+                        if !self.sirius_owed(now_ms) {
                             self.body_read_this_stop = false;
                         }
                     }
@@ -1795,6 +1803,9 @@ impl Bridge {
                 let lid = profile::BODY_READ_SET[*next];
                 // The body read has the doors: no pre-drive read after it.
                 self.body_reads.predrive_done = true;
+                if *next == 0 && self.sirius_owed_until.is_some() {
+                    self.sirius_owed_until = Some(now + SIRIUS_OWED_MS);
+                }
                 // The car started moving while the bridge switched over: no body read.
                 if self.last_speed.is_some_and(|(_, v)| v > 0) {
                     self.finish_job(ResultCode::VehicleMoving, Vec::new());
@@ -1833,7 +1844,7 @@ impl Bridge {
         });
         self.body_read_this_stop = true;
         self.last_body_read_ms = Some(now);
-        self.sirius_owed = self.engine_running(now);
+        self.sirius_owed_until = self.engine_running(now).then_some(now + SIRIUS_OWED_MS);
         Ok(())
     }
 
@@ -2417,21 +2428,21 @@ impl Bridge {
                     if let Some(intent) = self.lwm.on_sample(now, v.speed_kmh, v.rpm) {
                         self.lwm_intent(intent);
                     }
-                    // Standstill tracking for the body read (at most one per stop). The engine
-                    // stopped: the drive is over, the next drive starts afresh.
-                    if v.rpm == 0 {
-                        self.stopped_since = None;
-                        self.body_read_this_stop = false;
-                    } else if v.speed_kmh == 0 {
+                    // Standstill tracking for the body read (at most one per stop). An engine
+                    // stop ends the drive profile; the next drive's new Sirius session starts
+                    // afresh (see the session start).
+                    if v.speed_kmh == 0 {
                         let since = *self.stopped_since.get_or_insert(now);
                         // Automatic: at every stop over 3 s with the engine running, at most
-                        // once per stop and per 30 s.
+                        // once per stop and per 30 s; never while lock-when-moving is armed (the
+                        // read would delay a lock by up to about 11 s, review r5 MAJOR-B).
                         if v.rpm > 0
                             && now.saturating_sub(since) > AUTO_BODY_READ_AFTER_MS
                             && !self.body_read_this_stop
                             && self.body_read_gap_ok(now)
                             && !self.challenge_pending()
                             && !self.lwm.locked_by_us()
+                            && !self.lwm.is_armed()
                             && self.jobs.is_empty()
                         {
                             let _ = self.queue_body_read(None, 0);
@@ -2609,8 +2620,13 @@ impl Bridge {
             .iter()
             .any(|j| matches!(j.kind, JobKind::BodyRead { .. }))
         {
-            self.sirius_owed = false;
+            self.sirius_owed_until = None;
         }
+    }
+
+    /// See [`Bridge::sirius_owed_until`].
+    fn sirius_owed(&self, now: u64) -> bool {
+        self.sirius_owed_until.is_some_and(|u| now < u)
     }
 
     fn sirius_failed(&mut self) {
@@ -2670,7 +2686,7 @@ impl Bridge {
     /// rpm > 0 in a Sirius frame of the last 3 s (the LWM silence time).
     fn engine_running(&self, now: u64) -> bool {
         self.last_engine_sample.is_some_and(|(t, rpm)| {
-            rpm > 0 && (self.sirius_owed || now.saturating_sub(t) < self.cfg.lwm.silence_ms)
+            rpm > 0 && (self.sirius_owed(now) || now.saturating_sub(t) < self.cfg.lwm.silence_ms)
         })
     }
 

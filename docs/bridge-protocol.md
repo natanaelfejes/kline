@@ -242,31 +242,36 @@ to the Sirius. Tier 0 reads `21 lid` only; nothing is written.
 
 - Automatically at every stop: a fresh Sirius speed of 0 for more than 3 s with rpm above 0,
   at most once per stop and at most once per 30 s (also across stops: city stop-and-go every
-  10 s gets a read about every third stop), never while lock-when-moving owes an unlock, never
-  while an approval challenge is pending, and only with nothing else queued.
+  10 s gets a read about every third stop), never while lock-when-moving is armed or owes an
+  unlock (the read would delay a lock by up to about 11 s), never while an approval challenge
+  is pending, and only with nothing else queued.
 - On request: `READ_BODY_ONCE` (`12`, no arguments, body `[counter u32][12]`), the same set,
-  the same limits (`RateLimited`, `LwmActive`, `Busy`, `VehicleMoving`).
-- A stop ends when the Sirius speed rises above 0, when the engine stops (rpm 0), and when a new
-  Sirius session starts for a new drive; a new session also restarts the 3 s (no read at the
-  first `21A9` of a drive).
+  the same limits (`RateLimited`, `LwmActive`, `Busy`, `VehicleMoving`). Allowed while
+  lock-when-moving is armed (no lock owed yet): the owner asked for it, and a drive-off during
+  it locks late (below).
+- A stop ends when the Sirius speed rises above 0, and when a new Sirius session starts for a
+  new drive (an engine stop ends the drive profile, so the next drive opens a new session); a
+  new session also restarts the 3 s (no read at the first `21A9` of a drive).
 - Drive-off during the read: the bridge cannot see the Sirius speed while it is on the BMT, so
   `21A2` comes first and its speed byte is checked; above 0, the current request is finished,
   the rest is dropped (`VehicleMoving` to a READ_BODY_ONCE) and the bridge goes back to the
-  Sirius. A drive-off after the `21A2` read is seen only back on the Sirius (the remaining
-  reads take about 0.25 s).
+  Sirius. On this car the BMT speed is not wired (review 2026-11-25), so this early end never
+  fires here: a drive-off is seen only back on the Sirius, after the whole read.
 - The pause never ends "engine running": until the Sirius has been tried again after a body
   read, the engine counts as running as it did before the read, so the bridge always returns
   to the Sirius (also at a warm idle below 13.2 V with the parked profile requested) and
-  lock-when-moving keeps holding the Sirius.
+  lock-when-moving keeps holding the Sirius. Bounded: at most 15 s after the read started, and
+  ended at once by YIELD_KLINE (the line goes to the client; low-battery sleep works again).
 - A Sirius PREPARE that waited behind a body read takes a new `21A9` sample before its
   challenge (its standstill is no longer fresh) instead of being refused.
 
 Measured in the simulator (`tests/body_read.rs`, `tests/lwm_e2e.rs`): the engine data pause
 for 5.3 s (StopCommunication and BMT 5-baud init about 2.5 s, six reads about 0.3 s, Sirius
-5-baud init about 2.5 s); Live otherwise every 55 ms. With lock-when-moving armed, a drive-off
-during the read locks 8.7 s after the drive-off, against 5.7 s without a read (3 s above
-15 km/h plus the BMT switch). On the car the 5-baud inits and the BMT's answer times decide
-this (NOT VERIFIED).
+5-baud init about 2.5 s); Live otherwise every 55 ms. With lock-when-moving armed and a
+READ_BODY_ONCE, a drive-off during the read locks 8.4 s after the drive-off with the BMT speed
+not wired (8.7 s with it), against 5.7 s without a read (3 s above 15 km/h plus the BMT
+switch). On the car, with slower 5-baud inits, the worst case is about 11 s (review estimate,
+10.9 s); NOT VERIFIED.
 
 ## Battery estimate
 
@@ -593,8 +598,11 @@ check into kline-core and is a possible later cleanup.
 - The BMT `21A4` "ignition present" bit and the transponder bits; the pre-drive door read; the
   body read at a stop (that the BMT answers with the engine running, and the time the Sirius
   pause takes).
-- The body read at a stop on the car: the BMT `21A2` speed byte and its scale, the pause
-  length, and the lock-when-moving delay after a drive-off during the read.
+- The body read at a stop on the car: the pause length, and the lock-when-moving delay after
+  a drive-off during a READ_BODY_ONCE (about 11 s at worst). The BMT `21A2` speed byte is not
+  wired on this car (review), so its early end is tested only in the simulator.
+- The `0x17` DeepSleep Status before a deep sleep: delivering it needs a BLE flush before the
+  chip powers down, which the BLE skeleton does not do yet.
 - Power: every current in [Power states](#power-states), BLE advertising in light sleep (not
   made yet), the deep-sleep timer wake and RTC memory on the chip, and the pad state of the fob
   and K_PWR outputs in deep sleep (the pull-downs should hold them).

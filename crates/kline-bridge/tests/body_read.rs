@@ -332,3 +332,33 @@ fn a_body_read_that_waited_while_the_car_drove_off_is_refused() {
     assert_eq!(r.result, ResultCode::VehicleMoving);
     assert!(bmt_extras(&rig).is_empty());
 }
+
+/// Review r5 MAJOR-A: a yield during a body read. The line goes to the client, so the pause no
+/// longer stands for a running engine: at 11.5 V the bridge deep-sleeps (it would never sleep
+/// with the engine "running"), and soon, not only after the 15 s bound.
+#[test]
+fn a_yield_during_a_body_read_lets_the_bridge_sleep_on_a_low_battery() {
+    use kline_bridge::power::SleepMode;
+    let mut rig = Rig::default_car();
+    rig.connect(OWNER, Role::Owner);
+    rig.connect(AGENT, Role::Agent);
+    rig.battery(14_100);
+    rig.run_until_pred(10_000, |r| !r.car.channel(Channel::Live).is_empty());
+    rig.run_for(500);
+    rig.send(OWNER, Op::ReadBodyOnce);
+    assert!(rig.run_until_pred(10_000, |r| r
+        .car
+        .timed_payloads()
+        .iter()
+        .any(|(_, e, x)| *e == 0x26 && x == &[0x21, 0xA2])));
+    assert_eq!(
+        rig.call(AGENT, Op::YieldKline, 5_000).result,
+        ResultCode::Ok
+    );
+    rig.battery(11_500);
+    let t = rig.now();
+    rig.run_for(10 * 60_000);
+    let s = rig.car.sleeps.first().expect("asleep");
+    assert_eq!(s.2.mode(), SleepMode::DeepTimer, "{s:?}");
+    assert!(s.0 < t + 10_000, "asleep {} ms after the yield", s.0 - t);
+}

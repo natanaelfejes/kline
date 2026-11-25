@@ -171,8 +171,10 @@ pub const PREDRIVE_DOORS_READ: u8 = 0xA0;
 /// The body read at a stop (owner decision 2026-11-25, READ_BODY_ONCE and the automatic one):
 /// the whole BMT live set the bridge knows, Tier 0 reads `21 lid`, each published as an Extra
 /// frame. `A2` first: it carries the BMT's vehicle speed (data byte 3, the definition's
-/// "Vitesse du vehicule", NOT VERIFIED), the only sign of a drive-off while the bridge is away
-/// from the Sirius; a speed above 0 there ends the read at once. Then `A0` doors and switches,
+/// "Vitesse du vehicule"), the only possible sign of a drive-off while the bridge is away from
+/// the Sirius; a speed above 0 there ends the read at once. On this car the BMT speed is not
+/// wired (review 2026-11-25), so that early end never fires here; a drive-off during a read
+/// locks about 11 s late at worst. Then `A0` doors and switches,
 /// `A3` lock and remote, `A4` transponder, `A7` output states (indicators, lights, window and
 /// lock motors, interior light), `A8` stored and present faults.
 pub const BODY_READ_SET: [u8; 6] = [0xA2, 0xA0, 0xA3, 0xA4, 0xA7, 0xA8];

@@ -16,15 +16,27 @@ work so far is grouped by milestone under `Unreleased`, newest first. The crates
   door), at most once per stop and per 30 s, never while an unlock is owed or a challenge is
   pending; `READ_BODY_ONCE` reads the same set. A drive-off seen in the BMT speed (`21A2`)
   drops the rest. The engine data pause measured in the sim: 5.3 s.
-- kline-bridge: a stop also ends at an engine stop and with a new Sirius session.
+- kline-bridge: a stop also ends with a new Sirius session (an engine stop ends the drive
+  profile, so the next drive opens one).
+- kline-bridge: no automatic body read while lock-when-moving is armed (the BMT speed is not
+  wired on this car, so a drive-off during the read would lock up to about 11 s late);
+  READ_BODY_ONCE stays allowed.
 - kline-bridge: the last Status before a deep sleep carries `last_error` `0x17` DeepSleep.
+
+#### Removed
+
+- kline-bridge: the reset of the two-failure count of the charger proof at a battery dip. It
+  was redundant: a charging voltage that begins within 30 s after a dip is never charger-like.
+- kline-bridge: the unlock check in the stuck-awake watchdog (an owed unlock holds the drive
+  profile, which the watchdog already excludes).
 
 #### Fixed
 
 - kline-bridge: a body read (over 5 s away from the Sirius) ended "engine running" at a warm
   idle below 13.2 V, so the bridge fell back to the requested parked profile and
   lock-when-moving lost the Sirius (a drive-off was never locked). The engine now counts as
-  running until the Sirius has been tried again.
+  running until the Sirius has been tried again, for at most 15 s after the read started; a
+  YIELD_KLINE ends it at once (it kept "engine running" and blocked the low-battery sleep).
 - kline-bridge: a Sirius PREPARE that waited behind a body read samples `21A9` again instead
   of being refused.
 - Firmware: the RTC watchdog goes off as the last step before deep sleep, back on if the sleep
