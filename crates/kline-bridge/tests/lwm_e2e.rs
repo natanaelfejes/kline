@@ -758,19 +758,15 @@ fn r3_arming_with_the_engine_idling_is_refused() {
     rig.battery(14_100);
     rig.send(OWNER, Op::StartLive(Profile::Drive));
     rig.run_for(3_000);
-    // Refused at once, on the command (no BMT session for it).
+    // Refused: at once with a fresh Sirius sample; during the body read at this stop (the
+    // bridge away from the Sirius, the sample no longer fresh) after one new Sirius sample.
     for mv in [14_100, 12_600] {
         rig.battery(mv);
         rig.run_for(3_000);
-        let c = rig.send(OWNER, Op::LwmArm);
-        assert!(rig.run_until_pred(15_000, |r| !r.car.responses_for(OWNER, c).is_empty()));
-        let r = rig.car.responses_for(OWNER, c);
-        assert_eq!(
-            r[0].result,
-            ResultCode::VehicleMoving,
-            "at {mv} mV, not queued: {r:?}"
-        );
+        let r = rig.call(OWNER, Op::LwmArm, 15_000);
+        assert_eq!(r.result, ResultCode::VehicleMoving, "at {mv} mV: {r:?}");
     }
+    rig.car.bmt_journal.assert_no_writes();
     assert!(!rig.bridge.lwm().is_armed());
 }
 
@@ -1016,4 +1012,163 @@ fn read_body_once_keeps_the_lock_when_moving_invariants() {
         rig.call(OWNER, Op::ReadBodyOnce, 2_000).result,
         ResultCode::LwmActive
     );
+}
+
+/// Owner decision 2026-11-25: the body read at a stop. A drive-off while the bridge is on the
+/// BMT for it (here during the BMT init, the BMT's own speed says so at the first read): the rest
+/// of the read is dropped, the bridge goes back to the Sirius and lock-when-moving still locks.
+/// The sim is deterministic, so a probe run finds when the read starts.
+#[test]
+fn a_drive_off_during_the_body_read_still_locks() {
+    let probe = || {
+        let mut rig = Rig::new(
+            sirius_ecu(sirius_scenario()),
+            bmt_model(true, bmt_scenario(true)),
+        );
+        rig.connect(OWNER, Role::Owner);
+        rig.battery(14_100);
+        arm(&mut rig);
+        rig
+    };
+    let mut p = probe();
+    assert!(p.run_until_pred(30_000, |r| r
+        .car
+        .timed_payloads()
+        .iter()
+        .any(|(_, e, x)| *e == 0x26 && x == &[0x21, 0xA2])));
+    let tp = p.car.timed_payloads();
+    let first_a9 = tp
+        .iter()
+        .find(|(_, e, x)| *e == 0x7A && x == &[0x21, 0xA9])
+        .unwrap()
+        .0;
+    let a2 = tp
+        .iter()
+        .find(|(_, e, x)| *e == 0x26 && x == &[0x21, 0xA2])
+        .unwrap()
+        .0;
+    let drive_off = a2 - 500;
+
+    let sirius = sirius_ecu(sirius_scenario())
+        .with_change_after(
+            &[0x21, 0xA9],
+            drive_off - first_a9,
+            "Vehicle speed",
+            Value::Number(40.0),
+        )
+        .with_change_after(
+            &[0x21, 0xA9],
+            drive_off - first_a9,
+            "Engine speed",
+            Value::Number(2_200.0),
+        );
+    let bmt = bmt_model(true, bmt_scenario(true)).with_change_after(
+        &[0x21, 0xA2],
+        0,
+        "Body speed",
+        Value::Number(30.0),
+    );
+    let mut rig = Rig::new(sirius, bmt);
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(14_100);
+    arm(&mut rig);
+    rig.run_for(40_000);
+    // `A2` once; `A4`, `A7`, `A8` (only in the body read set here) never: the rest dropped.
+    let body: Vec<u8> = rig
+        .car
+        .timed_payloads()
+        .into_iter()
+        .filter(|(_, e, x)| *e == 0x26 && x[0] == 0x21 && matches!(x[1], 0xA2 | 0xA4 | 0xA7 | 0xA8))
+        .map(|(_, _, x)| x[1])
+        .collect();
+    assert_eq!(body, vec![0xA2], "the rest dropped");
+    let w = rig.car.bmt_journal.writes();
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert_eq!(w[0].payload, vec![0x31, 0xA0, 0x00, 0x01]);
+    let delay = w[0].t_ms - drive_off;
+    eprintln!("drive-off during the body read: lock {delay} ms after the drive-off");
+    assert!(delay < 9_000, "lock {delay} ms after the drive-off");
+    assert!(rig.bridge.lwm().locked_by_us());
+}
+
+/// City stop-and-go, a stop every 10 s (5 s stopped, 5 s at 30 km/h, engine idling): at most
+/// one body read per 30 s, never more than one per stop; armed, the first drive-off still
+/// locks and no body read follows while the unlock is owed.
+#[test]
+fn city_stop_and_go_every_ten_seconds() {
+    let sirius = || {
+        let mut e = sirius_ecu(sirius_scenario());
+        for k in 1..=24u64 {
+            let v = if k % 2 == 1 { 30.0 } else { 0.0 };
+            e = e.with_change_after(&[0x21, 0xA9], k * 5_000, "Vehicle speed", Value::Number(v));
+        }
+        e
+    };
+    let a2_times = |rig: &Rig| -> Vec<u64> {
+        rig.car
+            .timed_payloads()
+            .into_iter()
+            .filter(|(_, e, x)| *e == 0x26 && x == &[0x21, 0xA2])
+            .map(|(t, _, _)| t)
+            .collect()
+    };
+    // Not armed.
+    let mut rig = Rig::new(sirius(), bmt_model(true, bmt_scenario(true)));
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(14_100);
+    rig.run_for(125_000);
+    let reads = a2_times(&rig);
+    assert!(reads.len() >= 3, "{reads:?}");
+    assert!(reads.windows(2).all(|w| w[1] - w[0] >= 30_000), "{reads:?}");
+    rig.car.bmt_journal.assert_no_writes();
+    rig.assert_wire_tier0_except(&[]);
+
+    // Armed: the first drive-off locks; while the unlock is owed, no body read.
+    let mut rig = Rig::new(sirius(), bmt_model(true, bmt_scenario(true)));
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(14_100);
+    arm(&mut rig);
+    rig.run_for(125_000);
+    let w = rig.car.bmt_journal.writes();
+    assert_eq!(w.len(), 1, "one lock: {w:?}");
+    assert_eq!(w[0].payload, vec![0x31, 0xA0, 0x00, 0x01]);
+    assert!(rig.bridge.lwm().locked_by_us());
+    let after: Vec<u64> = a2_times(&rig)
+        .into_iter()
+        .filter(|&t| t > w[0].t_ms)
+        .collect();
+    assert!(
+        after.is_empty(),
+        "body reads while the unlock is owed: {after:?}"
+    );
+}
+
+/// Review r4 MAJOR-1: armed, a warm idle (13.0 V, below the charging voltage), a body read at a
+/// stop, then a drive-off: the pause the bridge made itself must not end "engine running", so
+/// lock-when-moving keeps the Sirius and locks.
+#[test]
+fn armed_at_a_warm_idle_a_body_read_then_a_drive_off_still_locks() {
+    let sirius = sirius_ecu(sirius_scenario()).with_change_after(
+        &[0x21, 0xA9],
+        15_000,
+        "Vehicle speed",
+        Value::Number(40.0),
+    );
+    let mut rig = Rig::new(sirius, bmt_model(true, bmt_scenario(true)));
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(14_100);
+    arm(&mut rig); // ends at 14.1 V: the engine starts
+    let n = rig.car.channel(Channel::Live).len();
+    assert!(rig.run_until_pred(15_000, |r| r.car.channel(Channel::Live).len() > n + 5));
+    rig.battery(13_000); // warm idle: only the rpm says "running"
+    rig.run_for(40_000);
+    let tp = rig.car.timed_payloads();
+    assert!(
+        tp.iter().any(|(_, e, x)| *e == 0x26 && x == &[0x21, 0xA2]),
+        "a body read at the stop"
+    );
+    let w = rig.car.bmt_journal.writes();
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert_eq!(w[0].payload, vec![0x31, 0xA0, 0x00, 0x01]);
+    assert!(rig.bridge.lwm().locked_by_us());
 }

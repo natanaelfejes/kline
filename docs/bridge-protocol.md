@@ -134,7 +134,7 @@ bridge accepted from this bond ([counters](#roles-pairing-counters-rate-limits))
 | `0F` | PREPARE_WRITE | ecu u8, identification length u8 (1..64), identification (the `61 80 ..` reply the app chose its definition from), payload | owner | approval challenge for one Tier 2 config write |
 | `10` | LWM_ACK | | owner | acknowledge a lock-when-moving give-up: clears status flag `0x80`; nothing else changes (still disarmed) |
 | `11` | LIVE_EXTRAS | every u8 (0 off, 1..16) | owner, agent | the "advanced" drive profile: one extra Sirius read after every `every` drive cycles and the raw replies as [Extra](#extra-live-extras) frames; reads only; `Ok` at once; a value above 16 does not decode (`BadFrame`) |
-| `12` | READ_BODY_ONCE | | owner, agent | one BMT body read at a stop with the engine running ([Body read at a stop](#body-read-at-a-stop)): `Accepted`, then `Ok` once BMT `21A0` and `21A3` are read and sent as Extra frames; `Ok` at once when the drive profile does not run (the parked profile reads the body anyway); `VehicleMoving` unless a fresh Sirius speed is 0; `LwmActive` while lock-when-moving owes an unlock; `RateLimited` for a second one in the same stop |
+| `12` | READ_BODY_ONCE | | owner, agent | one BMT body read at a stop with the engine running ([Body read at a stop](#body-read-at-a-stop)): `Accepted`, then `Ok` (no data) once the BMT body set (`21A2, 21A0, 21A3, 21A4, 21A7, 21A8`) is read and sent as Extra frames; `Ok` at once when the drive profile does not run (the parked profile reads the body anyway); `VehicleMoving` unless a fresh Sirius speed is 0, or when the BMT speed shows a drive-off during the read; `LwmActive` while lock-when-moving owes an unlock; `RateLimited` for a second one in the same stop or within 30 s of the last; `Busy` while an approval challenge is pending |
 
 ECU bytes: `7A` Sirius, `26` BMT, `01` Bosch 5.3 ABS (ISO8), `2C` airbag (maintainer decision
 2026-11-23: BLE scope v1 is everything the CLI can do for these four). Any other byte does not
@@ -172,6 +172,7 @@ same counter and the final result.
 | `14` | ReplyTooLong | the ECU reply does not fit one Response frame (never truncated) |
 | `15` | SessionLost | the session the challenge was made on ended (line error, keep-alive lost); nothing was sent, PREPARE again |
 | `16` | IdentificationRequired | a Tier 2 config write needs PREPARE_WRITE |
+| `17` | DeepSleep | never a Response: only the Status `last_error` of the last Status before a deep sleep ([Power states](#power-states)) |
 
 A Response never carries more than 170 data bytes; a longer reply gives `ReplyTooLong`. Raw
 splits long reads into several frames.
@@ -219,26 +220,53 @@ the same reply (same `t_ms`). A reply that does not fit one frame is not sent (n
 Live notifications and the Live flags are unchanged except flag `0x20`.
 
 The same Extra frame also carries BMT replies (`ecu` `26`): the transponder status `21A4`
-in the parked profile, the pre-drive door read `21A0`, and the body read at a stop (`21A0`,
-then `21A3`). These are sent whether live extras are on or not.
+in the parked profile, the pre-drive door read `21A0`, and the body read at a stop (`21A2`,
+`21A0`, `21A3`, `21A4`, `21A7`, `21A8`, in that order). These are sent whether live extras are
+on or not.
 
 ## Body read at a stop
 
-Owner decision 2026-11-25: the doors and locks while the engine runs, at a stop. The drive
-profile cannot read the BMT (one master on the K line), so the bridge pauses the Sirius for a
-few seconds: StopCommunication, BMT init, `21 A0` (doors) and `21 A3` (locks), each sent as an
-Extra frame (`ecu` `26`), then back to the Sirius. Tier 0 reads only; nothing is written.
+Owner decision 2026-11-25: the whole BMT live set at every stop while the engine runs. The
+drive profile cannot read the BMT (one master on the K line), so the bridge pauses the Sirius:
+StopCommunication, BMT init, the six reads, each sent as an Extra frame (`ecu` `26`), then back
+to the Sirius. Tier 0 reads `21 lid` only; nothing is written.
 
-- On request: `READ_BODY_ONCE` (`12`, no arguments). Body `[counter u32][12]`.
-- Automatically: stopped (fresh Sirius speed 0) for more than 3 s with the engine running
-  (rpm above 0), when the last pre-drive door read said a door was open, nothing else queued,
-  and no unlock owed by lock-when-moving.
-- At most once per stop (a speed above 0 starts a new stop), never while moving, never while
-  lock-when-moving owes an unlock (it must keep watching the Sirius for the engine stop). Armed
-  lock-when-moving without a lock yet does not refuse it: with speed 0 it does not lock, and
-  the Sirius is back before the car can move far (the lock waits for the next 21A9 samples).
-- Response: `Accepted` (queued), then `Ok` after the `21A3` reply (`LinkError`,
-  `NegativeReply` or `Yielded` as for REQUEST). Unbonded: `NotAllowedForRole`.
+| Order | Request | Content (BMT definition) |
+|---|---|---|
+| 1 | `21 A2` | coded values: vehicle speed (data byte 3, 1 km/h per bit assumed, NOT VERIFIED), filtered battery voltage, indicator shunt current, window current, front wiper ring |
+| 2 | `21 A0` | switch commands: doors, lights, indicators, washers, windows, central locking buttons |
+| 3 | `21 A3` | lock and remote (`TIR`) states, lock memory |
+| 4 | `21 A4` | transponder states (ignition present, key, immobilizer LED) |
+| 5 | `21 A7` | output states: indicators, lights, window and lock motors, interior light, relays |
+| 6 | `21 A8` | stored and present faults, line fault counters |
+
+- Automatically at every stop: a fresh Sirius speed of 0 for more than 3 s with rpm above 0,
+  at most once per stop and at most once per 30 s (also across stops: city stop-and-go every
+  10 s gets a read about every third stop), never while lock-when-moving owes an unlock, never
+  while an approval challenge is pending, and only with nothing else queued.
+- On request: `READ_BODY_ONCE` (`12`, no arguments, body `[counter u32][12]`), the same set,
+  the same limits (`RateLimited`, `LwmActive`, `Busy`, `VehicleMoving`).
+- A stop ends when the Sirius speed rises above 0, when the engine stops (rpm 0), and when a new
+  Sirius session starts for a new drive; a new session also restarts the 3 s (no read at the
+  first `21A9` of a drive).
+- Drive-off during the read: the bridge cannot see the Sirius speed while it is on the BMT, so
+  `21A2` comes first and its speed byte is checked; above 0, the current request is finished,
+  the rest is dropped (`VehicleMoving` to a READ_BODY_ONCE) and the bridge goes back to the
+  Sirius. A drive-off after the `21A2` read is seen only back on the Sirius (the remaining
+  reads take about 0.25 s).
+- The pause never ends "engine running": until the Sirius has been tried again after a body
+  read, the engine counts as running as it did before the read, so the bridge always returns
+  to the Sirius (also at a warm idle below 13.2 V with the parked profile requested) and
+  lock-when-moving keeps holding the Sirius.
+- A Sirius PREPARE that waited behind a body read takes a new `21A9` sample before its
+  challenge (its standstill is no longer fresh) instead of being refused.
+
+Measured in the simulator (`tests/body_read.rs`, `tests/lwm_e2e.rs`): the engine data pause
+for 5.3 s (StopCommunication and BMT 5-baud init about 2.5 s, six reads about 0.3 s, Sirius
+5-baud init about 2.5 s); Live otherwise every 55 ms. With lock-when-moving armed, a drive-off
+during the read locks 8.7 s after the drive-off, against 5.7 s without a read (3 s above
+15 km/h plus the BMT switch). On the car the 5-baud inits and the BMT's answer times decide
+this (NOT VERIFIED).
 
 ## Battery estimate
 
@@ -453,7 +481,13 @@ resets the chip: lock-when-moving is disarmed and the battery estimate's rest ti
 until the engine runs again. The firmware keeps the wake count in RTC memory; the 10 kOhm
 pull-downs keep the fob and K_PWR outputs off while their pads float in deep sleep. A hardware
 supervisor (a comparator that powers the board at about 13 V) can replace the timer wakes later.
-The firmware light-sleeps in slices that feed the watchdog, never in a busy-wait.
+The firmware light-sleeps in slices that feed the watchdog, never in a busy-wait. Before a
+deep sleep the bridge sends a last Status notification (to a connected client) with `last_error`
+`17` DeepSleep; its flag `0x01` says whether lock-when-moving was armed, so the app can tell the
+owner that the deep sleep disarms it. With no client connected nothing can be sent; the app then
+sees lock-when-moving disarmed (flag `0x01` clear) at its next connection. The firmware turns
+the RTC watchdog off as the last step before the deep sleep and back on if the hardware rejects
+the sleep (then it tries again); a panic resets the chip at once.
 - **Moving**: no non-read while a fresh (2 s) Sirius speed is above 0. A
   fresh standstill is enough for a Sirius request (its CONFIRM runs on the Sirius). For the ABS,
   BMT and airbag (their CONFIRM runs on their own session, without a speed) the engine must be
@@ -559,6 +593,8 @@ check into kline-core and is a possible later cleanup.
 - The BMT `21A4` "ignition present" bit and the transponder bits; the pre-drive door read; the
   body read at a stop (that the BMT answers with the engine running, and the time the Sirius
   pause takes).
+- The body read at a stop on the car: the BMT `21A2` speed byte and its scale, the pause
+  length, and the lock-when-moving delay after a drive-off during the read.
 - Power: every current in [Power states](#power-states), BLE advertising in light sleep (not
   made yet), the deep-sleep timer wake and RTC memory on the chip, and the pad state of the fob
   and K_PWR outputs in deep sleep (the pull-downs should hold them).

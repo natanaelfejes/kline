@@ -738,6 +738,9 @@ pub enum ResultCode {
     SessionLost = 0x15,
     /// A Tier 2 config write needs PREPARE_WRITE with the identification.
     IdentificationRequired = 0x16,
+    /// Only as Status `last_error`, in the last Status before a deep sleep: the bridge powers
+    /// down and wakes reset (lock-when-moving disarmed, see Status flag 0x01 in that frame).
+    DeepSleep = 0x17,
 }
 
 impl ResultCode {
@@ -767,6 +770,7 @@ impl ResultCode {
             0x14 => ReplyTooLong,
             0x15 => SessionLost,
             0x16 => IdentificationRequired,
+            0x17 => DeepSleep,
             _ => return None,
         })
     }

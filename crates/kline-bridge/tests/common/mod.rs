@@ -55,6 +55,9 @@ pub fn bmt_scenario(unlocked: bool) -> Scenario {
         )
         .number("Door bits", 0.0)
         .number("Supply raw", 164.0)
+        .number("Body speed", 0.0)
+        .number("Output bits", 0.0)
+        .number("Fault bits", 0.0)
         .number("Status raw", 16.0)
         .number("Ignition bits", 0.0)
         .number("Output state", 2.0)
@@ -211,6 +214,17 @@ impl Car {
     /// Payloads of the written KWP frames (`[fmt][tgt][src][payload][cs]`), with the target.
     /// One-byte writes (the ~KW2 handshake) are skipped.
     /// ISO8 frames (`[N][data][cs]`, only the ABS here) are reported with target 0x01.
+    /// [`Car::written_payloads`] with the time each frame was written.
+    pub fn timed_payloads(&self) -> Vec<(u64, u8, Vec<u8>)> {
+        let p = self.written_payloads();
+        let t = self
+            .writes
+            .iter()
+            .filter(|w| w.bytes.len() > 1)
+            .map(|w| w.t_ms);
+        t.zip(p).map(|(t, (e, x))| (t, e, x)).collect()
+    }
+
     pub fn written_payloads(&self) -> Vec<(u8, Vec<u8>)> {
         self.writes
             .iter()

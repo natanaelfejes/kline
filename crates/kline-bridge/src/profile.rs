@@ -168,6 +168,17 @@ pub const TRANSPONDER_EVERY: usize = 8;
 /// drive profile, and published as an Extra frame (the app's drive-off door check).
 pub const PREDRIVE_DOORS_READ: u8 = 0xA0;
 
+/// The body read at a stop (owner decision 2026-11-25, READ_BODY_ONCE and the automatic one):
+/// the whole BMT live set the bridge knows, Tier 0 reads `21 lid`, each published as an Extra
+/// frame. `A2` first: it carries the BMT's vehicle speed (data byte 3, the definition's
+/// "Vitesse du vehicule", NOT VERIFIED), the only sign of a drive-off while the bridge is away
+/// from the Sirius; a speed above 0 there ends the read at once. Then `A0` doors and switches,
+/// `A3` lock and remote, `A4` transponder, `A7` output states (indicators, lights, window and
+/// lock motors, interior light), `A8` stored and present faults.
+pub const BODY_READ_SET: [u8; 6] = [0xA2, 0xA0, 0xA3, 0xA4, 0xA7, 0xA8];
+/// At most one body read in this long (owner decision 2026-11-25), also across stops.
+pub const BODY_READ_MIN_GAP_MS: u64 = 30_000;
+
 /// Live extras (the "advanced" drive profile, `LIVE_EXTRAS`): the other Sirius frames that
 /// carry something the app can show, read one at a time between drive cycles, in turn. All are
 /// Tier 0 reads `21 lid`. From the 2026-11-22 drive analysis (SIRIUS-ANALYSIS 4.2 and 6) and

@@ -10,6 +10,16 @@ use kline_bridge::gate::Role;
 use kline_bridge::gatt::{live_flags, Channel, ExtraFrame, LiveSample, Op, ResultCode};
 use kline_bridge::profile::{Profile, EXTRA_SCHEDULE};
 
+/// Driving at 50 km/h: the default car idles at a standstill, where the bridge leaves the
+/// Sirius for the body read after 3 s.
+fn driving() -> kline_sim::scenario::Scenario {
+    sirius_scenario().number("Vehicle speed", 50.0)
+}
+
+fn driving_car() -> Rig {
+    Rig::new(sirius_ecu(driving()), bmt_ecu(bmt_scenario(true)))
+}
+
 fn extras(rig: &Rig) -> Vec<ExtraFrame> {
     rig.car
         .channel(Channel::Extra)
@@ -29,7 +39,7 @@ fn sirius_lids(rig: &Rig) -> Vec<u8> {
 
 #[test]
 fn off_by_default_no_extra_reads_no_extra_frames() {
-    let mut rig = Rig::default_car();
+    let mut rig = driving_car();
     rig.connect(OWNER, Role::Owner);
     rig.battery(14_100);
     rig.run_until(15_000);
@@ -42,7 +52,7 @@ fn off_by_default_no_extra_reads_no_extra_frames() {
 
 #[test]
 fn every_cycle_interleaves_one_extra_read_and_forwards_raw_replies() {
-    let mut rig = Rig::default_car();
+    let mut rig = driving_car();
     rig.connect(OWNER, Role::Owner);
     rig.battery(14_100);
     rig.run_until(5_000);
@@ -153,7 +163,7 @@ fn every_cycle_interleaves_one_extra_read_and_forwards_raw_replies() {
 
 #[test]
 fn every_n_cycles_reads_one_extra_per_n_cycles() {
-    let mut rig = Rig::default_car();
+    let mut rig = driving_car();
     rig.connect(AGENT, Role::Agent);
     rig.battery(14_100);
     rig.run_until(5_000);
@@ -199,7 +209,7 @@ fn parked_profile_never_reads_sirius_extras() {
 
 #[test]
 fn unbonded_peer_cannot_set_extras() {
-    let mut rig = Rig::default_car();
+    let mut rig = driving_car();
     rig.battery(14_100);
     let r = rig.call(STRANGER, Op::LiveExtras(1), 1_000);
     assert_eq!(r.result, ResultCode::NotAllowedForRole);
@@ -208,7 +218,7 @@ fn unbonded_peer_cannot_set_extras() {
 /// A frame refused in one session is tried again in the next one (per-session reset).
 #[test]
 fn a_refused_frame_is_tried_again_in_a_new_session() {
-    let mut rig = Rig::default_car();
+    let mut rig = driving_car();
     rig.connect(OWNER, Role::Owner);
     rig.battery(14_100);
     rig.run_until(5_000);
@@ -236,7 +246,7 @@ fn a_refused_frame_is_tried_again_in_a_new_session() {
 /// next extra read comes a full interval later.
 #[test]
 fn live_extras_restarts_the_cycle_count() {
-    let mut rig = Rig::default_car();
+    let mut rig = driving_car();
     rig.connect(OWNER, Role::Owner);
     rig.battery(14_100);
     rig.run_until(5_000);
@@ -269,7 +279,7 @@ fn a_timed_out_extra_read_is_not_counted_as_an_exchange_error() {
     use kline_bridge::gatt::BridgeState;
     use kline_sim::ecu::{FaultRule, ReplyFault};
     // Requests (from the first): 0 AA, 1 A9, 2 AA, 3 AA, 4 extra, 5 AA, ...: 3, 4 and 5 fail.
-    let sirius = sirius_ecu(sirius_scenario()).with_fault(
+    let sirius = sirius_ecu(driving()).with_fault(
         FaultRule {
             times: Some(3),
             ..FaultRule::on(&[0x21], ReplyFault::NoReply)

@@ -176,8 +176,10 @@ Built here on 2026-11-23 with esp-hal 1.2.2 (`--release`, and `--release --featu
 standing-lock,bench`); not flashed. `--features approvals` (or `standing-lock`) adds the owner
 approvals; the approval codes come from the C3 hardware RNG through getrandom's custom backend. The firmware is not a workspace member (`exclude = ["firmware"]`). What the skeleton
 does and does not do is at the top of `src/main.rs`; BLE (NimBLE via esp-idf, or esp-radio +
-TrouBLE), BLE wake-up from light sleep, deep sleep with the 32 kHz crystal and NVS (counters,
-yield holder) are W7. The default build has no approvals (Tier 0 only).
+TrouBLE), BLE wake-up from light sleep and NVS (counters, yield holder) are W7. Deep sleep is
+implemented without the 32 kHz crystal (owner decision 2026-11-25): the RTC timer on the
+internal oscillator wakes the chip every 30 s for one battery reading, the wake count is kept
+in RTC memory (docs/bridge-protocol.md "Power states"); NOT VERIFIED on the chip. The default build has no approvals (Tier 0 only).
 
 ## Bench test
 

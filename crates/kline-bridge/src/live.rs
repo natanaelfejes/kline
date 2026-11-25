@@ -116,6 +116,13 @@ pub fn bmt(payload: &[u8]) -> Option<BmtFrame> {
     }
 }
 
+/// The BMT's vehicle speed in a `21 A2` reply, km/h (data byte 3, the definition's position;
+/// the scale of 1 km/h per bit is assumed, NOT VERIFIED on the car).
+pub fn bmt_speed_kmh(payload: &[u8]) -> Option<u8> {
+    (payload.get(1) == Some(&0xA2)).then_some(())?;
+    data(payload, 0xA2, 4).map(|d| d[3])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

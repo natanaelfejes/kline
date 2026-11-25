@@ -278,10 +278,11 @@ enum JobKind {
     /// Read the BMT lock state once (after LWM_DISARM with an unlock owed): a positive read
     /// showing the doors unlocked ends the duty (review B-3).
     LockCheck,
-    /// One body read at a standstill (READ_BODY_ONCE or the automatic one): `21 lid` on the
-    /// BMT, published as an Extra frame.
+    /// The body read at a standstill (READ_BODY_ONCE or the automatic one): the
+    /// [`profile::BODY_READ_SET`] on the BMT in turn, `next` the index of the next request,
+    /// each reply published as an Extra frame.
     BodyRead {
-        lid: u8,
+        next: usize,
     },
 }
 
@@ -479,8 +480,12 @@ pub struct Bridge {
     stopped_since: Option<u64>,
     /// A body read was made in this standstill (at most one per stop).
     body_read_this_stop: bool,
-    /// The doors of the last pre-drive read were open (the automatic body read at a stop).
-    predrive_doors_open: bool,
+    /// When the last body read was queued (at most one per [`profile::BODY_READ_MIN_GAP_MS`]).
+    last_body_read_ms: Option<u64>,
+    /// The bridge left a running engine's Sirius for a body read and has not tried the Sirius
+    /// since: the engine still counts as running (a pause the bridge made itself never ends
+    /// "engine running", review r4 MAJOR-1), so the bridge goes back to the Sirius.
+    sirius_owed: bool,
     yielded: bool,
     /// Who yielded the line (the lease): only that client or an owner may resume it.
     yield_holder: Option<ClientId>,
@@ -550,7 +555,8 @@ impl Bridge {
             last_client_ms: now_ms,
             stopped_since: None,
             body_read_this_stop: false,
-            predrive_doors_open: false,
+            last_body_read_ms: None,
+            sirius_owed: false,
             yielded: false,
             yield_holder: None,
             yield_reply: None,
@@ -721,8 +727,6 @@ impl Bridge {
         if mv < self.cfg.low_battery_mv {
             self.low_since.get_or_insert(now_ms);
             self.last_dip_ms = Some(now_ms);
-            // New evidence (maybe a start): the two-failure count for the silent proof restarts.
-            self.sirius_init_failures = 0;
         } else {
             self.low_since = None;
         }
@@ -1116,6 +1120,13 @@ impl Bridge {
                     s.set_definition_guard(gate::guard(ecu));
                     if ecu == EcuId::Sirius {
                         self.sirius_init_failures = 0;
+                        // A new Sirius session starts a new standstill (no instant body read at
+                        // the first 21A9 of a drive); a new drive (not the return from a body
+                        // read) may read the body at its first stop.
+                        self.stopped_since = None;
+                        if !self.sirius_owed {
+                            self.body_read_this_stop = false;
+                        }
                     }
                     self.session_gen = self.session_gen.wrapping_add(1);
                     self.poll_index = 0;
@@ -1408,6 +1419,12 @@ impl Bridge {
                     if let Some((wake, reason)) = self.should_sleep(now) {
                         self.fail_jobs(|_| true, ResultCode::LowBattery);
                         self.asleep = true;
+                        if reason.mode() == crate::power::SleepMode::DeepTimer {
+                            // The last Status before the chip powers down (review r4 minor 5):
+                            // a deep-sleep wake resets, so an armed lock-when-moving (flag 0x01
+                            // here) is disarmed after it.
+                            self.last_error = ResultCode::DeepSleep as u8;
+                        }
                         let st = self.status();
                         self.last_status = Some(st);
                         if !self.clients.is_empty() {
@@ -1663,6 +1680,8 @@ impl Bridge {
 
     #[cfg_attr(not(feature = "approvals"), allow(unused_variables))]
     fn start_job(&mut self, ecu: EcuId, s: &mut Session, now: u64) -> JobStart {
+        #[cfg(feature = "approvals")]
+        let resample = self.fresh_speed(now).is_none() && self.moving_for(EcuId::Sirius, now);
         let Some(job) = self.jobs.front_mut() else {
             return JobStart::Nothing;
         };
@@ -1674,6 +1693,24 @@ impl Bridge {
                     Err(e) => {
                         let code = session_error_code(&e);
                         self.finish_job(code, Vec::new());
+                        JobStart::Nothing
+                    }
+                }
+            }
+            // A Sirius PREPARE that waited (a body read away from the Sirius) with the engine
+            // running: the standstill it saw is no longer fresh, so it samples again instead
+            // of being refused.
+            #[cfg(feature = "approvals")]
+            JobKind::Prepare {
+                ecu: EcuId::Sirius,
+                sample,
+                ..
+            } if !*sample && resample && ecu == EcuId::Sirius => {
+                *sample = true;
+                match s.request(&SIRIUS_SAMPLE, now) {
+                    Ok(a) => JobStart::Exchange(a),
+                    Err(_) => {
+                        self.finish_job(ResultCode::VehicleMoving, Vec::new());
                         JobStart::Nothing
                     }
                 }
@@ -1754,8 +1791,10 @@ impl Bridge {
                     JobStart::Nothing
                 }
             },
-            JobKind::BodyRead { lid } => {
-                let lid = *lid;
+            JobKind::BodyRead { next } => {
+                let lid = profile::BODY_READ_SET[*next];
+                // The body read has the doors: no pre-drive read after it.
+                self.body_reads.predrive_done = true;
                 // The car started moving while the bridge switched over: no body read.
                 if self.last_speed.is_some_and(|(_, v)| v > 0) {
                     self.finish_job(ResultCode::VehicleMoving, Vec::new());
@@ -1772,8 +1811,8 @@ impl Bridge {
         }
     }
 
-    /// Queue the body read (doors `21 A0`, lock `21 A3`) for this standstill; the answer to
-    /// `client` (if any) follows the second read.
+    /// Queue the body read ([`profile::BODY_READ_SET`]) for this standstill; the answer to
+    /// `client` (if any) follows the last read.
     fn queue_body_read(
         &mut self,
         client: Option<ClientId>,
@@ -1782,23 +1821,19 @@ impl Bridge {
         if self.yielded {
             return Err(ResultCode::Yielded);
         }
-        if self.jobs.len() + 2 > self.cfg.max_queue {
+        if self.jobs.len() >= self.cfg.max_queue {
             return Err(ResultCode::Busy);
         }
         let now = self.now_ms;
         self.jobs.push_back(Job {
-            client: None,
-            counter: 0,
-            kind: JobKind::BodyRead { lid: 0xA0 },
-            since_ms: now,
-        });
-        self.jobs.push_back(Job {
             client,
             counter,
-            kind: JobKind::BodyRead { lid: 0xA3 },
+            kind: JobKind::BodyRead { next: 0 },
             since_ms: now,
         });
         self.body_read_this_stop = true;
+        self.last_body_read_ms = Some(now);
+        self.sirius_owed = self.engine_running(now);
         Ok(())
     }
 
@@ -1824,10 +1859,28 @@ impl Bridge {
         if self.lwm.locked_by_us() {
             return Err(ResultCode::LwmActive);
         }
-        if self.body_read_this_stop {
+        if self.body_read_this_stop || !self.body_read_gap_ok(now) {
             return Err(ResultCode::RateLimited);
         }
+        // A challenge keeps its session (the owner is typing the code).
+        if self.challenge_pending() {
+            return Err(ResultCode::Busy);
+        }
         self.queue_body_read(Some(client), counter)
+    }
+
+    /// A live approval challenge holds its session.
+    fn challenge_pending(&self) -> bool {
+        #[cfg(feature = "approvals")]
+        return self.pending_live();
+        #[cfg(not(feature = "approvals"))]
+        false
+    }
+
+    /// The last body read was queued at least [`profile::BODY_READ_MIN_GAP_MS`] ago.
+    fn body_read_gap_ok(&self, now: u64) -> bool {
+        self.last_body_read_ms
+            .is_none_or(|t| now.saturating_sub(t) >= profile::BODY_READ_MIN_GAP_MS)
     }
 
     #[cfg(feature = "approvals")]
@@ -2063,14 +2116,9 @@ impl Bridge {
                             self.sirius_silent_at = None;
                         }
                     }
-                    PollKind::PreDrive => {
-                        self.predrive_doors_open = matches!(
-                            live::bmt(&p),
-                            Some(BmtFrame::Doors { front_open, rear_open }) if front_open || rear_open
-                        );
+                    PollKind::PreDrive | PollKind::Forward | PollKind::Extra(_) => {
                         self.extra_frame(ecu, lid, p.clone())
                     }
-                    PollKind::Forward | PollKind::Extra(_) => self.extra_frame(ecu, lid, p.clone()),
                 }
                 self.positive(ecu, &p);
             }
@@ -2179,14 +2227,33 @@ impl Bridge {
             }
         }
         if let Some(Job {
-            kind: JobKind::BodyRead { lid },
+            kind: JobKind::BodyRead { next },
             ..
         }) = self.jobs.front()
         {
+            let next = *next;
+            let lid = profile::BODY_READ_SET[next];
+            let mut moving = false;
             if let Reply::Positive(p) = &reply {
-                let lid = *lid;
                 self.extra_frame(EcuId::Bmt, lid, p.clone());
+                moving = live::bmt_speed_kmh(p).is_some_and(|v| v > 0);
             }
+            if moving {
+                // The car drives off: this request is done, the rest is dropped, back to the
+                // Sirius (lock-when-moving and the engine data need it).
+                self.stopped_since = None;
+                self.finish_job(ResultCode::VehicleMoving, Vec::new());
+            } else if next + 1 >= profile::BODY_READ_SET.len() {
+                self.finish_job(ResultCode::Ok, Vec::new());
+            } else if let Some(Job {
+                kind: JobKind::BodyRead { next },
+                ..
+            }) = self.jobs.front_mut()
+            {
+                // A refused frame is skipped; the next request goes out on the next pass.
+                *next += 1;
+            }
+            return;
         }
         let Some(job) = self.jobs.front_mut() else {
             return;
@@ -2314,6 +2381,8 @@ impl Bridge {
         let now = self.now_ms;
         match ecu {
             EcuId::Sirius => {
+                // The Sirius was tried again after a body read: its own samples decide now.
+                self.sirius_tried();
                 // (A Sirius answer needs no step here: an rpm above 0 is a running engine, an
                 // rpm 0 21A9 at a charging voltage is the engine-off proof.)
                 let mut changed = false;
@@ -2348,15 +2417,20 @@ impl Bridge {
                     if let Some(intent) = self.lwm.on_sample(now, v.speed_kmh, v.rpm) {
                         self.lwm_intent(intent);
                     }
-                    // Standstill tracking for the body read (at most one per stop).
-                    if v.speed_kmh == 0 {
+                    // Standstill tracking for the body read (at most one per stop). The engine
+                    // stopped: the drive is over, the next drive starts afresh.
+                    if v.rpm == 0 {
+                        self.stopped_since = None;
+                        self.body_read_this_stop = false;
+                    } else if v.speed_kmh == 0 {
                         let since = *self.stopped_since.get_or_insert(now);
-                        // Automatic: stopped over 3 s with the engine running and the doors
-                        // open at the pre-drive read.
+                        // Automatic: at every stop over 3 s with the engine running, at most
+                        // once per stop and per 30 s.
                         if v.rpm > 0
                             && now.saturating_sub(since) > AUTO_BODY_READ_AFTER_MS
-                            && self.predrive_doors_open
                             && !self.body_read_this_stop
+                            && self.body_read_gap_ok(now)
+                            && !self.challenge_pending()
                             && !self.lwm.locked_by_us()
                             && self.jobs.is_empty()
                         {
@@ -2494,11 +2568,11 @@ impl Bridge {
     }
 
     /// The stuck-awake watchdog (owner decision 2026-11-25): no client for `stuck_awake_ms`, not
-    /// in the drive profile, nothing queued, no unlock owed.
+    /// in the drive profile, nothing queued. (An owed unlock holds the drive profile, so it is
+    /// covered by the profile check.)
     fn stuck_awake(&self, now: u64) -> bool {
         self.clients.is_empty()
             && self.jobs.is_empty()
-            && !self.lwm.locked_by_us()
             && self.effective_profile(now) != Profile::Drive
             && now.saturating_sub(self.last_client_ms) >= self.cfg.stuck_awake_ms
     }
@@ -2527,7 +2601,20 @@ impl Bridge {
     }
 
     /// The bridge tried the Sirius and it did not answer.
+    /// The Sirius answered or failed: unless a body read is still queued (the reply of a poll
+    /// in flight when it was queued), the pause is over.
+    fn sirius_tried(&mut self) {
+        if !self
+            .jobs
+            .iter()
+            .any(|j| matches!(j.kind, JobKind::BodyRead { .. }))
+        {
+            self.sirius_owed = false;
+        }
+    }
+
     fn sirius_failed(&mut self) {
+        self.sirius_tried();
         if let Some(intent) = self.lwm.on_sirius_failure(self.now_ms) {
             self.lwm_intent(intent);
         }
@@ -2582,8 +2669,9 @@ impl Bridge {
 
     /// rpm > 0 in a Sirius frame of the last 3 s (the LWM silence time).
     fn engine_running(&self, now: u64) -> bool {
-        self.last_engine_sample
-            .is_some_and(|(t, rpm)| rpm > 0 && now.saturating_sub(t) < self.cfg.lwm.silence_ms)
+        self.last_engine_sample.is_some_and(|(t, rpm)| {
+            rpm > 0 && (self.sirius_owed || now.saturating_sub(t) < self.cfg.lwm.silence_ms)
+        })
     }
 
     /// Ignition on as far as the bridge can tell: engine running or charging voltage.

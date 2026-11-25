@@ -875,3 +875,33 @@ fn r4_a_moving_sample_refuses_before_the_target_ecu() {
         "refused on the Sirius"
     );
 }
+
+/// Review r4 minor 3: a pending owner challenge keeps its Sirius session: no automatic body
+/// read at the stop while the owner types, READ_BODY_ONCE answers `Busy`, and the code still
+/// works.
+#[test]
+fn a_pending_challenge_holds_off_the_body_read() {
+    let mut rig = rig();
+    rig.battery(14_100);
+    rig.run_until_pred(10_000, |r| !r.car.channel(Channel::Live).is_empty());
+    rig.run_for(500);
+    let (id, code) = challenge(&rig.call(OWNER, clear_dtc(), 15_000));
+    assert_eq!(
+        rig.call(OWNER, Op::ReadBodyOnce, 2_000).result,
+        ResultCode::Busy
+    );
+    rig.run_for(8_000); // the stop is over 3 s old
+    assert!(
+        !rig.car.written_payloads().iter().any(|(e, _)| *e == 0x26),
+        "no BMT session while the challenge is pending"
+    );
+    let r = rig.call(
+        OWNER,
+        Op::Confirm {
+            challenge: id,
+            code,
+        },
+        10_000,
+    );
+    assert_eq!(r.result, ResultCode::Ok, "{r:?}");
+}

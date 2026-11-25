@@ -92,3 +92,32 @@ fn the_watchdog_never_stops_the_drive_profile() {
         .count();
     assert!(late > 0 && later > 3, "Sirius still read: {later}");
 }
+
+/// Review r4 minor 5: the last Status before a deep sleep says so (`last_error` DeepSleep), with
+/// flag 0x01 telling whether lock-when-moving was armed (a deep-sleep wake disarms it).
+#[test]
+fn the_last_status_before_a_deep_sleep_says_deep_sleep() {
+    use kline_bridge::gatt::{Channel, ResultCode, Status};
+    let sirius = sirius_ecu(sirius_scenario().number("Engine speed", 0.0));
+    let mut rig = Rig::new(sirius, bmt_ecu(bmt_scenario(true)));
+    rig.connect(OWNER, Role::Owner);
+    rig.battery(11_900);
+    rig.run_for(30_000);
+    let s = rig.car.sleeps.first().expect("asleep");
+    assert_eq!(s.2.mode(), SleepMode::DeepTimer, "{s:?}");
+    let st = Status::decode(rig.car.channel(Channel::Status).last().unwrap()).unwrap();
+    assert_eq!(st.last_error, ResultCode::DeepSleep as u8);
+}
+
+/// Light sleeps do not say DeepSleep.
+#[test]
+fn an_idle_sleep_is_not_reported_as_deep() {
+    use kline_bridge::gatt::ResultCode;
+    let sirius = sirius_ecu(sirius_scenario().number("Engine speed", 0.0));
+    let mut rig = Rig::new(sirius, bmt_ecu(bmt_scenario(true)));
+    rig.battery(12_600);
+    rig.run_for(5 * 60_000);
+    let s = rig.car.sleeps.first().expect("asleep");
+    assert_eq!(s.2.mode(), SleepMode::LightAdvertising, "{s:?}");
+    assert_ne!(rig.bridge.status().last_error, ResultCode::DeepSleep as u8);
+}

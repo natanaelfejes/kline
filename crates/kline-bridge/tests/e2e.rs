@@ -16,9 +16,18 @@ fn last_status(rig: &Rig) -> Status {
     Status::decode(rig.car.channel(Channel::Status).last().expect("a status")).unwrap()
 }
 
+/// Driving at 50 km/h (the default car idles at a standstill, where the bridge reads the body
+/// after 3 s).
+fn driving_car() -> Rig {
+    Rig::new(
+        sirius_ecu(sirius_scenario().number("Vehicle speed", 50.0)),
+        bmt_ecu(bmt_scenario(true)),
+    )
+}
+
 #[test]
 fn boot_inits_the_sirius_and_streams_the_drive_profile() {
-    let mut rig = Rig::default_car();
+    let mut rig = driving_car(); // moving: no body read at a stop
     rig.connect(OWNER, Role::Owner);
     rig.battery(14_100);
     rig.run_until(10_000);
@@ -46,7 +55,7 @@ fn boot_inits_the_sirius_and_streams_the_drive_profile() {
         .collect();
     let last = live.last().unwrap();
     assert_eq!(last.rpm, 850);
-    assert_eq!(last.speed_kmh, 0);
+    assert_eq!(last.speed_kmh, 50);
     assert_eq!(last.coolant_c, 90);
     assert_eq!(last.batt_cv, 1430);
     assert_eq!(last.inj_us, 2400);
@@ -361,7 +370,7 @@ fn reconnects_after_the_ecu_stops_answering() {
 
 #[test]
 fn yield_releases_the_k_line_and_resume_takes_it_back() {
-    let mut rig = Rig::default_car();
+    let mut rig = driving_car(); // moving: no body read at a stop
     rig.connect(OWNER, Role::Owner);
     rig.connect(AGENT, Role::Agent);
     rig.battery(14_100);

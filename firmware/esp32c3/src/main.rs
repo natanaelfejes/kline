@@ -126,8 +126,9 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         )
     };
     esp_println::println!("panic: {info}");
-    // Let the watchdog reset the chip; the pull-downs hold both outputs off meanwhile.
-    loop {}
+    // Reset now, without relying on the watchdog (it is off around a deep sleep); the
+    // pull-downs hold both outputs off during the reset.
+    esp_hal::system::software_reset()
 }
 
 /// UART1 + BREAK_N + K_PWR around the L9637D.
@@ -365,21 +366,32 @@ const DEEP_MAGIC: u32 = 0xC110_DEE9;
 static mut DEEP_MARK: u32 = 0;
 #[esp_hal::ram(unstable(rtc_fast, persistent))]
 static mut DEEP_HIGH: u8 = 0;
+#[esp_hal::ram(unstable(rtc_fast, persistent))]
+static mut DEEP_WAKE: u32 = 0;
 
-/// Deep sleep for [`DEEP_WAKE_MS`] (kline-bridge `power`): no BLE, one ADC reading per wake in
-/// [`resume_from_deep_sleep`]. Called with the K line already released (the bridge sleeps only
-/// with no session). The fob and K_PWR pads float during deep sleep; the 10 kOhm pull-downs
-/// keep both off (docs/bridge-hardware.md).
-fn deep_sleep(low_power: &mut LowPower<'_>, rwdt: &mut Rwdt, high: u8) -> ! {
+/// Deep sleep with a timer wake after `wake_ms` (kline-bridge `power`): no BLE, one ADC reading
+/// per wake in [`resume_from_deep_sleep`]. Called with the K line already released (the bridge
+/// sleeps only with no session). The fob and K_PWR pads float during deep sleep; the 10 kOhm
+/// pull-downs keep both off (docs/bridge-hardware.md). Never returns: the wake resets the chip.
+fn deep_sleep(low_power: &mut LowPower<'_>, rwdt: &mut Rwdt, high: u8, wake_ms: u64) -> ! {
     // SAFETY: single-threaded; nothing else touches these statics.
     unsafe {
         DEEP_HIGH = high;
+        DEEP_WAKE = u32::try_from(wake_ms).unwrap_or(u32::MAX);
         DEEP_MARK = DEEP_MAGIC;
     }
-    // The RTC watchdog would reset the chip in the middle of the sleep.
-    rwdt.disable();
-    low_power.set_wakeup_deadline(Instant::now() + Duration::from_millis(DEEP_WAKE_MS));
-    low_power.sleep_deep(RtcSleepConfig::deep())
+    loop {
+        low_power.set_wakeup_deadline(Instant::now() + Duration::from_millis(wake_ms));
+        // The RTC watchdog would reset the chip in the middle of the sleep, so it goes off as
+        // the very last step; a panic before this still resets (the panic handler resets too).
+        rwdt.disable();
+        low_power.sleep_deep_with_rejection(RtcSleepConfig::deep());
+        // Rejected (a wake source was already asserted): the watchdog back on, and try again.
+        // Some pads may be disconnected now; the pull-downs hold the fob and K_PWR off, and
+        // the bridge never runs again before the reset of the wake.
+        rwdt.enable();
+        rwdt.feed();
+    }
 }
 
 /// At boot after a deep-sleep wake: one battery reading, then back to deep sleep unless
@@ -387,7 +399,7 @@ fn deep_sleep(low_power: &mut LowPower<'_>, rwdt: &mut Rwdt, high: u8) -> ! {
 /// on any other reset, and on resume.
 fn resume_from_deep_sleep(low_power: &mut LowPower<'_>, rwdt: &mut Rwdt) {
     // SAFETY: single-threaded; read before anything writes them.
-    let (mark, high) = unsafe { (DEEP_MARK, DEEP_HIGH) };
+    let (mark, high, wake_ms) = unsafe { (DEEP_MARK, DEEP_HIGH, DEEP_WAKE) };
     if reset_reason(Cpu::ProCpu) != Some(SocResetReason::CoreDeepSleep) || mark != DEEP_MAGIC {
         // SAFETY: as above.
         unsafe { DEEP_MARK = 0 };
@@ -399,7 +411,12 @@ fn resume_from_deep_sleep(low_power: &mut LowPower<'_>, rwdt: &mut Rwdt) {
         unsafe { DEEP_MARK = 0 };
         return;
     }
-    deep_sleep(low_power, rwdt, wake.high)
+    let wake_ms = if wake_ms == 0 {
+        DEEP_WAKE_MS
+    } else {
+        u64::from(wake_ms)
+    };
+    deep_sleep(low_power, rwdt, wake.high, wake_ms)
 }
 
 impl Power for Board<'_> {
@@ -409,7 +426,8 @@ impl Power for Board<'_> {
     fn sleep(&mut self, wake_after_ms: Option<u64>, reason: SleepReason) {
         esp_println::println!("sleep {reason:?} {wake_after_ms:?}");
         if reason.mode() == SleepMode::DeepTimer {
-            deep_sleep(&mut self.low_power, &mut self.rwdt, 0);
+            let wake_ms = wake_after_ms.unwrap_or(DEEP_WAKE_MS);
+            deep_sleep(&mut self.low_power, &mut self.rwdt, 0, wake_ms);
         }
         let end = self.now_ms() + wake_after_ms.unwrap_or(1_000);
         while self.now_ms() < end {
